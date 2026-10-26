@@ -1,0 +1,303 @@
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace SupremeNuclear
+{
+    internal static class GameApi
+    {
+        private static MapSettings _mapSettings;
+
+        public static bool InMission =>
+            GameManager.gameState == GameState.SinglePlayer ||
+            GameManager.gameState == GameState.Multiplayer;
+
+        public static CameraStateManager CamManager => SceneSingleton<CameraStateManager>.i;
+
+        /// <summary>Сброс кэшей при смене сцены.</summary>
+        public static void ResetSceneCache()
+        {
+            _mapSettings = null;
+            _hpCache.Clear();
+            _airbaseBuildings.Clear();
+            _nextAirbaseScan = 0f;
+        }
+
+        /// <summary>Заготовленное изображение карты (MapSettings.MapImage); null на картах без него.</summary>
+        public static bool TryGetMapImage(out Sprite sprite)
+        {
+            if (_mapSettings == null)
+                _mapSettings = Object.FindObjectOfType<MapSettings>();
+            sprite = _mapSettings != null ? _mapSettings.MapImage : null;
+            return sprite != null;
+        }
+
+        /// <summary>Границы карты (min/max по XZ), центр — глобальный ноль (как в GC).</summary>
+        public static bool TryGetMapBounds(out Vector2 min, out Vector2 max)
+        {
+            if (_mapSettings == null)
+                _mapSettings = Object.FindObjectOfType<MapSettings>();
+            if (_mapSettings == null)
+            {
+                min = new Vector2(-60000f, -60000f);
+                max = new Vector2(60000f, 60000f);
+                return false;
+            }
+            // Префаб карты может стоять со смещением от глобального нуля —
+            // центр прямоугольника берём с его трансформа.
+            Vector2 s = _mapSettings.MapSize;
+            Vector3 c = _mapSettings.transform.position;
+            min = new Vector2(c.x - s.x * 0.5f, c.z - s.y * 0.5f);
+            max = new Vector2(c.x + s.x * 0.5f, c.z + s.y * 0.5f);
+            return true;
+        }
+
+        // Счётчик сдвигов floating origin: если камера «дерётся» с началом координат,
+        // счётчик в секунду будет высоким при неподвижной камере.
+        private static Vector3 _lastOriginPos;
+        private static float _shiftCountWindow;
+        private static int _shiftCount;
+        public static int OriginShiftsPerSecond { get; private set; }
+
+        public static void TickOriginShiftMonitor()
+        {
+            Transform origin = Datum.origin;
+            if (origin != null)
+            {
+                if (_lastOriginPos != origin.position && _lastOriginPos != default)
+                    _shiftCount++;
+                _lastOriginPos = origin.position;
+            }
+            _shiftCountWindow += Time.unscaledDeltaTime;
+            if (_shiftCountWindow >= 1f)
+            {
+                OriginShiftsPerSecond = _shiftCount;
+                _shiftCount = 0;
+                _shiftCountWindow = 0f;
+            }
+        }
+
+
+        public static Camera MainCam => CamManager != null ? CamManager.mainCamera : null;
+
+        public static bool TryGetLocalHQ(out FactionHQ hq) => GameManager.GetLocalHQ(out hq);
+
+        /// <summary>Луч экранной точки; вызывать только при готовой камере.</summary>
+        public static Ray ScreenRay(Vector3 screenPos)
+        {
+            var cam = MainCam;
+            return cam != null
+                ? cam.ScreenPointToRay(screenPos)
+                : new Ray(Vector3.zero, Vector3.down);
+        }
+
+        public static bool TryGetGroundPoint(Ray ray, out Vector3 point)
+        {
+            // Дальность должна покрывать зум «из космоса» (сотни км высоты).
+            const float maxDist = 500000f;
+            if (Physics.Raycast(ray, out var hit, maxDist, PhysicsLayers.StaticsMask))
+            {
+                point = hit.point;
+                return true;
+            }
+            if (ray.direction.y < -0.001f)
+            {
+                float t = (Datum.LocalSeaY - ray.origin.y) / ray.direction.y;
+                if (t > 0f && t < maxDist)
+                {
+                    point = ray.origin + ray.direction * t;
+                    return true;
+                }
+            }
+            point = Vector3.zero;
+            return false;
+        }
+
+        public static float GroundY(float x, float z)
+        {
+            var origin = new Vector3(x, 9000f, z);
+            if (Physics.Linecast(origin, new Vector3(x, -9000f, z), out var hit, PhysicsLayers.StaticsMask))
+                return hit.point.y;
+            return Datum.LocalSeaY;
+        }
+
+        public static float CameraFloorY(Vector3 pos) =>
+            Mathf.Max(GroundY(pos.x, pos.z), Datum.LocalSeaY);
+
+        // Кэш HP-долей юнитов (обновление 5 Гц): аггрегат partLookup.hitPoints считаем здесь,
+        // чтобы OnGUI и панели читали готовое число без аллокаций.
+        private static readonly Dictionary<Unit, float> _hpCache = new Dictionary<Unit, float>();
+        private static float _nextHpRefresh;
+
+        /// <summary>Доля HP юнита 0..1 (агрегат по деталям; 1 = не повреждён).</summary>
+        public static float HpFraction(Unit unit) =>
+            unit != null && _hpCache.TryGetValue(unit, out float v) ? v : 1f;
+
+        public static void TickHpCache()
+        {
+            if (Time.unscaledTime < _nextHpRefresh)
+                return;
+            _nextHpRefresh = Time.unscaledTime + 0.2f;
+            _hpCache.Clear();
+            foreach (Unit unit in UnitRegistry.allUnits)
+            {
+                if (unit == null || unit.disabled)
+                    continue;
+                List<UnitPart> parts = unit.partLookup;
+                if (parts == null || parts.Count == 0)
+                    continue;
+                float sum = 0f;
+                int n = 0;
+                for (int i = 0; i < parts.Count; i++)
+                {
+                    UnitPart p = parts[i];
+                    if (p == null)
+                        continue;
+                    sum += p.hitPoints;
+                    n++;
+                }
+                _hpCache[unit] = n > 0 ? Mathf.Clamp01(sum / (n * 100f)) : 1f;
+            }
+        }
+
+        public static bool IsSelectableFriendly(Unit unit, FactionHQ localHq)
+        {
+            if (unit == null || localHq == null || unit.NetworkHQ != localHq)
+                return false;
+            return unit is GroundVehicle || unit is Ship || unit is Aircraft || unit is VehicleDepot ||
+                   EconomyService.IsExtractor(unit);
+        }
+
+        /// <summary>Свои без ограничения по типу (для иконок: наземка/флот/авиация).</summary>
+        public static bool IsFriendlyUnit(Unit unit, FactionHQ localHq) =>
+            unit != null && localHq != null && unit.NetworkHQ == localHq;
+
+        /// <summary>Пригодность точки для постройки: не вода и не склон
+        /// (проба высот ±20 м, как у месторождений экономики).</summary>
+        public static bool IsSiteBuildable(float x, float z)
+        {
+            float h0 = GroundY(x, z);
+            if (h0 <= Datum.LocalSeaY + 3f)
+                return false;
+            const float probe = 20f;
+            return Mathf.Abs(GroundY(x + probe, z) - h0) <= 25f &&
+                   Mathf.Abs(GroundY(x - probe, z) - h0) <= 25f &&
+                   Mathf.Abs(GroundY(x, z + probe) - h0) <= 25f &&
+                   Mathf.Abs(GroundY(x, z - probe) - h0) <= 25f;
+        }
+
+        /// <summary>Пик юнита ПО ТЕЛУ (экранный bbox всех мешей): клик/шифт-клик в любую
+        /// часть модели выделяет её — не надо попадать в точку-центр. Выбирается объект
+        /// с наименьшей площадью на экране (ближний из перекрывающихся).</summary>
+        public static Unit TryPickUnitByBody(Camera cam, Vector2 mouse, FactionHQ localHq)
+        {
+            if (cam == null)
+                return null;
+            Unit best = null;
+            float bestArea = float.MaxValue;
+            foreach (Unit unit in UnitRegistry.allUnits)
+            {
+                if (unit == null || unit.disabled || !IsSelectableFriendly(unit, localHq))
+                    continue;
+                Bounds bounds = default;
+                bool has = false;
+                foreach (Renderer r in unit.GetComponentsInChildren<Renderer>())
+                {
+                    if (r == null || !r.enabled || r.GetType().Name == "ParticleSystemRenderer")
+                        continue;
+                    if (!has)
+                    {
+                        bounds = r.bounds;
+                        has = true;
+                    }
+                    else
+                        bounds.Encapsulate(r.bounds);
+                }
+                if (!has)
+                    continue;
+                float minX = float.MaxValue, maxX = float.MinValue;
+                float minY = float.MaxValue, maxY = float.MinValue;
+                Vector3 e = bounds.extents;
+                bool front = false;
+                for (int ci = 0; ci < 8; ci++)
+                {
+                    Vector3 corner = bounds.center + new Vector3(
+                        (ci & 1) == 0 ? -e.x : e.x,
+                        (ci & 2) == 0 ? -e.y : e.y,
+                        (ci & 4) == 0 ? -e.z : e.z);
+                    Vector3 sp = cam.WorldToScreenPoint(corner);
+                    if (sp.z <= 0f)
+                        continue;
+                    front = true;
+                    minX = Mathf.Min(minX, sp.x); maxX = Mathf.Max(maxX, sp.x);
+                    minY = Mathf.Min(minY, sp.y); maxY = Mathf.Max(maxY, sp.y);
+                }
+                if (!front || mouse.x < minX || mouse.x > maxX || mouse.y < minY || mouse.y > maxY)
+                    continue;
+                float area = (maxX - minX) * (maxY - minY);
+                // Гварды: центр за камерой и вырожденные гигантские bbox (юнит «за спиной»
+                // проецируется мусором и ловил клики по пустой земле).
+                Vector3 csp = cam.WorldToScreenPoint(bounds.center);
+                if (csp.z <= 1f || area > Screen.width * Screen.height * 0.45f)
+                    continue;
+                if (area < bestArea)
+                {
+                    bestArea = area;
+                    best = unit;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>Инженер v1 — грузовик или игровой аналог инженера по имени
+        /// (Jackknife): строит здания (DESIGN §2.3; модовые определения юнитов — позже).</summary>
+        public static bool IsEngineer(Unit unit)
+        {
+            if (!(unit is GroundVehicle) || !(unit.definition is VehicleDefinition vd))
+                return false;
+            if (vd.vehicleType == VehicleType.TRUCK)
+                return true;
+            string name = vd.unitName ?? vd.jsonKey ?? "";
+            return name.ToLowerInvariant().Contains("jack");
+        }
+        // Связь аэродром→его здание-юнит: нужна для развед-гейта ромбов/миникарты
+        // (сам Airbase не Unit, трекается именно здание). Скан редкий, кэш 2 с.
+        private static readonly Dictionary<Airbase, Building> _airbaseBuildings =
+            new Dictionary<Airbase, Building>();
+        private static float _nextAirbaseScan;
+
+        /// <summary>Аэродром под разведкой (свежий контакт по его зданию)?</summary>
+        public static bool IsAirbaseScouted(Airbase airbase, FactionHQ hq)
+        {
+            if (airbase == null || hq == null)
+                return false;
+            if (Time.unscaledTime >= _nextAirbaseScan)
+            {
+                _nextAirbaseScan = Time.unscaledTime + 2f;
+                _airbaseBuildings.Clear();
+                foreach (Unit unit in UnitRegistry.allUnits)
+                    if (unit is Building b && b.Networkairbase != null)
+                        _airbaseBuildings[b.Networkairbase] = b;
+            }
+            if (!_airbaseBuildings.TryGetValue(airbase, out Building building) || building == null)
+                return false;
+            TrackingInfo info = hq.GetTrackingData(building.persistentID);
+            return info != null && Time.timeSinceLevelLoad - info.lastSpottedTime <= Settings.StaleContactSec;
+        }
+
+
+        /// <summary>Видимый размер юнита на экране, px — критерий «различим глазами или нужна иконка».</summary>
+        public static float ApparentSizePx(Unit unit, Camera cam)
+        {
+            if (unit == null || cam == null)
+                return 0f;
+            float dist = Vector3.Distance(cam.transform.position, unit.transform.position);
+            float world = Mathf.Max(unit.maxRadius * 2f, 2f);
+            float pxPerRad = Screen.height / (2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad));
+            return world / Mathf.Max(dist, 1f) * pxPerRad;
+        }
+
+        /// <summary>Точка привязки иконки — центр корпуса (пивот юнита стоит у земли).</summary>
+        public static Vector3 UnitAnchorWorld(Unit unit) =>
+            unit.transform.position + Vector3.up * (unit.maxRadius * 0.7f);
+    }
+}
