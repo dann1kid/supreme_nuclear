@@ -102,6 +102,12 @@ namespace SupremeNuclear
         {
             if (!IsHost || airbase == null || def == null)
                 return;
+            if (!CanBuild(airbase, def))
+            {
+                CommanderHud.Notice("Аэродром не строит: " +
+                                    Catalog.ShortLabel(def.code, def.unitName));
+                return;
+            }
             Queue.Add(new QueueItem
             {
                 Airbase = airbase,
@@ -119,6 +125,48 @@ namespace SupremeNuclear
             Version++;
             if (item.Paid > 0f)
                 FactionOf(item)?.AddFunds(item.Paid);
+        }
+
+        /// <summary>Добавить count копий позиции СРАЗУ после якоря — визуально в тот же
+        /// стак очереди (ЛКМ по плитке стака). Хост-only.</summary>
+        public static void InsertAfter(QueueItem anchor, int count)
+        {
+            if (!IsHost || anchor == null || count <= 0)
+                return;
+            int idx = Queue.IndexOf(anchor);
+            if (idx < 0)
+                return;
+            idx++;
+            for (int i = 0; i < count; i++)
+                Queue.Insert(idx + i, new QueueItem
+                {
+                    Depot = anchor.Depot,
+                    Airbase = anchor.Airbase,
+                    GroundDef = anchor.GroundDef,
+                    AirDef = anchor.AirDef,
+                    Cost = anchor.Cost,
+                });
+            Version++;
+        }
+
+        /// <summary>Снять до count ПОСЛЕДНИХ позиций стака def у фабрики (ПКМ по плитке
+        /// очереди): уплаченное за снятые возвращается; головная позиция стака (в работе)
+        /// снимается последней, когда счётчик до неё доходит.</summary>
+        public static void RemoveTail(object factory, UnitDefinition def, int count)
+        {
+            if (!IsHost || factory == null || def == null || count <= 0)
+                return;
+            for (int i = Queue.Count - 1; i >= 0 && count > 0; i--)
+            {
+                QueueItem item = Queue[i];
+                if (item.Factory != factory || item.UnitDef != def)
+                    continue;
+                Queue.RemoveAt(i);
+                Version++;
+                if (item.Paid > 0f)
+                    FactionOf(item)?.AddFunds(item.Paid);
+                count--;
+            }
         }
 
         private static FactionHQ FactionOf(QueueItem item) =>
@@ -188,14 +236,44 @@ namespace SupremeNuclear
             return key;
         }
 
-        /// <summary>Хост-тик: оплата головной позиции каждой фабрики, выпуск по готовности
-        /// (депо занят — позиция оплачена и повторит попытку; ангары заняты — ждём).</summary>
+        /// <summary>Умеет ли аэродром строить тип: юнион списков живых ангаров
+        /// (нативный GetAvailableAircraft; у вертолётных и самолётных площадок
+        /// свои списки типов).</summary>
+        public static bool CanBuild(Airbase airbase, AircraftDefinition def) =>
+            airbase != null && def != null && airbase.GetAvailableAircraft().Contains(def);
+
+        /// <summary>Слотов параллельной оплаты позиции: аэродром — по числу живых
+        /// ангаров, УМЕЮЩИХ строить этот тип (DESIGN 2.3a: ёмкость ангаров =
+        /// параллельные слоты; пулы вертолётных/самолётных площадок независимы),
+        /// депо — один поток (у него свой кулдаун спавна).</summary>
+        private static int PaySlots(QueueItem item)
+        {
+            if (item.Depot != null)
+                return 1;
+            if (item.Airbase == null || item.AirDef == null)
+                return 0;
+            int slots = 0;
+            foreach (Hangar hangar in item.Airbase.hangars)
+            {
+                Unit unit = hangar != null ? hangar.attachedUnit : null;
+                if (unit == null || unit.disabled)
+                    continue;
+                AircraftDefinition[] canBuild = hangar.GetAvailableAircraft();
+                if (canBuild != null && System.Array.IndexOf(canBuild, item.AirDef) >= 0)
+                    slots++;
+            }
+            return slots;
+        }
+
+        /// <summary>Хост-тик: потоковая оплата позиций фабрик (аэродром — параллельно
+        /// по ангарам, умеющим строить тип позиции; депо — одна голова), выпуск по
+        /// готовности (ангары заняты — оплаченная позиция ждёт и повторяет попытку).</summary>
         public static void Tick()
         {
             if (!GameApi.InMission || !IsHost || Queue.Count == 0)
                 return;
             float dt = Time.deltaTime;
-            var paidFactories = new HashSet<object>();
+            var paidSlots = new Dictionary<(object factory, UnitDefinition def), int>();
 
             for (int i = 0; i < Queue.Count; )
             {
@@ -212,16 +290,20 @@ namespace SupremeNuclear
                     continue;
                 }
 
+                // Слот гейтит только ОПЛАТУ: выпуск оплаченных позиций не гейтится —
+                // ангары могли умереть и после оплаты, оплаченное не теряет попытку.
+                // Ключ слота: аэродром + тип борта (пулы площадок независимы —
+                // вертолётная и самолётная очереди наливаются параллельно), депо —
+                // фабрика без типа (строго один поток).
                 object factory = item.Factory;
-                if (paidFactories.Contains(factory))
-                {
-                    i++;
-                    continue;
-                }
-                paidFactories.Add(factory);
+                var slotKey = (factory: factory, def: item.Depot != null ? null : item.UnitDef);
+                paidSlots.TryGetValue(slotKey, out int usedSlot);
+                bool canPay = usedSlot < PaySlots(item);
+                if (canPay)
+                    paidSlots[slotKey] = usedSlot + 1;
 
                 FactoryState state = StateOf(factory);
-                if (!state.Paused)
+                if (canPay && !state.Paused)
                 {
                     float rate = item.Cost / Mathf.Max(1f, Settings.ProductionSecondsPerItem);
                     float pay = Mathf.Min(rate * dt, item.Cost - item.Paid, hq.factionFunds);

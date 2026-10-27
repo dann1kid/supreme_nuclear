@@ -12,6 +12,10 @@ namespace SupremeNuclear
         private const float HeightBias = 3f;
 
         private static Mesh[] _meshes;
+
+        /// <summary>Число сабмешей-цветов: 0 ход/RTB, 1 атака-движение, 2 патруль,
+        /// 3 атака, 4 залп.</summary>
+        private const int SubmeshCount = 5;
         private static Material[] _mats;
         private static int _layer;
         private static float _nextRebuild;
@@ -20,9 +24,13 @@ namespace SupremeNuclear
         private static int _lastGroundVersion = -1;
         private static bool _ready;
 
-        private static readonly List<Vector3>[] Verts = { new List<Vector3>(), new List<Vector3>(), new List<Vector3>(), new List<Vector3>() };
-        private static readonly List<Vector2>[] Uv = { new List<Vector2>(), new List<Vector2>(), new List<Vector2>(), new List<Vector2>() };
-        private static readonly List<int>[] Tris = { new List<int>(), new List<int>(), new List<int>(), new List<int>() };
+        private static readonly List<Vector3>[] Verts = { new List<Vector3>(), new List<Vector3>(), new List<Vector3>(), new List<Vector3>(), new List<Vector3>() };
+        private static readonly List<Vector2>[] Uv = { new List<Vector2>(), new List<Vector2>(), new List<Vector2>(), new List<Vector2>(), new List<Vector2>() };
+        private static readonly List<int>[] Tris = { new List<int>(), new List<int>(), new List<int>(), new List<int>(), new List<int>() };
+        // Скругление углов цепочки перед сэмплированием рельефа (та же логика, что в IMGUI-ленте).
+        private static readonly List<Vector3> ChainPts = new List<Vector3>();
+        private static readonly List<Vector3> SmoothChain = new List<Vector3>();
+        private static readonly List<int> SmoothLegs = new List<int>();
 
         private sealed class RouteDraw
         {
@@ -98,16 +106,15 @@ namespace SupremeNuclear
             for (int i = 0; i < units.Count; i++)
             {
                 Unit unit = units[i];
-                var route = new RouteDraw { Submesh = 0 };
+                ChainPts.Clear();
                 Vector3 up = unit.transform.position;
-                route.World.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
-                for (int q = indices[i]; q < queues[i].Count; q++)
+                ChainPts.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                for (int q = GroundOrders.DrawStartIndex(unit); q < queues[i].Count; q++)
                 {
                     Vector3 l = queues[i][q].ToLocalPosition();
-                    AppendSamples(route.World, new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z));
+                    ChainPts.Add(new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z));
                 }
-                if (route.World.Count > 1)
-                    routes.Add(route);
+                AddSmoothedRoute(routes, 0, ChainPts);
             }
         }
 
@@ -138,24 +145,37 @@ namespace SupremeNuclear
                         continue;
                     }
 
-                    var route = new RouteDraw { Submesh = sub };
-                    route.World.Add(anchor);
                     var wps = new List<Vector3>(seg.Points.Count);
+                    ChainPts.Clear();
+                    ChainPts.Add(anchor);
                     for (int p = 0; p < seg.Points.Count; p++)
                     {
                         Vector3 l = seg.Points[p].ToLocalPosition();
                         Vector3 wp = new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z);
-                        AppendSamples(route.World, wp);
+                        ChainPts.Add(wp);
                         wps.Add(wp);
                     }
                     if (seg.Mode == AirOrderMode.Patrol && wps.Count > 1)
-                        AppendSamples(route.World, wps[0]);
-                    if (route.World.Count > 1)
-                        routes.Add(route);
+                        ChainPts.Add(wps[0]); // замыкающая нога патруля
+                    AddSmoothedRoute(routes, sub, ChainPts);
                     if (wps.Count > 0)
                         anchor = wps[wps.Count - 1];
                 }
             }
+        }
+
+        /// <summary>Цепочка вейпоинтов → лента со скруглёнными углами: сглаживание
+        /// в XZ (Util.RoundChainCorners), затем сэмплирование рельефа вдоль пути.</summary>
+        private static void AddSmoothedRoute(List<RouteDraw> routes, int submesh, List<Vector3> chain)
+        {
+            int n = Util.RoundChainCorners(chain, Settings.RouteCornerRadiusM, SmoothChain, SmoothLegs);
+            if (n < 2)
+                return;
+            var route = new RouteDraw { Submesh = submesh };
+            route.World.Add(SmoothChain[0]);
+            for (int j = 1; j < n; j++)
+                AppendSamples(route.World, SmoothChain[j]);
+            routes.Add(route);
         }
 
         private static void AppendSamples(List<Vector3> world, Vector3 to)
@@ -178,6 +198,8 @@ namespace SupremeNuclear
                 AirOrderMode.AttackMove => 1,
                 AirOrderMode.Patrol => 2,
                 AirOrderMode.Attack => 3,
+                AirOrderMode.Salvo => 4, // залп — малиновый
+                AirOrderMode.Rtb => 0, // цвет возврата даёт IMGUI; меш-режим экспериментальный
                 _ => 0
             };
 
@@ -186,7 +208,7 @@ namespace SupremeNuclear
             if (!EnsureMaterials())
                 return;
 
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < SubmeshCount; i++)
             {
                 Verts[i].Clear();
                 Uv[i].Clear();
@@ -232,7 +254,7 @@ namespace SupremeNuclear
                 }
             }
 
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < SubmeshCount; i++)
             {
                 if (_meshes[i] == null)
                     _meshes[i] = new Mesh { name = "RouteRibbon" + i };
@@ -287,15 +309,16 @@ namespace SupremeNuclear
                 new Color(1f, 0.8f, 0.25f),
                 new Color(1f, 0.5f, 0.2f),
                 new Color(0.3f, 0.95f, 0.85f),
-                new Color(1f, 0.25f, 0.2f)
+                new Color(1f, 0.25f, 0.2f),
+                new Color(0.95f, 0.3f, 0.8f) // залп
             };
             // Белая 1x1 текстура вместо текстуры донора (иначе лента получает «асфальт» корпуса).
             var white = new Texture2D(1, 1);
             white.SetPixel(0, 0, Color.white);
             white.Apply();
 
-            _mats = new Material[4];
-            for (int i = 0; i < 4; i++)
+            _mats = new Material[SubmeshCount];
+            for (int i = 0; i < SubmeshCount; i++)
             {
                 _mats[i] = new Material(baseMat);
                 if (_mats[i].HasProperty("_BaseMap"))
@@ -308,7 +331,7 @@ namespace SupremeNuclear
                 else
                     _mats[i].color = colors[i];
             }
-            _meshes = new Mesh[4];
+            _meshes = new Mesh[SubmeshCount];
             return true;
         }
 

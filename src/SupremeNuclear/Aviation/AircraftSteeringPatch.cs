@@ -6,9 +6,14 @@ namespace SupremeNuclear
 {
     /// <summary>
     /// Первый Harmony-патч мода. Модель AircraftWaypoints: для борта с назначенной точкой
-    /// подменяем штатный тик боевого режима — пишем destination, обнуляем «таймер без цели»
-    /// (иначе AI уйдёт на возврат через 15 с), полный газ и рулит игровой AutoAim.
-    /// Борт без приказа — оригинальное поведение без единого изменения.
+    /// подменяем штатный тик боевого режима — пишем destination, полный газ, рулит
+    /// игровой AutoAim. Пока план жив — таймер «без цели» обнулён: возврат на базу
+    /// происходит только по топливу/боеприпасам (SortieService), а не по 15-секундному
+    /// простою нативного AI. Борт без приказа — оригинальное поведение.
+    /// Атака (DESIGN §2.11): цель в зоне боя (даталинк + дальность вооружения) —
+    /// нативный бой (цель запиннена AircraftTargetPinPatch); иначе мод ведёт подлёт
+    /// к известной позиции цели либо к якорю клика. RTB — мод ведёт к аэродрому,
+    /// у земли борт принимает нативная посадка (SortieService).
     /// (В Harmony этой версии нет FieldRef-делегатов — кэшированные FieldInfo.)
     /// </summary>
     [HarmonyPatch(typeof(AIPilotCombatModes), "FixedUpdateState")]
@@ -32,19 +37,41 @@ namespace SupremeNuclear
             if (aircraft == null)
                 return true;
             if (!AircraftOrders.TryGetDestination(aircraft, aircraft.transform.position,
-                    out GlobalPosition destination, out AirOrderMode mode, out bool followTerrain))
+                    out GlobalPosition destination, out AirOrderMode mode, out bool followTerrain,
+                    out Unit attackTarget, out _, out SpeedMode speed))
                 return true; // приказа нет — штатное поведение
+
+            // Пока план жив — таймер «без цели» не тикает (иначе AI уйдёт на возврат
+            // через 15 с даже посреди подлёта/атаки-движения).
+            TimeWithoutTargetField?.SetValue(__instance, 0f);
+
+            // Авто-защита «Авто» (DESIGN §2.11): ракетное предупреждение — руление и
+            // контрмеры берёт нативный AI (манёвр увода + ловушки/джаммер по типу ГСН);
+            // после ухода угрозы план продолжится этим же префиксом.
+            if (mode != AirOrderMode.Rtb && DefenseService.ShouldEvadeNative(aircraft))
+                return true;
+
             if (mode == AirOrderMode.Attack)
-                return true; // атака: штатный боевой AI сам выбирает цель и стреляет
-            if (mode == AirOrderMode.AttackMove &&
-                AircraftOrders.EnemyNearby(aircraft, aircraft.NetworkHQ))
+            {
+                // В зоне боя — руление и стрельба нативные (цель уже запиннена);
+                // иначе мод ведёт подлёт к цели/якорю, даталинк наполнится по пути
+                // собственными сенсорами борта.
+                if (AircraftOrders.AttackEngaged(aircraft, attackTarget))
+                    return true;
+            }
+            else if (mode == AirOrderMode.AttackMove &&
+                     AircraftOrders.EnemyNearby(aircraft, aircraft.NetworkHQ))
+            {
                 return true; // attack-move: рядом враг, руление у боевого AI, после боя продолжим план
+            }
+
+            // Залп (Salvo): нативный бой НЕ включаем — рулит мод, пуски делает SalvoService.
+            // Режим «Ловушки»: маршрут держим, контрмеры сбрасываем по интервалу.
+            DefenseService.TickFlares(aircraft);
 
             DestinationField?.SetValue(__instance, destination);
-            if (TimeWithoutTargetField != null)
-                TimeWithoutTargetField.SetValue(__instance, 0f);
             if (InputsField?.GetValue(__instance) is ControlInputs inputs)
-                inputs.throttle = 1f;
+                inputs.throttle = AircraftOrders.ThrottleOf(aircraft, speed); // режим скорости сегмента
 
             if (aircraft.autopilot != null)
             {

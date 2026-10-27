@@ -80,7 +80,7 @@ namespace SupremeNuclear
             layout.childForceExpandWidth = false;
             layout.childForceExpandHeight = false;
             layout.childAlignment = TextAnchor.MiddleLeft;
-            layout.padding = new RectOffset(4, 4, 4, 4);
+            layout.padding = new RectOffset(4, 4, 2, 2); // вертикаль 2: плитка 48 + 2×2 = лента 52
             // Ширина контента — по детям: без фиттера rect.width остаётся 0,
             // маска/листание/раскладка ломаются.
             var fitter = contentGo.AddComponent<ContentSizeFitter>();
@@ -130,7 +130,7 @@ namespace SupremeNuclear
                 var go = new GameObject("nav" + glyph, typeof(RectTransform), typeof(Image), typeof(Button));
                 var rt = (RectTransform)go.transform;
                 rt.SetParent(nrt, false);
-                rt.sizeDelta = new Vector2(34f, 44f);
+                rt.sizeDelta = new Vector2(26f, 40f);
                 go.GetComponent<Image>().color = BtnBg;
                 var btn = go.GetComponent<Button>();
                 float d = dx;
@@ -144,7 +144,7 @@ namespace SupremeNuclear
                 var t = lbl.AddComponent<Text>();
                 if (font != null) t.font = font;
                 t.text = glyph;
-                t.fontSize = 14;
+                t.fontSize = 12;
                 t.color = TextMain;
                 t.alignment = TextAnchor.MiddleCenter;
                 t.raycastTarget = false;
@@ -260,6 +260,7 @@ namespace SupremeNuclear
         private bool _resizing;
         private Vector2 _resizeStartMouse;
         private Vector2 _resizeStartSize;
+        private float _resizeTop; // Y верхнего края на старте: при ресайзе верх/лево неподвижны
 
         public void BeginManualDrag(Vector2 screenPos)
         {
@@ -289,6 +290,7 @@ namespace SupremeNuclear
             _resizing = true;
             _resizeStartMouse = screenPos;
             _resizeStartSize = Root.sizeDelta;
+            _resizeTop = Root.anchoredPosition.y + Root.sizeDelta.y;
         }
 
         public void EndManualResize()
@@ -311,11 +313,7 @@ namespace SupremeNuclear
                         parent, Input.mousePosition, null, out Vector2 local))
                 {
                     Root.anchoredPosition = local - _dragOffset;
-                    // Мягкий кламп: окно не уезжает за экран в процессе драга.
-                    Rect r = parent.rect;
-                    Root.anchoredPosition = new Vector2(
-                        Mathf.Clamp(Root.anchoredPosition.x, 0f, Mathf.Max(0f, r.width - 60f)),
-                        Mathf.Clamp(Root.anchoredPosition.y, 0f, Mathf.Max(0f, r.height - 60f)));
+                    ClampToParent(); // мягкий кламп: окно не уезжает за экран в процессе драга
                 }
             }
             else if (_resizing)
@@ -326,11 +324,43 @@ namespace SupremeNuclear
                     RectTransformUtility.ScreenPointToLocalPointInRectangle(
                         parent, _resizeStartMouse, null, out Vector2 start))
                 {
-                    Vector2 s = _resizeStartSize + (local - start);
-                    Root.sizeDelta = new Vector2(
-                        Mathf.Clamp(s.x, 240f, 1200f), Mathf.Clamp(s.y, 240f, 1200f));
+                    // Ручка — НИЖНИЙ-правый угол: правый и нижний края идут за мышью,
+                    // левый и верхний неподвижны. Пивот окна — левый-нижний, поэтому
+                    // рост вниз компенсируем позицией (верхний край держим на месте) —
+                    // иначе вертикаль инвертирована: тянешь ручку вниз, окно сжимается.
+                    Vector2 size = new Vector2(
+                        Mathf.Clamp(_resizeStartSize.x + (local.x - start.x), 240f, 1200f),
+                        Mathf.Clamp(_resizeStartSize.y - (local.y - start.y), 240f, 1200f));
+                    Root.sizeDelta = size;
+                    Root.anchoredPosition = new Vector2(Root.anchoredPosition.x, _resizeTop - size.y);
+                    ClampToParent(); // после ресайза окно обязано остаться на канвасе
                 }
             }
+        }
+
+        /// <summary>Держим окно ЦЕЛИКОМ в пределах родительского канваса (поле 8 px);
+        /// если окно крупнее канваса — видимыми остаются ≥80 px по X и верхние ≥40 px по Y
+        /// (заголовок-драг и уголок-ресайз достижимы мышью). Канвас мог сжаться
+        /// CanvasScaler'ом ПОСЛЕ постройки окна (Build в кадре создания канваса видит
+        /// физические пиксели) — вызывается и из драга/ресайза, и периодически владельцем
+        /// окна как самовосстановление.</summary>
+        internal void ClampToParent()
+        {
+            if (Root == null)
+                return;
+            var parent = (RectTransform)Root.parent;
+            if (parent == null)
+                return;
+            Rect r = parent.rect;
+            if (r.width < 10f || r.height < 10f)
+                return;
+            float w = Root.rect.width;
+            float h = Root.rect.height;
+            float maxX = Mathf.Max(8f, w <= r.width - 48f ? r.width - w - 8f : r.width - 80f);
+            float maxY = Mathf.Max(8f, h <= r.height - 48f ? r.height - h - 8f : r.height - 40f);
+            Root.anchoredPosition = new Vector2(
+                Mathf.Clamp(Root.anchoredPosition.x, 8f, maxX),
+                Mathf.Clamp(Root.anchoredPosition.y, 8f, maxY));
         }
 
         public static FloatingWindow Create(Transform canvas, Font font, string title,

@@ -93,9 +93,11 @@ namespace SupremeNuclear
             }
             foreach (Unit unit in chainOwners)
             {
-                if (unit == null || !GroundOrders.TryGetQueue(unit, out var queue, out int qi))
+                if (unit == null || !GroundOrders.TryGetQueue(unit, out var queue, out _))
                     continue;
-                for (int p = qi; p < queue.Count; p++)
+                int start = GroundOrders.DrawStartIndex(unit); // производная точка
+                // подхода атак не сканируется — она не редактируется
+                for (int p = start; p < queue.Count; p++)
                     if (Near(cam, queue[p].ToLocalPosition(), mouse, px))
                         return new WaypointHit(WaypointKind.GroundPoint, unit, null, 0, p);
             }
@@ -117,8 +119,21 @@ namespace SupremeNuclear
                     continue;
                 for (int s = 0; s < plan.Count; s++)
                     for (int p = 0; p < plan[s].Points.Count; p++)
-                        if (Near(cam, plan[s].Points[p].ToLocalPosition(), mouse, px))
+                    {
+                        // Служебные точки (взлёт патруля p=0, одиночный стоп-старт) —
+                        // не вейпоинты приказа: скан их не отдаёт (нет захвата/удаления).
+                        if (AircraftOrders.GroupIdOf(unit, s, p) == 0 &&
+                            (plan[s].Mode == AirOrderMode.Patrol ? p == 0 : plan[s].Points.Count == 1))
+                            continue;
+                        // Общее правило: вейпоинт управляется там, где рисуется. Авиаточки
+                        // хранят AGL-высоту, а маркер лежит НА ЗЕМЛЕ (DrawPlanCurve/GroundVec):
+                        // при наклонной камере проекции расходятся на сотни пикселей —
+                        // захват и удаление точек (в т.ч. патруля) промахивались.
+                        Vector3 l = plan[s].Points[p].ToLocalPosition();
+                        l.y = GameApi.GroundY(l.x, l.z);
+                        if (Near(cam, l, mouse, px))
                             return new WaypointHit(WaypointKind.AirPoint, unit, null, s, p);
+                    }
             }
 
             return new WaypointHit(WaypointKind.None, null, null, 0, 0);

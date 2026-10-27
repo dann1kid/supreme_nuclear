@@ -3,7 +3,8 @@ using UnityEngine;
 
 namespace SupremeNuclear
 {
-    /// <summary>Клик-выделение и рамка; пока только своя наземка/флот.</summary>
+    /// <summary>Клик-выделение и рамка: своя техника, флот, авиация и здания
+    /// (фабрики/захваченные экстракторы — см. GameApi.IsSelectableFriendly).</summary>
     public sealed class SelectionService
     {
         private static readonly Dictionary<int, List<Unit>> Groups = new Dictionary<int, List<Unit>>();
@@ -12,6 +13,14 @@ namespace SupremeNuclear
         public Airbase SelectedAirbase { get; set; }
 
         public readonly List<Unit> Selected = new List<Unit>();
+
+        /// <summary>Осматриваемая чужая цель/ракета (ЛКМ по видимому контакту):
+        /// показывает инфопанель без выделения — приказы чужим не выдаются.
+        /// Живёт, пока цель жива и видима (prune в Tick).</summary>
+        public Unit Inspected { get; set; }
+
+        /// <summary>Радиус пика осматриваемой цели по иконке (как пик врага у ПКМ).</summary>
+        private const float InspectPickRadiusPx = 16f;
 
         /// <summary>Подвыделение по типу (клик по группе в списке UI).</summary>
         public static void SelectTypeStatic(CommanderModeController controller, UnitDefinition definition)
@@ -61,6 +70,7 @@ namespace SupremeNuclear
         {
             Selected.Clear();
             SelectedAirbase = null;
+            Inspected = null;
             IsDragging = false;
             _leftPressed = false;
         }
@@ -77,6 +87,13 @@ namespace SupremeNuclear
             if (SelectedAirbase != null)
                 BuildTasks.SelectedTask = null;
 
+            // Осмотр живёт, пока цель жива и видима: погибла или ушла из разведки —
+            // панель гаснет сама (слепое слежение за протухшим контактом — чит).
+            if (Inspected != null && (Inspected == null || Inspected.disabled ||
+                                      !GameApi.TryGetLocalHQ(out FactionHQ inspectHq) ||
+                                      !GameApi.TryGetContact(Inspected, inspectHq, out _)))
+                Inspected = null;
+
             if (RouteEditor.Consumed || RouteEditor.IsDragging || BuildTasks.Consumed)
             {
                 _leftPressed = false;
@@ -84,7 +101,7 @@ namespace SupremeNuclear
                 return; // ЛКМ занят подтверждением приказа или перетаскиванием точки
             }
 
-            // Space+ЛКМ — это вращение камеры, выделение не стартуем.
+            // Space — осмотр камеры (мышь крутит вид), выделение не стартуем.
             if (RtsInput.RotateModifierHeld)
             {
                 _leftPressed = false;
@@ -163,6 +180,7 @@ namespace SupremeNuclear
             {
                 SelectedAirbase = clickedBuilding.Networkairbase;
                 Selected.Clear();
+                Inspected = null;
                 _lastClickDefinition = null;
                 return;
             }
@@ -174,6 +192,7 @@ namespace SupremeNuclear
                 if (!Selected.Contains(hitUnit))
                     Selected.Add(hitUnit);
                 SelectedAirbase = null;
+                Inspected = null;
                 _lastClickDefinition = null;
                 return;
             }
@@ -183,6 +202,7 @@ namespace SupremeNuclear
             if (hitUnit != null && GameApi.IsSelectableFriendly(hitUnit, localHq))
             {
                 LastClickDebug = "выделен: " + hitUnit.definition?.unitName;
+                Inspected = null;
                 bool doubleClick = Time.unscaledTime - _lastClickTime < Settings.DoubleClickSec
                     && hitUnit.definition == _lastClickDefinition;
                 _lastClickTime = Time.unscaledTime;
@@ -200,8 +220,26 @@ namespace SupremeNuclear
             }
             else
             {
+                // ЛКМ по ВИДИМОМУ чужому юниту/ракете — осмотр (инфопанель без выделения,
+                // приказы чужим не выдаются): луч по телу, затем пик по иконке контакта.
+                // Ракеты обеих сторон, чужие — только под разведкой (как вражеские иконки).
+                Unit inspect = hitUnit != null && GameApi.IsInspectableForeign(hitUnit, localHq)
+                    ? hitUnit
+                    : TryPickInspectableAt(localHq);
+                if (inspect != null)
+                {
+                    Inspected = inspect;
+                    LastClickDebug = "осмотр: " + (inspect.definition != null
+                        ? inspect.definition.unitName : inspect.name);
+                    Selected.Clear();
+                    _lastClickDefinition = null;
+                    BuildTasks.SelectedTask = null; // карточку недостроя сменяет осмотр
+                    return;
+                }
+
                 LastClickDebug = "мимо: луч=" + (hitUnit != null ? hitUnit.name : "нет") +
                                  " (выделение сброшено)";
+                Inspected = null;
                 Selected.Clear();
                 _lastClickDefinition = null;
                 BuildTasks.SelectedTask = null; // карточку недостроя тоже снимаем
@@ -234,6 +272,64 @@ namespace SupremeNuclear
             return best;
         }
 
+        /// <summary>Пик осматриваемой цели по 2D-иконке контакта: якорь совпадает с
+        /// отрисовкой вражеских иконок (живой контакт — актуальная позиция, протухший —
+        /// последняя известная), ракеты — якорь корпуса. Гейт видимости — тот же,
+        /// что у иконок: невидимого чужого кликом не «прощупать».</summary>
+        private Unit TryPickInspectableAt(FactionHQ localHq)
+        {
+            var cam = GameApi.MainCam;
+            if (cam == null || localHq == null)
+                return null;
+            Vector2 mouse = new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y);
+            Unit best = null;
+            float bestDist = InspectPickRadiusPx;
+            foreach (Unit unit in UnitRegistry.allUnits)
+            {
+                if (unit == null || unit.disabled || !GameApi.IsInspectableForeign(unit, localHq))
+                    continue;
+                TrackingInfo info = unit is Missile ? null : localHq.GetTrackingData(unit.persistentID);
+                Vector3 sp = cam.WorldToScreenPoint(GameApi.ContactAnchorWorld(unit, info));
+                if (sp.z <= 0f)
+                    continue;
+                float d = Vector2.Distance(new Vector2(sp.x, sp.y), mouse);
+                if (d < bestDist)
+                {
+                    bestDist = d;
+                    best = unit;
+                }
+            }
+            return best;
+        }
+
+        // Категории рамки: меньше — раньше в выделении (порядок Shift-добавления:
+        // инженеры → логистика → оборонительные здания → производящие → боевые).
+        private const int CatEngineer = 0;
+        private const int CatLogistics = 1;
+        private const int CatDefense = 2;
+        private const int CatProduction = 3;
+        private const int CatCombat = 4;
+
+        private readonly List<Unit> _boxUnits = new List<Unit>();
+        private readonly List<int> _boxCats = new List<int>();
+
+        private static bool IsMobile(Unit unit) =>
+            unit is GroundVehicle || unit is Ship || unit is Aircraft;
+
+        /// <summary>Категория юнита для рамки: инженеры (TRUCK), логистика (безоружные
+        /// мобильные — небоевые машины/разведка), оборонительные здания (вооружённая
+        /// стационара), производящие (фабрики/депо и прочие безоружные здания),
+        /// боевые (вооружённые мобильные). «Вооружённость» = GetMaxRange() ≥ 1 —
+        /// та же предпосылка, что у приказа атаки наземки.</summary>
+        private static int CategoryOf(Unit unit)
+        {
+            if (GameApi.IsEngineer(unit))
+                return CatEngineer;
+            if (IsMobile(unit))
+                return unit.GetMaxRange() >= 1f ? CatCombat : CatLogistics;
+            return unit.GetMaxRange() >= 1f ? CatDefense : CatProduction;
+        }
+
         private void BoxSelect(Vector2 a, Vector2 b, bool additive)
         {
             GameApi.TryGetLocalHQ(out FactionHQ localHq);
@@ -244,21 +340,41 @@ namespace SupremeNuclear
             float minX = Mathf.Min(a.x, b.x), maxX = Mathf.Max(a.x, b.x);
             float minY = Mathf.Min(a.y, b.y), maxY = Mathf.Max(a.y, b.y);
 
-            if (!additive)
-                Selected.Clear();
+            // Кандидаты рамки с категорией; отдельно — есть ли в рамке боевые.
+            _boxUnits.Clear();
+            _boxCats.Clear();
+            bool anyCombat = false;
             foreach (Unit unit in UnitRegistry.allUnits)
             {
-                if (Selected.Count >= Settings.MaxSelected)
-                    break;
                 if (!GameApi.IsSelectableFriendly(unit, localHq))
                     continue;
                 Vector3 sp = cam.WorldToScreenPoint(GameApi.UnitAnchorWorld(unit));
-                if (sp.z <= 0f)
+                if (sp.z <= 0f || sp.x < minX || sp.x > maxX || sp.y < minY || sp.y > maxY)
                     continue;
-                if (sp.x >= minX && sp.x <= maxX && sp.y >= minY && sp.y <= maxY &&
-                    (additive || !Selected.Contains(unit)))
-                    Selected.Add(unit);
+                int cat = CategoryOf(unit);
+                _boxUnits.Add(unit);
+                _boxCats.Add(cat);
+                if (cat == CatCombat)
+                    anyCombat = true;
             }
+
+            if (!additive)
+                Selected.Clear();
+            // Дефолтная рамка: боевые есть — берём ТОЛЬКО их; нет — всех движущихся
+            // (инженеры/логистика). Здания рамкой не выделяются вовсе — их берут
+            // кликом. Shift — режим ДОБАВЛЕНИЯ: берём всё, но в порядке категорий
+            // (голова выделения — инженеры, потом логистика, оборонка, производящие).
+            for (int cat = CatEngineer; cat <= CatCombat; cat++)
+                for (int i = 0; i < _boxUnits.Count; i++)
+                {
+                    if (_boxCats[i] != cat || Selected.Contains(_boxUnits[i]))
+                        continue;
+                    if (!additive && (anyCombat ? cat != CatCombat : !IsMobile(_boxUnits[i])))
+                        continue;
+                    if (Selected.Count >= Settings.MaxSelected)
+                        return;
+                    Selected.Add(_boxUnits[i]);
+                }
         }
 
         private void SelectAllOfTypeOnScreen(UnitDefinition definition, FactionHQ localHq)

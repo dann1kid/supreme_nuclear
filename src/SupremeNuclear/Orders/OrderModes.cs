@@ -7,6 +7,12 @@ namespace SupremeNuclear
         AttackMove,
         Patrol,
         Attack,
+        /// <summary>Залп: ПКМ по цели/земле — подлёт и одновременный пуск выбранных
+        /// ракетных станций по нескольким целям (SalvoService).</summary>
+        Salvo,
+        /// <summary>Атака веером: ПКМ по врагам накапливает список целей, ПКМ по земле —
+        /// раздать группу по целям (ближайшая цель с балансом N/M, MoveOrderService).</summary>
+        DisperseAttack,
         Cancel
     }
 
@@ -23,6 +29,8 @@ namespace SupremeNuclear
                 OrderMode.AttackMove => "Атака-движение",
                 OrderMode.Patrol => "Патруль",
                 OrderMode.Attack => "Атака",
+                OrderMode.Salvo => "Залп",
+                OrderMode.DisperseAttack => "Атака веером",
                 OrderMode.Cancel => "Стоп",
                 _ => null
             };

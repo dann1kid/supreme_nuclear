@@ -17,3 +17,6 @@ image.png
 .vs/
 .idea/
 *.user
+
+# Сессионные артефакты ZCode
+.zcode/

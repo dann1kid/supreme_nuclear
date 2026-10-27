@@ -5,8 +5,12 @@ namespace SupremeNuclear
 {
     /// <summary>
     /// Камера «взглядом из космоса» как в SupCom: фокус на земле, запертый в границах карты.
-    /// Навигация только мышью: СКМ — «схватить и тащить» карту (скорость 1:1 масштабу сцены),
-    /// колесо — зум к курсору в обе стороны (из космоса видно всю карту), Space+ЛКМ — угол.
+    /// Навигация только мышью: СКМ — «схватить и тащить» карту (скорость 1:1 масштабу сцены,
+    /// драг движет и текущий, и целевой фокус — без лага сглаживания, иначе «резинка»),
+    /// колесо — зум к курсору в обе стороны (из космоса видно всю карту), Space — осмотр.
+    /// Автодовороты угла: издалека — вид сверху, у самой земли — круче вниз; пока зажато
+    /// Space, автодовороты отключены и угол осмотра применяется напрямую; отпущен —
+    /// камера возвращается к взгляду до осмотра.
     /// Клавиатурного панорамирования нет. Патчей нет: UpdateState зовётся из LateUpdate игры.
     /// </summary>
     public sealed class CommanderCameraState : CameraBaseState
@@ -24,6 +28,18 @@ namespace SupremeNuclear
         private float _targetPitch;
         private float _targetDistance;
 
+        // Фактор ручного осмотра (0 = авто-угол действует, 1 = осмотр на Space).
+        // Сами автодовороты — МГНОВЕННАЯ функция текущей дистанции (как стратегический
+        // зум до v0.69): угол меняется только пока меняется дистанция, без инерции
+        // и «доплыва» после остановки зума. Сглаживается только вход/выход из осмотра.
+        private float _manualEase;
+        private bool _rotating;
+
+        // Взгляд до осмотра на Space: yaw/pitch на момент нажатия — куда возвращаться
+        // при отпускании (возврат через обычное сглаживание, мгновенного рывка нет).
+        private float _lookYaw;
+        private float _lookPitch;
+
         // Фокус в глобальных координатах: игра сдвигает мировое начало координат
         // (FloatingOrigin, порог 1024м по любой оси) — локальный Vector3 «протухает» каждый кадр
         // на большой высоте/краю карты, что выглядело как бесконечный уезд камеры.
@@ -39,7 +55,8 @@ namespace SupremeNuclear
         private bool _trackIrWasEnabled;
 
         // Якорное перетаскивание: при зажатой СКМ точка земли под курсором
-        // «приклеивается» к курсору; поправка каждый кадр держит её под ним.
+        // «приклеивается» к курсору; поправка каждый кадр держит её под ним
+        // (пининг по плоскости якоря — см. HandleInput).
         private GlobalPosition _dragAnchorG;
         private bool _dragging;
 
@@ -71,6 +88,7 @@ namespace SupremeNuclear
             _targetDistance = _distance;
             _focusG = _focus.ToGlobalPosition();
             _lastTargetLocal = _focus;
+            _manualEase = 0f;
 
             _savedFarClip = cam.mainCamera.farClipPlane;
             _clouds = Object.FindObjectOfType<CloudLayer>();
@@ -158,6 +176,24 @@ namespace SupremeNuclear
                 _targetFocus += originShift;
             }
 
+            // Space — «моментальный осмотр»: пока зажат, движение мыши крутит вид вокруг
+            // фокуса (панорама поля боя с любой стороны); при отпускании камера плавно
+            // возвращается к сохранённому взгляду — снова удобно обводить войска.
+            // Переходы ловим здесь, а не в HandleInput: при открывшемся чате HandleInput
+            // не зовётся, и отпускание нельзя потерять.
+            bool look = RtsInput.RotateModifierHeld;
+            if (look && !_rotating)
+            {
+                _lookYaw = _targetYaw;
+                _lookPitch = _targetPitch;
+            }
+            else if (!look && _rotating)
+            {
+                _targetYaw = _lookYaw;
+                _targetPitch = _lookPitch;
+            }
+            _rotating = look;
+
             if (!RtsInput.Typing)
                 HandleInput();
 
@@ -172,7 +208,16 @@ namespace SupremeNuclear
             _pitch = Mathf.Lerp(_pitch, _targetPitch, rotT);
             _distance = Mathf.Lerp(_distance, _targetDistance, posT);
 
-            float effPitch = EffectivePitch(_distance, _pitch);
+            // Автодовороты угла — мгновенная функция уже сглаженной дистанции: пока
+            // дистанция анимируется зумом, угол следует за ней в одной связке, после
+            // остановки ничего не «допллывает». Плавно (AutoTiltSmoothing) гасится
+            // только вход/выход из осмотра на Space, чтобы взгляд не прыгал рывком.
+            float easeT = 1f - Mathf.Exp(-dt * Settings.AutoTiltSmoothing);
+            _manualEase = Mathf.Lerp(_manualEase, _rotating ? 1f : 0f, easeT);
+            float auto = 1f - _manualEase;
+
+            float effPitch = Util.ComposePitch(_pitch, Settings.TopDownPitch, Settings.CloseTiltPitch,
+                BlendTopAt(_distance) * auto, BlendCloseAt(_distance) * auto);
             Quaternion rotation = Quaternion.Euler(effPitch, _yaw, 0f);
             Vector3 position = _focus - rotation * Vector3.forward * _distance;
 
@@ -224,10 +269,27 @@ namespace SupremeNuclear
                     _targetFocus = snap;
                 }
             }
-            if (_dragging && RtsInput.MiddleHeld && !RtsInput.PointerOverUi)
+            // Драг продолжается и над UI: драг начат на земле, и курсор, проезжая панель,
+            // не должен ронять поправку (мерцающий IsPointerOverGameObject резал её через
+            // кадр — камера дёргалась между «поправлено/не поправлено»).
+            if (_dragging && RtsInput.MiddleHeld)
             {
-                if (GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 now))
-                    _targetFocus += _dragAnchorG.ToLocalPosition() - now;
+                // Пининг якоря считаем о МАТЕМАТИЧЕСКУЮ горизонтальную плоскость через якорь,
+                // а не физическим лучом по рельефу/крышам. На плоскости связь «сдвиг камеры
+                // = сдвиг точки под курсором» точная 1:1 на любом рельефе и без разрывов:
+                // физический луч у кромки крыши/склона прыгал, и петля поправок с полным
+                // усилением входила в незатухающую тряску. Поправка горизонтальная —
+                // высоту фокуса держит ClampTargets (y = рельеф).
+                Vector3 anchor = _dragAnchorG.ToLocalPosition();
+                Plane pinPlane = new Plane(Vector3.up, anchor);
+                Ray ray = GameApi.ScreenRay(RtsInput.MousePos);
+                if (pinPlane.Raycast(ray, out float enter))
+                {
+                    Vector3 delta = anchor - ray.GetPoint(enter);
+                    delta.y = 0f;
+                    _focus += delta;
+                    _targetFocus += delta;
+                }
             }
             else if (_dragging && !RtsInput.MiddleHeld)
             {
@@ -236,7 +298,9 @@ namespace SupremeNuclear
 
             // Панорамирование у края экрана: скорость пропорциональна размеру вида.
             // Порог «курсор покинул окно» покрывает мульти-монитор (курсор уходит на соседний экран).
-            if (Settings.EdgeScroll && Application.isFocused && !RtsInput.Typing)
+            // Во время осмотра на Space и драга СКМ выключено: у края эти режимы
+            // воюют с поправками якоря за фокус.
+            if (Settings.EdgeScroll && Application.isFocused && !RtsInput.Typing && !_rotating && !_dragging)
             {
                 Vector3 m = Input.mousePosition;
                 float ex = 0f, ez = 0f;
@@ -279,8 +343,11 @@ namespace SupremeNuclear
                 _targetDistance = newDist;
             }
 
-            // Угол при приближении: Space+ЛКМ.
-            if (RtsInput.RotateModifierHeld && RtsInput.LeftHeld && !RtsInput.PointerOverUi)
+            // Осмотр на Space: движение мыши (без кнопок) крутит вид вокруг фокуса —
+            // панорамный взгляд на точку с любой стороны. На время осмотра автодовороты
+            // отключены, угол применяется напрямую; при отпускании Space взгляд
+            // возвращается к сохранённому (логика переходов — в UpdateState).
+            if (_rotating)
             {
                 float dx = Input.GetAxis("Mouse X");
                 float dy = Input.GetAxis("Mouse Y");
@@ -291,7 +358,7 @@ namespace SupremeNuclear
 
         private void ClampTargets()
         {
-            float effPitch = EffectivePitch(_targetDistance, _targetPitch);
+            float effPitch = TargetPitch;
             float sin = Mathf.Max(Mathf.Sin(effPitch * Mathf.Deg2Rad), 0.2f);
             (float minDist, float maxDist) = DistanceBounds();
             _targetDistance = Mathf.Clamp(_targetDistance, minDist, maxDist);
@@ -336,7 +403,7 @@ namespace SupremeNuclear
         /// <summary>Мин/макс дистанции до фокуса при текущем угле (высотные клампы камеры).</summary>
         private (float minDist, float maxDist) DistanceBounds()
         {
-            float sin = Mathf.Max(Mathf.Sin(EffectivePitch(_targetDistance, _targetPitch) * Mathf.Deg2Rad), 0.2f);
+            float sin = Mathf.Max(Mathf.Sin(TargetPitch * Mathf.Deg2Rad), 0.2f);
             float minDist = Mathf.Max(Settings.MinDistance, Settings.MinHeight / sin);
             // ×0.9 достаточно, чтобы карта влезала в кадр; жёсткий потолок ниже 90 км —
             // за пределами ±90 км игра не может сдвигать origin, начинается дрожь мира.
@@ -351,11 +418,26 @@ namespace SupremeNuclear
                 : 0f;
         }
 
-        /// <summary>Чем дальше — тем ближе к виду сверху (SupCom strategic zoom).</summary>
-        private static float EffectivePitch(float distance, float userPitch)
+        /// <summary>Фактор доворота к виду сверху на дистанции d (0..1).</summary>
+        private static float BlendTopAt(float d) =>
+            Mathf.InverseLerp(Settings.TopDownStartDistance, Settings.TopDownFullDistance, d);
+
+        /// <summary>Фактор доворота вниз у земли на дистанции d (0..1):
+        /// 1 ближе CloseTiltEndDistance (полный доворот), 0 дальше CloseTiltStartDistance.</summary>
+        private static float BlendCloseAt(float d) =>
+            1f - Mathf.InverseLerp(Settings.CloseTiltEndDistance, Settings.CloseTiltStartDistance, d);
+
+        /// <summary>Целевой наклон (для клампов): мгновенные факторы по целевой дистанции;
+        /// осмотр на Space учитывается сразу, чтобы минимальная дистанция не позволила
+        /// камере уйти под землю при пологом угле осмотра.</summary>
+        private float TargetPitch
         {
-            float blend = Mathf.InverseLerp(Settings.TopDownStartDistance, Settings.TopDownFullDistance, distance);
-            return Mathf.Lerp(userPitch, Settings.TopDownPitch, blend);
+            get
+            {
+                float auto = _rotating ? 0f : 1f;
+                return Util.ComposePitch(_targetPitch, Settings.TopDownPitch, Settings.CloseTiltPitch,
+                    BlendTopAt(_targetDistance) * auto, BlendCloseAt(_targetDistance) * auto);
+            }
         }
 
         private void SetClouds(bool visible)

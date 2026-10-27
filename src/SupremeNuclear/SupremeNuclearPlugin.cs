@@ -40,8 +40,14 @@ namespace SupremeNuclear
                 AircraftOrders.Reset();
                 GroundOrders.Reset();
                 StanceService.Reset();
+                WeaponGateService.Reset(); // гейты вооружения привязаны к юнитам сцены
+                DefenseService.Reset(); // режимы защиты/таймеры сброса привязаны к бортам сцены
+                SalvoService.Reset();   // выбор станций залпа — тоже
+                AirbaseReserve.Reset(); // резервы ангаров умершей сцены недействительны
                 SelectionService.ResetGroups();
+                RangeRings.Reset(); // кольца дальности: круги/буферы сцены
                 RouteRibbonMesh.Destroy(); // меши/материалы от донора умершей сцены
+                CommanderAudio.Restore(); // страховка: вернуть доплер источникам, если вышли без Deactivate
                 OrderModes.Pending = OrderMode.None;
             };
 

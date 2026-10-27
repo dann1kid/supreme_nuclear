@@ -108,7 +108,11 @@ namespace SupremeNuclear
         }
 
         /// <summary>Нарисовать силуэт здания в точке (каждый кадр).</summary>
-        public static void Draw(BuildingDefinition def, Vector3 origin, Color tint)
+        public static void Draw(BuildingDefinition def, Vector3 origin, Color tint) =>
+            Draw(def, origin, Quaternion.identity, tint);
+
+        /// <summary>То же с поворотом (выход ангара ставится курсором).</summary>
+        public static void Draw(BuildingDefinition def, Vector3 origin, Quaternion rot, Color tint)
         {
             if (!Enabled || def == null)
                 return;
@@ -116,13 +120,98 @@ namespace SupremeNuclear
             if (mat == null)
                 return;
             MaterialPropertyBlock block = Block(tint);
-            Matrix4x4 root = Matrix4x4.TRS(origin, Quaternion.identity, Vector3.one);
+            Matrix4x4 root = Matrix4x4.TRS(origin, rot, Vector3.one);
             foreach (Part part in GetParts(def))
             {
                 Matrix4x4 m = root * part.Local;
                 for (int sub = 0; sub < part.SubmeshCount; sub++)
                     Graphics.DrawMesh(part.Mesh, m, mat, 0, null, sub, block);
             }
+        }
+
+        // Выход ангара (spawnTransform префаба): локальные позиция+направление
+        // относительно корня — рисуем стрелку, чтобы направление выката было видно.
+        private static readonly Dictionary<BuildingDefinition, Matrix4x4> Exits =
+            new Dictionary<BuildingDefinition, Matrix4x4>();
+
+        internal static bool TryGetExit(BuildingDefinition def, out Matrix4x4 local)
+        {
+            local = Matrix4x4.identity;
+            if (def == null || def.unitPrefab == null)
+                return false;
+            if (Exits.TryGetValue(def, out Matrix4x4 cached))
+            {
+                local = cached;
+                return cached != Matrix4x4.zero;
+            }
+            Hangar hangar = def.unitPrefab.GetComponent<Hangar>();
+            Transform spawn = hangar != null ? hangar.GetSpawnTransform() : null;
+            Matrix4x4 result = Matrix4x4.zero;
+            if (spawn != null)
+                result = def.unitPrefab.transform.worldToLocalMatrix * spawn.localToWorldMatrix;
+            Exits[def] = result;
+            local = result;
+            return result != Matrix4x4.zero;
+        }
+
+        private static Mesh _arrowMesh;
+        private static Material _arrowMat;
+        private static readonly Color ExitTint = new Color(1f, 0.8f, 0.2f, 0.85f);
+
+        /// <summary>Плоская стрелка +Z единичной длины (шафт + остриё).</summary>
+        private static Mesh ArrowMesh()
+        {
+            if (_arrowMesh != null)
+                return _arrowMesh;
+            var mesh = new Mesh { name = "hangar-exit-arrow" };
+            var v = new[]
+            {
+                // шафт
+                new Vector3(-0.08f, 0f, 0f), new Vector3(0.08f, 0f, 0f),
+                new Vector3(0.08f, 0f, 0.75f), new Vector3(-0.08f, 0f, 0.75f),
+                // остриё
+                new Vector3(-0.3f, 0f, 0.75f), new Vector3(0.3f, 0f, 0.75f),
+                new Vector3(0f, 0f, 1f),
+            };
+            mesh.vertices = v;
+            mesh.triangles = new[] { 0, 2, 1, 0, 3, 2, 4, 6, 5 };
+            mesh.RecalculateBounds();
+            _arrowMesh = mesh;
+            return mesh;
+        }
+
+        /// <summary>Материал стрелки — копия призрачного без кульинга (обе стороны).</summary>
+        private static Material ArrowMaterial()
+        {
+            if (_arrowMat != null)
+                return _arrowMat;
+            Material ghost = GhostMaterial();
+            if (ghost == null)
+                return null;
+            _arrowMat = new Material(ghost);
+            _arrowMat.SetFloat("_Cull", 0f);
+            return _arrowMat;
+        }
+
+        /// <summary>Стрелка выхода ангара: от точки выката вдоль направления (по земле).</summary>
+        private static void DrawExitArrow(BuildingDefinition def, in Matrix4x4 root)
+        {
+            if (!TryGetExit(def, out Matrix4x4 exitLocal))
+                return;
+            Material mat = ArrowMaterial();
+            if (mat == null)
+                return;
+            Matrix4x4 m = root * exitLocal;
+            Vector3 pos = m.GetColumn(3);
+            Vector3 fwd = m.MultiplyVector(Vector3.forward);
+            fwd.y = 0f;
+            if (fwd.sqrMagnitude < 1e-4f)
+                return;
+            float len = Mathf.Clamp(def.length * 0.9f, 20f, 70f);
+            Vector3 ground = new Vector3(pos.x, GameApi.GroundY(pos.x, pos.z) + 0.6f, pos.z);
+            Matrix4x4 arrow = Matrix4x4.TRS(ground, Quaternion.LookRotation(fwd.normalized),
+                new Vector3(len, 1f, len));
+            Graphics.DrawMesh(ArrowMesh(), arrow, mat, 0, null, 0, Block(ExitTint));
         }
 
         /// <summary>Покадровая подача призраков (зовётся из Update контроллера ДО
@@ -133,7 +222,7 @@ namespace SupremeNuclear
                 return;
             Camera cam = GameApi.MainCam;
 
-            // Призраки всех площадок.
+            // Призраки всех площадок (поворот площадки + стрелка выхода ангара).
             foreach (BuildTasks.Task t in BuildTasks.All)
             {
                 if (t.Definition == null)
@@ -141,20 +230,39 @@ namespace SupremeNuclear
                 Vector3 lp = t.Site.ToLocalPosition();
                 Vector3 origin = new Vector3(lp.x, GameApi.GroundY(lp.x, lp.z), lp.z) +
                                  (Vector3)t.Definition.spawnOffset;
+                Quaternion rot = Quaternion.Euler(0f, t.YawDeg, 0f);
                 Color tint = t.ZoneBlocked
                     ? BlockedTint
                     : (t.Paid > 0f ? ValidTint : BuildTint);
-                Draw(t.Definition, origin, tint);
+                Matrix4x4 root = Matrix4x4.TRS(origin, rot, Vector3.one);
+                Draw(t.Definition, origin, rot, tint);
+                if (BuildTasks.IsHangarDefinition(t.Definition))
+                    DrawExitArrow(t.Definition, root);
             }
 
-            // Силуэт режима установки: зелёный/красный по валидности точки.
+            // Силуэт режима установки. Пока ЛКМ удерживается (жест поворота) —
+            // призрак стоит на якоре и крутится выходом к курсору; зелёный/красный
+            // по валидности точки (для ангара — и по близости своего аэродрома).
             if (BuildTasks.Pending != null && cam != null && !RtsInput.PointerOverUi &&
                 GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 ground))
             {
-                bool ok = GameApi.IsSiteBuildable(ground.x, ground.z) &&
-                          !BuildTasks.IsZoneBlockedAt(ground, null);
-                Draw(BuildTasks.Pending, ground + (Vector3)BuildTasks.Pending.spawnOffset,
-                    ok ? ValidTint : BlockedTint);
+                BuildingDefinition def = BuildTasks.Pending;
+                Vector3 at = BuildTasks.PlacingActive
+                    ? BuildTasks.PlacingSite.ToLocalPosition()
+                    : ground;
+                float yaw = BuildTasks.PlacingActive ? BuildTasks.PendingYawDeg : 0f;
+                bool ok = GameApi.IsSiteBuildable(at.x, at.z) &&
+                          !BuildTasks.IsZoneBlockedAt(at, null);
+                if (ok && BuildTasks.IsHangarDefinition(def))
+                {
+                    GameApi.TryGetLocalHQ(out FactionHQ hq);
+                    ok = BuildTasks.NearestOwnAirbase(at, hq, Settings.HangarAttachRadiusM) != null;
+                }
+                Quaternion rot = Quaternion.Euler(0f, yaw, 0f);
+                Draw(def, at + (Vector3)def.spawnOffset, rot, ok ? ValidTint : BlockedTint);
+                if (BuildTasks.IsHangarDefinition(def))
+                    DrawExitArrow(def, Matrix4x4.TRS(
+                        at + (Vector3)def.spawnOffset, rot, Vector3.one));
             }
         }
 
@@ -165,6 +273,7 @@ namespace SupremeNuclear
         public static void Reset()
         {
             Parts.Clear();
+            Exits.Clear();
         }
 
         // Совместимость со старыми вызовами: Task-призраки теперь рисуются покадрово

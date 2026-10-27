@@ -19,6 +19,7 @@ namespace SupremeNuclear
             _mapSettings = null;
             _hpCache.Clear();
             _airbaseBuildings.Clear();
+            _ringBeltCache.Clear();
             _nextAirbaseScan = 0f;
         }
 
@@ -132,6 +133,38 @@ namespace SupremeNuclear
         public static float HpFraction(Unit unit) =>
             unit != null && _hpCache.TryGetValue(unit, out float v) ? v : 1f;
 
+        // Кэш «пояса» юнита — смещение вверх от позиции юнита до середины высоты его
+        // модели (кольцо выделения). Модель не меняется — считаем один раз; храним
+        // именно СМЕЩЕНИЕ, а не мировую Y: сдвиг FloatingOrigin не должен протравливать кэш.
+        private static readonly Dictionary<Unit, float> _ringBeltCache = new Dictionary<Unit, float>();
+        private static readonly List<Unit> _ringBeltPrune = new List<Unit>();
+
+        /// <summary>Смещение вверх от позиции юнита до середины высоты его модели («пояс»).</summary>
+        public static float RingBeltOffset(Unit unit)
+        {
+            if (unit == null)
+                return 0f;
+            if (_ringBeltCache.TryGetValue(unit, out float dy))
+                return dy;
+            Bounds b = default;
+            bool has = false;
+            foreach (Renderer r in unit.GetComponentsInChildren<Renderer>())
+            {
+                if (r == null || !r.enabled || r.GetType().Name == "ParticleSystemRenderer")
+                    continue;
+                if (!has)
+                {
+                    b = r.bounds;
+                    has = true;
+                }
+                else
+                    b.Encapsulate(r.bounds);
+            }
+            dy = has ? b.center.y - unit.transform.position.y : 0f;
+            _ringBeltCache[unit] = dy;
+            return dy;
+        }
+
         public static void TickHpCache()
         {
             if (Time.unscaledTime < _nextHpRefresh)
@@ -157,19 +190,60 @@ namespace SupremeNuclear
                 }
                 _hpCache[unit] = n > 0 ? Mathf.Clamp01(sum / (n * 100f)) : 1f;
             }
+            // «Пояс» мёртвых юнитов из кэша убираем (Unity fake-null), иначе кэш растёт всю сессию.
+            if (_ringBeltCache.Count > 0)
+            {
+                _ringBeltPrune.Clear();
+                foreach (KeyValuePair<Unit, float> kv in _ringBeltCache)
+                    if (kv.Key == null)
+                        _ringBeltPrune.Add(kv.Key);
+                for (int i = 0; i < _ringBeltPrune.Count; i++)
+                    _ringBeltCache.Remove(_ringBeltPrune[i]);
+            }
         }
 
         public static bool IsSelectableFriendly(Unit unit, FactionHQ localHq)
         {
             if (unit == null || localHq == null || unit.NetworkHQ != localHq)
                 return false;
-            return unit is GroundVehicle || unit is Ship || unit is Aircraft || unit is VehicleDepot ||
-                   EconomyService.IsExtractor(unit);
+            // Building покрывает VehicleDepot (фабрики) и захваченные экстракторы.
+            return unit is GroundVehicle || unit is Ship || unit is Aircraft || unit is Building;
         }
 
         /// <summary>Свои без ограничения по типу (для иконок: наземка/флот/авиация).</summary>
         public static bool IsFriendlyUnit(Unit unit, FactionHQ localHq) =>
             unit != null && localHq != null && unit.NetworkHQ == localHq;
+
+        /// <summary>Контакт разведки по юниту, если он «видим»: ракеты обеих сторон
+        /// трекаются без разведки (как мигающие метки HUD), чужие юниты — только пока
+        /// контакт свежее StaleContactSec (тот же гейт, что у вражеских иконок).</summary>
+        public static bool TryGetContact(Unit unit, FactionHQ hq, out TrackingInfo info)
+        {
+            info = null;
+            if (unit == null || hq == null)
+                return false;
+            if (unit is Missile)
+                return true; // ракеты/бомбы рисуются обеим сторонам без развед-гейта
+            info = hq.GetTrackingData(unit.persistentID);
+            return info != null &&
+                   Time.timeSinceLevelLoad - info.lastSpottedTime <= Settings.StaleContactSec;
+        }
+
+        /// <summary>Можно осмотреть ЛКМ (инфопанель): ракеты обеих сторон — всегда,
+        /// чужие юниты/здания — только видимые по разведке. Свои не-Missile не
+        /// инспектируются — они выделяются обычным кликом.</summary>
+        public static bool IsInspectableForeign(Unit unit, FactionHQ localHq) =>
+            unit != null && localHq != null &&
+            (unit is Missile || (unit.NetworkHQ != null && unit.NetworkHQ != localHq)) &&
+            TryGetContact(unit, localHq, out _);
+
+        /// <summary>Якорь чужой цели там, где рисуется её иконка: живой контакт —
+        /// актуальная позиция юнита, протухший — последняя известная разведкой
+        /// (GetPosition сам обновляет позицию, пока контакт жив).</summary>
+        public static Vector3 ContactAnchorWorld(Unit unit, TrackingInfo info) =>
+            info != null
+                ? info.GetPosition().ToLocalPosition() + Vector3.up * (unit.maxRadius * 0.7f)
+                : UnitAnchorWorld(unit);
 
         /// <summary>Пригодность точки для постройки: не вода и не склон
         /// (проба высот ±20 м, как у месторождений экономики).</summary>

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using NuclearOption.Networking;
+using RoadPathfinding;
 using UnityEngine;
 
 namespace SupremeNuclear
@@ -19,6 +20,7 @@ namespace SupremeNuclear
             public FactionHQ Faction;
             public BuildingDefinition Definition;
             public GlobalPosition Site;
+            public float YawDeg;    // поворот здания (выход ангара — куда смотрит)
             public float Cost;
             public float Paid;
             public readonly List<Unit> Builders = new List<Unit>();
@@ -32,6 +34,13 @@ namespace SupremeNuclear
 
         /// <summary>Режим установки: здание, которое поставит следующий ЛКМ по миру.</summary>
         public static BuildingDefinition Pending;
+
+        /// <summary>Жест поворота площадки: ЛКМ удерживается после клика — позиция
+        /// зафиксирована (PlacingSite), выход крутим курсором (PendingYawDeg).
+        /// Заполняется контроллером, читается призраками.</summary>
+        public static bool PlacingActive;
+        public static GlobalPosition PlacingSite;
+        public static float PendingYawDeg;
 
         /// <summary>Выделенный НЕДОСТРОЙ (клик-без-движения по площадке): контекстные
         /// панели показывают его как объект (SupCom-семантика).</summary>
@@ -63,6 +72,8 @@ namespace SupremeNuclear
             ReRouteAt.Clear();
             Sequences.Clear();
             Pending = null;
+            PlacingActive = false;
+            PendingYawDeg = 0f;
             Consumed = false;
         }
 
@@ -76,8 +87,123 @@ namespace SupremeNuclear
 
         public static void MarkRmbEaten() => RmbEaten = true;
 
-        /// <summary>Поставить площадку и отправить выделенных инженеров (хост).</summary>
-        public static bool TryPlace(Vector3 groundPoint, List<Unit> selected, FactionHQ hq)
+        private static readonly Dictionary<BuildingDefinition, bool> HangarDefs =
+            new Dictionary<BuildingDefinition, bool>();
+
+        /// <summary>Здание-ангар (на префабе есть компонент Hangar): пристраивается
+        /// к своему аэродрому и становится слотом производства мультифабрики.</summary>
+        public static bool IsHangarDefinition(BuildingDefinition def)
+        {
+            if (def == null)
+                return false;
+            if (HangarDefs.TryGetValue(def, out bool isHangar))
+                return isHangar;
+            return HangarDefs[def] = def.unitPrefab != null &&
+                                      def.unitPrefab.GetComponent<Hangar>() != null;
+        }
+
+        /// <summary>Ближайший СВОЙ аэродром в радиусе от точки (по центру аэродрома);
+        /// null — если в радиусе своего нет. RunwayQuery не используется: ангара
+        /// устраивает любой живой аэродром, а пустой запрос игра считает неподходящим.</summary>
+        internal static Airbase NearestOwnAirbase(Vector3 from, FactionHQ hq, float maxRange)
+        {
+            if (hq == null)
+                return null;
+            Airbase best = null;
+            float bestSq = maxRange * maxRange;
+            foreach (Airbase airbase in FactionRegistry.airbaseLookup.Values)
+            {
+                if (airbase == null || airbase.CurrentHQ != hq || airbase.center == null)
+                    continue;
+                Vector3 c = airbase.center.position;
+                float distSq = new Vector2(c.x - from.x, c.z - from.z).sqrMagnitude;
+                if (distSq < bestSq)
+                {
+                    bestSq = distSq;
+                    best = airbase;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>Дорисовка рулёжки к новому ангару: дорога «выход ангара → ближний
+        /// узел такси-сети», а если сеть пуста — к ближнему торцу ВПП. RegenerateNetwork
+        /// склеивает концы дорог в узлы в радиусе 10 м — новый ангар втыкается в общий
+        /// граф, и выруливающий борт не ищет вход в сеть через полкарты (или полем
+        /// напрямую, как без сети). Хост-only; клиент сеть не синкает (руление AI —
+        /// серверная логика).</summary>
+        private static void ConnectTaxiway(Airbase airbase, Building hangarBuilding)
+        {
+            try
+            {
+                RoadNetwork net = airbase.GetTaxiNetwork();
+                if (net == null)
+                    return;
+                Hangar hangar = hangarBuilding != null ? hangarBuilding.GetComponent<Hangar>() : null;
+                Transform exit = hangar != null ? hangar.GetSpawnTransform() : null;
+                GlobalPosition from = (exit != null ? exit.position : hangarBuilding.transform.position)
+                    .ToGlobalPosition();
+
+                GlobalPosition to;
+                if (net.TryGetNearestNode(from, out Node node))
+                {
+                    to = node.position;
+                }
+                else
+                {
+                    // Сети нет вовсе: цепляем к ближнему торцу любой полосы — дальше
+                    // нативный выбор взлётной полосы сам поведёт борт по прямой/сети.
+                    Transform best = null;
+                    float bestSq = float.MaxValue;
+                    Airbase.Runway[] runways = airbase.runways;
+                    if (runways == null)
+                        return;
+                    Vector3 f = from.ToLocalPosition();
+                    foreach (Airbase.Runway runway in runways)
+                    {
+                        if (runway == null)
+                            continue;
+                        foreach (Transform end in new[] { runway.Start, runway.End })
+                        {
+                            if (end == null)
+                                continue;
+                            float distSq = new Vector2(end.position.x - f.x, end.position.z - f.z)
+                                .sqrMagnitude;
+                            if (distSq < bestSq)
+                            {
+                                bestSq = distSq;
+                                best = end;
+                            }
+                        }
+                    }
+                    if (best == null)
+                        return;
+                    to = best.position.ToGlobalPosition();
+                }
+
+                var road = new Road();
+                road.AddPoint(from);
+                road.AddPoint(to);
+                road.CalcLength();
+                net.roads.Add(road);
+                net.RegenerateNetwork();
+                // Поверхность: граф ведёт борт, а плиты-коллайдеры несут шасси —
+                // без них на грунте (пустыня) тяжёлый борт вязнет и его катапультирует.
+                TaxiSurface.Register(road.points);
+                Log.Info("Build: рулёжка дорисована — " + airbase.name +
+                         " (дорог " + net.roads.Count + ", поверхность " +
+                         road.points.Count + " тчк)");
+            }
+            catch (System.Exception e)
+            {
+                Log.Error("Build: не удалось дорисовать рулёжку — " + e.GetType().Name + ": " + e.Message);
+            }
+        }
+
+        /// <summary>Поставить площадку и отправить выделенных инженеров (хост).
+        /// yawDeg — поворот здания: контроллер наберёт его удержанием ЛКМ.</summary>
+        public static bool TryPlace(Vector3 groundPoint, List<Unit> selected, FactionHQ hq,
+            float yawDeg = 0f)
         {
             if (!IsHost)
             {
@@ -95,13 +221,13 @@ namespace SupremeNuclear
                 CommanderHud.Notice("Нужен инженер (грузовик) в выделении");
                 return false;
             }
-            return Place(Pending, groundPoint, builders, hq, notice: true);
+            return Place(Pending, groundPoint, builders, hq, notice: true, yawDeg: yawDeg);
         }
 
         /// <summary>Ядро установки площадки (расстановка и шаблоны): задача + маршрут
         /// СВОБОДНЫМ инженерам (фокус-модель); деньги проверяются на месте.</summary>
         public static bool Place(BuildingDefinition def, Vector3 groundPoint,
-            List<Unit> builders, FactionHQ hq, bool notice = false)
+            List<Unit> builders, FactionHQ hq, bool notice = false, float yawDeg = 0f)
         {
             if (def == null || hq == null || builders == null || builders.Count == 0)
                 return false;
@@ -117,12 +243,26 @@ namespace SupremeNuclear
             // новая точка отталкивается от существующих, пока не встанет свободно.
             Vector3 placed = EnforceSpacing(groundPoint);
 
+            // Ангары достраиваются ТОЛЬКО к своему аэродрому в радиусе: без него ангар —
+            // сирота вне мультифабрики. Рулёжку от ангара мод дорисовывает сам (по
+            // завершении стройки), так что площадка не обязана стоять на карте-
+            // бетоне (пустынные аэропорты) — физику грунта игра считает сама.
+            if (IsHangarDefinition(def) &&
+                NearestOwnAirbase(placed, hq, Settings.HangarAttachRadiusM) == null)
+            {
+                if (notice)
+                    CommanderHud.Notice($"Ангар: своего аэродрома нет в радиусе " +
+                                        $"{Settings.HangarAttachRadiusM:F0} м");
+                return false;
+            }
+
             var task = new Task
             {
                 Faction = hq,
                 Definition = def,
                 Site = placed.ToGlobalPosition(),
                 Cost = cost,
+                YawDeg = yawDeg,
             };
             task.Builders.AddRange(builders);
             Active.Add(task);
@@ -130,16 +270,11 @@ namespace SupremeNuclear
             BuildGhosts.Show(task);
 
             // Площадка дописывается В ОБЩУЮ ОЧЕРЕДЬ каждого инженера (порядок кликов).
-            // Если очереди ещё не было, а юнит едет по обычной цепочке — её оставшиеся
-            // точки становятся началом очереди (движения шли раньше по клику).
             foreach (Unit b in builders)
             {
                 if (!Sequences.TryGetValue(b, out List<SeqEntry> seq))
                     Sequences[b] = seq = new List<SeqEntry>();
-                if (seq.Count == 0 &&
-                    GroundOrders.TryGetQueue(b, out var q, out int qi) && qi < q.Count)
-                    for (int i = qi; i < q.Count; i++)
-                        seq.Add(new SeqEntry { Move = q[i], Issued = i == qi });
+                AdoptChainTail(b, seq);
                 seq.Add(new SeqEntry { Task = task });
             }
             if (notice)
@@ -149,6 +284,32 @@ namespace SupremeNuclear
                          $"цена {cost:F0}, строителей {builders.Count}");
             }
             return true;
+        }
+
+        /// <summary>Хвост обычной цепочки наземки становится началом очереди
+        /// инженера (движения, кликнутые раньше площадки, исполняются раньше —
+        /// порядок кликов). Работает ТОЛЬКО при пустой очереди: при живой очереди
+        /// цепочка — не более выданной головы аванцера, копировать нечего.
+        /// Цепочке оставляем ровно ТЕКУЩУЮ точку: держать хвост в двух хранилищах
+        /// нельзя — вейпоинты задваиваются (маркеры/ленты цепочки и очереди
+        /// рисуются каждая своим проходом), а после исчерпания цепочки аванцер
+        /// стал бы выдавать копии заново — юнит проезжал бы маршрут дважды.
+        /// Групповость точек (groupId клика) переживает переезд — драг/удаление
+        /// продолжают действовать на всю группу приказа.</summary>
+        private static void AdoptChainTail(Unit b, List<SeqEntry> seq)
+        {
+            if (seq.Count != 0 ||
+                !GroundOrders.TryGetQueue(b, out var q, out int qi) || qi >= q.Count)
+                return;
+            for (int i = qi; i < q.Count; i++)
+                seq.Add(new SeqEntry
+                {
+                    Move = q[i],
+                    Issued = i == qi,
+                    GroupId = GroundOrders.GroupIdOf(b, i)
+                });
+            GroundOrders.Clear(b);
+            GroundOrders.Set(b, q[qi]); // текущая точка остаётся выданной, дальше ведёт аванцер
         }
 
         /// <summary>СБРОС всей очереди инженера (обычный приказ без Shift — семантика
@@ -389,8 +550,8 @@ namespace SupremeNuclear
         }
 
         private static bool IsIdleFriendly(Unit u, FactionHQ hq) =>
-            u.NetworkHQ == hq &&
-            (!GroundOrders.TryGetQueue(u, out var q, out int i) || i >= q.Count);
+            u.NetworkHQ == hq && GroundOrders.IsIdle(u); // атака/очередь целей — не простой:
+        // пуш из зоны стройки (GroundOrders.Set) порвал бы приказ
 
         /// <summary>Выпихнуть пассивного юнита из зоны (раз в 3 с на юнита).</summary>
         private static bool TryPushOutOfZone(Unit u, Task t)
@@ -466,14 +627,15 @@ namespace SupremeNuclear
                         continue;
                     t.Builders.Add(unit);
                     added++;
-                    // Фокус-маршрутизация как при постановке: свободный едет (в конец
-                    // текущего движения), занятый подцепится цепочкой задач.
+                    // Запись в ОБЩУЮ ОЧЕРЕДЬ инженера (как при постановке): порядок
+                    // кликов, фокус и отрисовка едины — точка в GroundOrders-цепочке
+                    // жила бы параллельно с очередью. Маршрут к площадке выдаст аванцер.
                     if (!HasActiveTaskBefore(unit, t))
                     {
-                        if (GroundOrders.TryGetQueue(unit, out var q, out int qi) && qi < q.Count)
-                            GroundOrders.Enqueue(unit, t.Site);
-                        else
-                            GroundOrders.Set(unit, t.Site);
+                        if (!Sequences.TryGetValue(unit, out List<SeqEntry> seq))
+                            Sequences[unit] = seq = new List<SeqEntry>();
+                        AdoptChainTail(unit, seq);
+                        seq.Add(new SeqEntry { Task = t });
                     }
                 }
                 if (added > 0)
@@ -709,8 +871,39 @@ namespace SupremeNuclear
             Vector3 local = t.Site.ToLocalPosition();
             Vector3 pos = new Vector3(local.x, GameApi.GroundY(local.x, local.z), local.z) +
                           (Vector3)t.Definition.spawnOffset;
+            Quaternion rot = Quaternion.Euler(0f, t.YawDeg, 0f);
+            // Ангар — нативная привязка к аэродрому: SpawnBuilding с airbase делает
+            // SetAirbase (сетевой синк клиентам) + AddHangar — ангар становится слотом
+            // мультифабрики (ProductionTasks.PaySlots увидит его без нашей помощи).
+            if (IsHangarDefinition(t.Definition))
+            {
+                Airbase airbase = NearestOwnAirbase(local, t.Faction, Settings.HangarAttachRadiusM);
+                if (airbase == null)
+                {
+                    Log.Warn("Build: аэродром потерян за время стройки ангара — возврат денег");
+                    t.Faction.AddFunds(t.Paid);
+                    return;
+                }
+                Building hangar = spawner.SpawnBuilding(
+                    t.Definition.unitPrefab, pos.ToGlobalPosition(), rot,
+                    t.Faction, airbase, t.Definition.unitName, false, null);
+                if (hangar == null)
+                {
+                    Log.Error("Build: ангар не создан — возврат денег");
+                    t.Faction.AddFunds(t.Paid);
+                    return;
+                }
+                ConnectTaxiway(airbase, hangar);
+                CommanderHud.Notice($"Построено: {t.Definition.unitName} → {airbase.name}");
+                Log.Info($"Build: ангар {t.Definition.unitName} пристыкован к {airbase.name} " +
+                         $"на ({local.x:F0},{local.z:F0}), поворот {t.YawDeg:F0}°");
+                return;
+            }
+            // Фракция обязательна: здание с null-HQ выходит нейтральным — не выделяется,
+            // и техника из такого депо спавнится тоже нейтральной (TrySpawnVehicle
+            // наследует NetworkHQ депо).
             Unit unit = spawner.SpawnFromUnitDefinitionInEditor(
-                t.Definition, pos.ToGlobalPosition(), Quaternion.identity, null, t.Definition.unitName);
+                t.Definition, pos.ToGlobalPosition(), rot, t.Faction, t.Definition.unitName);
             if (unit == null)
             {
                 Log.Error("Build: здание не создано — возврат денег");

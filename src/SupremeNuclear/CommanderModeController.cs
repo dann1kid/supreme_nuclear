@@ -26,6 +26,10 @@ namespace SupremeNuclear
 
         private float _lastErrorAt = -10f;
 
+        /// <summary>Yaw (град, вокруг Y), каким выход «from» смотрит на «to».</summary>
+        private static float YawBetween(Vector3 from, Vector3 to) =>
+            Mathf.Atan2(to.x - from.x, to.z - from.z) * Mathf.Rad2Deg;
+
         private void Update()
         {
             try
@@ -58,6 +62,9 @@ namespace SupremeNuclear
             EconomyService.Tick();
             BuildTasks.Tick();
             ProductionTasks.Tick();
+            SortieService.Tick(); // миссии вылетов живут и со закрытым столом командира
+            SalvoService.Tick();  // залп-приказы — тоже (пуски на хосте)
+            WeaponGateService.Tick(); // гейты вооружения — блок Ready() выключенных станций
             RouteRibbonMesh.Tick();
             RouteRibbonMesh.Render();
             BuildGhosts.Render();
@@ -80,6 +87,8 @@ namespace SupremeNuclear
                 Deactivate(silent: true);
                 return;
             }
+
+            CommanderAudio.Tick(); // доплер держим нулём: новые источники (взлёт/ракеты) дочищаются
 
             RouteEditor.Tick(this);
 
@@ -119,28 +128,64 @@ namespace SupremeNuclear
                 if (RtsInput.KeyDown(KeyCode.Escape))
                 {
                     BuildTasks.Pending = null;
+                    BuildTasks.PlacingActive = false;
                 }
                 else if (RtsInput.RightDown && !RtsInput.PointerOverUi)
                 {
                     BuildTasks.Pending = null;
+                    BuildTasks.PlacingActive = false;
                     BuildTasks.MarkRmbEaten();
                     CommanderHud.Notice("Установка отменена");
                 }
                 else if (RtsInput.LeftDown && !RtsInput.PointerOverUi && !RouteEditor.Consumed)
                 {
+                    // Клик фиксирует площадку; пока ЛКМ удерживается — поворот выходом
+                    // к курсору, отпускание ставит. Дефолт ангару — выходом к аэродрому.
                     if (GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 site))
                     {
-                        GameApi.TryGetLocalHQ(out FactionHQ hq);
-                        // Без Shift — НОВАЯ очередь: прежние очереди выделенных инженеров
-                        // ломаются (как обычный приказ). Shift — дописать (серия SupCom).
-                        if (!RtsInput.Shift)
-                            foreach (Unit unit in Selection.Selected)
-                                if (GameApi.IsEngineer(unit))
-                                    BuildTasks.ClearFor(unit);
-                        BuildTasks.TryPlace(site, Selection.Selected, hq);
-                        if (!RtsInput.Shift)
-                            BuildTasks.Pending = null;
+                        BuildTasks.PlacingActive = true;
+                        BuildTasks.PlacingSite = site.ToGlobalPosition();
+                        BuildTasks.PendingYawDeg = 0f;
+                        if (BuildTasks.IsHangarDefinition(BuildTasks.Pending))
+                        {
+                            GameApi.TryGetLocalHQ(out FactionHQ abHq);
+                            Airbase ab = BuildTasks.NearestOwnAirbase(
+                                site, abHq, Settings.HangarAttachRadiusM);
+                            if (ab != null && ab.center != null)
+                                BuildTasks.PendingYawDeg = YawBetween(site, ab.center.position);
+                        }
                     }
+                    BuildTasks.MarkConsumed();
+                }
+                else if (BuildTasks.PlacingActive && RtsInput.LeftHeld)
+                {
+                    // Держим ЛКМ: крутим выход к курсору (порог 2 м — дрожь у якоря).
+                    if (!RtsInput.PointerOverUi &&
+                        GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 g))
+                    {
+                        Vector3 anchor = BuildTasks.PlacingSite.ToLocalPosition();
+                        Vector2 delta = new Vector2(g.x - anchor.x, g.z - anchor.z);
+                        if (delta.sqrMagnitude > 4f)
+                            BuildTasks.PendingYawDeg =
+                                Mathf.Atan2(delta.x, delta.y) * Mathf.Rad2Deg;
+                    }
+                    // Весь жест — выделение-neutral: рамка не стартует на движении мыши.
+                    BuildTasks.MarkConsumed();
+                }
+                else if (BuildTasks.PlacingActive && RtsInput.LeftUp)
+                {
+                    BuildTasks.PlacingActive = false;
+                    Vector3 site = BuildTasks.PlacingSite.ToLocalPosition();
+                    GameApi.TryGetLocalHQ(out FactionHQ hq);
+                    // Без Shift — НОВАЯ очередь: прежние очереди выделенных инженеров
+                    // ломаются (как обычный приказ). Shift — дописать (серия SupCom).
+                    if (!RtsInput.Shift)
+                        foreach (Unit unit in Selection.Selected)
+                            if (GameApi.IsEngineer(unit))
+                                BuildTasks.ClearFor(unit);
+                    BuildTasks.TryPlace(site, Selection.Selected, hq, BuildTasks.PendingYawDeg);
+                    if (!RtsInput.Shift)
+                        BuildTasks.Pending = null;
                     BuildTasks.MarkConsumed();
                 }
             }
@@ -151,12 +196,28 @@ namespace SupremeNuclear
             GroundOrders.Prune();
             AircraftOrders.Prune();
             StanceService.Prune();
+            WeaponGateService.Prune();
+            DefenseService.Prune();
+            SalvoService.Prune();
             TickControlGroups();
-            if (Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt))
+
+            // Профили высоты Alt+1..4 и скорость Shift+1..3: штамп для новых участков
+            // + немедленное применение к головному сегменту выделенных бортов.
+            bool alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+            bool shiftHeld = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+            if (alt)
             {
                 if (RtsInput.KeyDown(KeyCode.Alpha1)) SetProfile(0);
                 else if (RtsInput.KeyDown(KeyCode.Alpha2)) SetProfile(1);
                 else if (RtsInput.KeyDown(KeyCode.Alpha3)) SetProfile(2);
+                else if (RtsInput.KeyDown(KeyCode.Alpha4)) SetProfile(3);
+                else if (RtsInput.KeyDown(KeyCode.D)) CycleDefense();
+            }
+            else if (shiftHeld)
+            {
+                if (RtsInput.KeyDown(KeyCode.Alpha1)) SetSpeed(0);
+                else if (RtsInput.KeyDown(KeyCode.Alpha2)) SetSpeed(1);
+                else if (RtsInput.KeyDown(KeyCode.Alpha3)) SetSpeed(2);
             }
 
             // Ctrl+K — УНИЧТОЖИТЬ выделенное (дефолт SupCom): юниты/здания гибнут честно
@@ -177,33 +238,129 @@ namespace SupremeNuclear
 
             if (Selection.Selected.Count > 0)
             {
-                if (RtsInput.KeyDown(KeyCode.M)) OrderModes.Pending = OrderMode.Move;
+                // Alt+Shift+R — Disperse Move (FAF-стиль): очередь вейпоинтов группы
+                // распределяется прямыми векторами. Комбо первым в цепи: R без
+                // модификаторов ниже заряжает «Атаку веером».
+                if (alt && shiftHeld && RtsInput.KeyDown(KeyCode.R))
+                    MoveOrders.IssueDisperseMove(Selection.Selected);
+                else if (RtsInput.KeyDown(KeyCode.M)) OrderModes.Pending = OrderMode.Move;
                 else if (RtsInput.KeyDown(KeyCode.A)) OrderModes.Pending = OrderMode.AttackMove;
                 else if (RtsInput.KeyDown(KeyCode.U)) OrderModes.Pending = OrderMode.Patrol;
                 else if (RtsInput.KeyDown(KeyCode.T)) OrderModes.Pending = OrderMode.Attack;
+                else if (RtsInput.KeyDown(KeyCode.V)) OrderModes.Pending = OrderMode.Salvo;
+                else if (RtsInput.KeyDown(KeyCode.R))
+                    MoveOrders.ChargeFanAttack(); // «Атака веером»: копим цели ПКМ-ами
                 else if (RtsInput.KeyDown(KeyCode.S))
                     MoveOrders.CancelAll(Selection.Selected); // мгновенная отмена
+                if (RtsInput.KeyDown(KeyCode.G))
+                    MoveOrders.IssueReturnToBase(Selection.Selected); // борта — домой, мгновенно
+                if (RtsInput.KeyDown(KeyCode.X))
+                {
+                    int popped = DefenseService.PopNow(Selection.Selected);
+                    CommanderHud.Notice(popped > 0
+                        ? $"Ловушки: бортов — {popped}"
+                        : "В выделении нет бортов с контрмерами");
+                }
                 if (RtsInput.KeyDown(KeyCode.Escape))
                     OrderModes.Pending = OrderMode.Move;
             }
         }
 
-        /// <summary>Группы управления: Ctrl+1..9 — назначить, 1..9 — вызвать,
-        /// двойное нажатие — камера на группу.</summary>
-        private static void SetProfile(int index)
+        /// <summary>Профиль высоты: штамп для новых участков + применение к текущему
+        /// участку выделенных бортов (Alt+1..4, кнопки панели).</summary>
+        private void SetProfile(int index)
         {
             AircraftOrders.ProfileIndex = Mathf.Clamp(index, 0, AircraftOrders.Profiles.Length - 1);
             var p = AircraftOrders.Profiles[AircraftOrders.ProfileIndex];
-            CommanderHud.Notice($"Профиль высоты: {p.Name} ({p.AltitudeAgl:F0} м{(p.FollowTerrain ? ", огибание" : "")})");
+            int applied = 0;
+            foreach (Unit unit in Selection.Selected)
+                if (unit is Aircraft && AircraftOrders.ApplyModesToCurrent(unit))
+                    applied++;
+            CommanderHud.Notice($"Профиль высоты: {p.Name} ({p.AltitudeAgl:F0} м{(p.FollowTerrain ? ", огибание" : "")})" +
+                                (applied > 0 ? $" — участок сменили {applied}" : ""));
         }
 
+        /// <summary>Скоростной режим (Shift+1..3, кнопки): Полный/Крейсер/Эконом.
+        /// Самолёты; вертолётам тротл не назначается (газ ведёт игра).</summary>
+        private void SetSpeed(int index)
+        {
+            var modes = new[] { SpeedMode.Full, SpeedMode.Cruise, SpeedMode.Economy };
+            var names = new[] { "Полный", "Крейсер", "Эконом" };
+            AircraftOrders.SpeedIndex = modes[Mathf.Clamp(index, 0, modes.Length - 1)];
+            int applied = 0;
+            foreach (Unit unit in Selection.Selected)
+                if (unit is Aircraft && AircraftOrders.ApplyModesToCurrent(unit))
+                    applied++;
+            CommanderHud.Notice($"Скорость: {names[index]}" +
+                                (applied > 0 ? $" — участок сменили {applied}" : "") +
+                                " (самолёты)");
+        }
+
+        /// <summary>Цикл режима авто-защиты выделенных бортов (Alt+D, кнопки).</summary>
+        private void CycleDefense()
+        {
+            if (Selection.Selected.Count == 0)
+                return;
+            DefenseMode first = DefenseMode.Auto;
+            bool any = false;
+            foreach (Unit unit in Selection.Selected)
+            {
+                if (!(unit is Aircraft))
+                    continue;
+                DefenseMode mode = DefenseService.Cycle(unit);
+                if (!any)
+                {
+                    first = mode;
+                    any = true;
+                }
+            }
+            if (any)
+                CommanderHud.Notice("Защита: " + DefenseName(first));
+        }
+
+        internal static string DefenseName(DefenseMode mode) =>
+            mode switch
+            {
+                DefenseMode.Auto => "Авто (уклонение + РЭБ/ловушки)",
+                DefenseMode.Flares => "Ловушки (маршрут держим)",
+                _ => "Выкл"
+            };
+
+        /// <summary>Кнопки панели: профиль высоты / скорость / защита по индексу.</summary>
+        public void SetProfileUi(int index) => SetProfile(index);
+        public void SetSpeedUi(int index) => SetSpeed(index);
+        public void SetDefenseUi(int index)
+        {
+            var modes = new[] { DefenseMode.Auto, DefenseMode.Flares, DefenseMode.Off };
+            DefenseMode mode = modes[Mathf.Clamp(index, 0, modes.Length - 1)];
+            int n = 0;
+            foreach (Unit unit in Selection.Selected)
+                if (unit is Aircraft)
+                    n++;
+            if (n == 0)
+            {
+                CommanderHud.Notice("Защита: в выделении нет бортов");
+                return;
+            }
+            foreach (Unit unit in Selection.Selected)
+                DefenseService.Set(unit, mode);
+            CommanderHud.Notice("Защита: " + DefenseName(mode));
+        }
+
+        /// <summary>Группы управления: Ctrl+1..9 — назначить, 1..9 — вызвать (без
+        /// модификаторов; Alt/Shift+цифра заняты профилями высоты и скоростью),
+        /// двойное нажатие — камера на группу.</summary>
         private void TickControlGroups()
         {
             bool ctrl = Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
+            bool alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+            bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
             for (int i = 1; i <= 9; i++)
             {
                 if (!Input.GetKeyDown(KeyCode.Alpha0 + i) || RtsInput.Typing)
                     continue;
+                if (alt || shift)
+                    continue; // Alt+1..4 — профиль высоты, Shift+1..3 — скорость
                 if (ctrl)
                 {
                     if (Selection.Selected.Count > 0)
@@ -319,6 +476,10 @@ namespace SupremeNuclear
             Selection.Reset();
             _cameraState = new CommanderCameraState();
             cam.SwitchState(_cameraState);
+            // Доплер гасим последним: выше Activate ещё может тихо сорваться,
+            // а Restore в Deactivate при IsActive=false уже не выполнится.
+            if (Settings.CommanderNoDoppler)
+                CommanderAudio.Suppress();
             IsActive = true;
             Log.Info("Режим командира включён");
         }
@@ -326,6 +487,7 @@ namespace SupremeNuclear
         private void Deactivate(bool silent = false)
         {
             IsActive = false;
+            CommanderAudio.Restore(); // доплер гасили на входе — вернули на любом выходе
             _cameraState = null;
             Selection.Reset();
             CameraStateManager cam = GameApi.CamManager;
