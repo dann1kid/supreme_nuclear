@@ -25,7 +25,7 @@ namespace SupremeNuclear
 
             SelfCheck.RunStartup();
 
-            // Единственный патч мода — руление авиацией с приказом (AIPilotCombatModes.FixedUpdateState).
+            // Все Harmony-патчи мода — атрибутными классами по сборке, реестр — ARCHITECTURE §6.
             _harmony = new Harmony(PluginInfo.Guid);
             _harmony.PatchAll();
 
@@ -39,12 +39,14 @@ namespace SupremeNuclear
                 BuildGhosts.Reset();
                 ProductionTasks.Reset();
                 AircraftOrders.Reset();
+                AircraftTargetPinPatch.ResetClaims(); // реестр занятости целей бортов сцены
                 GroundOrders.Reset();
                 StanceService.Reset();
                 WeaponGateService.Reset(); // гейты вооружения привязаны к юнитам сцены
                 DefenseService.Reset(); // режимы защиты/таймеры сброса привязаны к бортам сцены
                 SalvoService.Reset();   // выбор станций залпа — тоже
                 AirbaseReserve.Reset(); // резервы ангаров умершей сцены недействительны
+                AirbaseAccess.Reset(); // тумблеры посадки/взлёта умершей сцены недействительны
                 SelectionService.ResetGroups();
                 RangeRings.Reset(); // кольца дальности: круги/буферы сцены
                 TaxiSurface.Reset(); // плиты дорисованных рулёжек умершей сцены

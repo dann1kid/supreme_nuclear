@@ -11,6 +11,10 @@ namespace SupremeNuclear
 
         public static bool IsHoldFire(Unit unit) => unit != null && HoldFire.Contains(unit);
 
+        /// <summary>Есть ли в мире хоть один юнит в стойке — быстрый выход
+        /// предохранителя WeaponUseGatePatch без обхода выделения.</summary>
+        public static bool AnyHolding => HoldFire.Count > 0;
+
         public static bool Toggle(Unit unit)
         {
             if (unit == null)

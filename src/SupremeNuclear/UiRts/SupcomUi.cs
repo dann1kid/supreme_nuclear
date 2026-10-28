@@ -69,12 +69,22 @@ namespace SupremeNuclear
         /// <summary>Индексы ракетных станций чипов залпа (параллельно кнопкам st_*,
         /// v0.92: чипы только ракетным станциям — бомбовым/пушечным залп нечем).</summary>
         private readonly List<int> _chipStations = new();
-        /// <summary>Число рядов/наличие гейтов последней сборки кнопок — для раскладки.</summary>
+        /// <summary>Число рядов команд и высота секции гейтов последней сборки —
+        /// для раскладки (3 — секции нет; 44 — классы; 68 — классы + чипы типов).</summary>
         private int _cmdRows;
-        private bool _cmdGates;
+        private float _cmdGateHeight;
         /// <summary>Полоса гейтов вооружения (внизу карточки, под сеткой команд):
         /// кнопка на каждый класс, присутствующий в выделении.</summary>
         private RectTransform _gateStrip;
+        /// <summary>Ряд чипов ТИПОВ вооружения (v0.106): под полосой классов; чип
+        /// циклит правило типа (ЛКМ — вперёд, колесо над чипом — туда-обратно).</summary>
+        private RectTransform _gateTypes;
+        /// <summary>Чипы типов последней сборки — рефреш подписи/цвета по агрегату
+        /// выделения (как класс-гейты, «+/−/±» → суффикс «·Н/·В/·з/·в/×/±»).</summary>
+        private readonly List<(Button btn, Image img, Text label, WeaponInfo wi)> _typeChips = new();
+        /// <summary>Кэп чипов типов в один ряд (карточка 418 px, чип 64 px; хвост
+        /// типов сверх кэпа не показывается — долг §12).</summary>
+        private const int TypeChipCap = 6;
         /// <summary>Заголовок секции гейтов (вкл/выкл вместе с полосой).</summary>
         private Text _gateHdr;
         /// <summary>Порядок классов на полосе гейтов — от частых к редким.</summary>
@@ -100,10 +110,15 @@ namespace SupremeNuclear
         private Button _pauseBtn;            // контекстные кнопки фабрики (DESIGN 2.10)
         private Button _cycleBtn;
         private Button _tplBtn;              // снять очередь фабрики в персистентный шаблон
-        private VehicleDepot _ctxDepot;      // фабрика, к которой относятся Пауза/Цикл
-        private Building _ctxDock;           // ...верфь (флот, v0.92)
+        private Button _noLandBtn;           // тумблеры аэродрома (DESIGN §2.11b):
+        private Button _noTakeoffBtn;        // подсветка = закрыто (как Пауза = пауза)
+        private VehicleDepot _ctxDepot;      // ПЕРВЫЕ фабрики своего типа в выделении
+        private Building _ctxDock;           // (представители: шаблон «Шаблон+», лодауты)
         private Airbase _ctxAirbase;         // ...или аэродром
-        private Hangar _ctxHangar;           // ...или одиночный ангар (индивидуальная фабрия)
+        private Hangar _ctxHangar;           // ...или первый ангар выделения
+        /// <summary>ВСЕ фабрики выделения (депо + верфи + ангары): групповые
+        /// Пауза/Цикл действуют на весь список, а не на представителя.</summary>
+        private readonly List<object> _ctxFactories = new List<object>();
         private RectTransform _tierRoot;     // полоса выбора пула (тиры каталога)
         private readonly (Button btn, Image img, int tier)[] _tierButtons =
             new (Button, Image, int)[4];     // Все / T1 / T2 / T3
@@ -263,7 +278,10 @@ namespace SupremeNuclear
             // Каждый кадр (не по таймеру): наведение на плитку закупки без задержки
             // опроса; сами панели обновляются реже ниже (смена ховера форсит рефреш).
             if (ctxController != null && ctxController.IsActive)
+            {
                 UpdateTileHover();
+                UpdateTypeChipWheel(); // колесо над чипом типа — цикл правила туда-обратно
+            }
             else
                 ResetHover();
 
@@ -285,6 +303,7 @@ namespace SupremeNuclear
                 return;
 
             _cmdButtons.Clear();
+            _typeChips.Clear();
             _cmdContextKey = -1; // кнопки пересоздадутся под текущий контекст выделения
             _contextHash = -1;
             _infoHash = -1;
@@ -575,19 +594,32 @@ namespace SupremeNuclear
             rtO.offsetMax = new Vector2(-8f, -19f);
 
             // Заголовок секции гейтов — виден только с полосой (управляет активностью
-            // BuildCommandButtons).
+            // BuildCommandButtons); высота секции меняется (классы / классы+типы),
+            // офсеты выставляет BuildCommandButtons.
             _gateHdr = Label(panel, "gatehdr", Loc.Tr("РАЗРЕШЁННОЕ ВООРУЖЕНИЕ"), 10, TextDim,
                 TextAnchor.UpperLeft, true);
             var rtG = (RectTransform)_gateHdr.transform;
             rtG.anchorMin = new Vector2(0f, 0f);
             rtG.anchorMax = new Vector2(1f, 0f);
-            rtG.offsetMin = new Vector2(10f, 27f);
-            rtG.offsetMax = new Vector2(-8f, 40f);
+            rtG.offsetMin = new Vector2(10f, 51f);
+            rtG.offsetMax = new Vector2(-8f, 64f);
             _gateHdr.gameObject.SetActive(false);
 
-            // Полоса гейтов вооружения — внизу карточки; сетка команд поднимается над ней.
-            _gateStrip = Panel("gates", panel, new Vector2(0f, 0f), new Vector2(1f, 0f),
+            // Секция гейтов вооружения — внизу карточки, два ряда: ТИПЫ (нижний,
+            // v0.106) и КЛАССЫ; сетка команд поднимается над ними.
+            _gateTypes = Panel("gatetypes", panel, new Vector2(0f, 0f), new Vector2(1f, 0f),
                 new Vector2(8f, 3f), new Vector2(-8f, 25f), new Color(0f, 0f, 0f, 0f));
+            var tlayout = _gateTypes.gameObject.AddComponent<HorizontalLayoutGroup>();
+            tlayout.spacing = 4f;
+            tlayout.childControlWidth = false;
+            tlayout.childControlHeight = false;
+            tlayout.childForceExpandWidth = false;
+            tlayout.childForceExpandHeight = false;
+            tlayout.childAlignment = TextAnchor.MiddleLeft;
+            _gateTypes.gameObject.SetActive(false);
+
+            _gateStrip = Panel("gates", panel, new Vector2(0f, 0f), new Vector2(1f, 0f),
+                new Vector2(8f, 27f), new Vector2(-8f, 49f), new Color(0f, 0f, 0f, 0f));
             var glayout = _gateStrip.gameObject.AddComponent<HorizontalLayoutGroup>();
             glayout.spacing = 4f;
             glayout.childControlWidth = false;
@@ -720,31 +752,33 @@ step = "arrows";
             _strip2Nav.SetActive(false);
 
             // Контекстные кнопки фабрики (2.10): Пауза и Цикл — у правого края нижней строки.
+            // Кнопки 22 px с интервалом 3: до пяти в колонке (Пауза/Цикл/Шаблон+ +
+            // тумблеры аэродрома с ангара) — 122 px, колонка до -144 (низ панели).
             var ctxGo = new GameObject("factoryCtx", typeof(RectTransform));
             var ctxRt = (RectTransform)ctxGo.transform;
             ctxRt.SetParent(panel, false);
             ctxRt.anchorMin = new Vector2(0f, 1f);
             ctxRt.anchorMax = new Vector2(0f, 1f);
-            ctxRt.offsetMin = new Vector2(44f, -131f);
+            ctxRt.offsetMin = new Vector2(44f, -144f);
             ctxRt.offsetMax = new Vector2(108f, -22f);
             var ctxLayout = ctxGo.AddComponent<VerticalLayoutGroup>();
-            ctxLayout.spacing = 4f;
+            ctxLayout.spacing = 3f;
             ctxLayout.childControlWidth = false;
             ctxLayout.childControlHeight = false;
             ctxLayout.childForceExpandWidth = false;
             ctxLayout.childForceExpandHeight = false;
             _pauseBtn = Button_(ctxGo.transform, "pause", Loc.Tr("Пауза"), () =>
             {
-                if (CtxFactory() != null) ProductionTasks.TogglePause(CtxFactory());
+                ProductionTasks.TogglePauseAll(_ctxFactories);
             }, 10);
-            ((RectTransform)_pauseBtn.transform).sizeDelta = new Vector2(60f, 26f);
-            _pauseBtn.gameObject.AddComponent<LayoutElement>().minHeight = 26f;
+            ((RectTransform)_pauseBtn.transform).sizeDelta = new Vector2(60f, 22f);
+            _pauseBtn.gameObject.AddComponent<LayoutElement>().minHeight = 22f;
             _cycleBtn = Button_(ctxGo.transform, "cycle", Loc.Tr("Цикл"), () =>
             {
-                if (CtxFactory() != null) ProductionTasks.ToggleCycle(CtxFactory());
+                ProductionTasks.ToggleCycleAll(_ctxFactories);
             }, 10);
-            ((RectTransform)_cycleBtn.transform).sizeDelta = new Vector2(60f, 26f);
-            _cycleBtn.gameObject.AddComponent<LayoutElement>().minHeight = 26f;
+            ((RectTransform)_cycleBtn.transform).sizeDelta = new Vector2(60f, 22f);
+            _cycleBtn.gameObject.AddComponent<LayoutElement>().minHeight = 22f;
             _tplBtn = Button_(ctxGo.transform, "tpl", Loc.Tr("Шаблон+"), () =>
             {
                 var controller = CommanderModeController.Instance;
@@ -778,8 +812,22 @@ step = "arrows";
                     ? Loc.F("Шаблон сохранён: {0}", tpl.name)
                     : Loc.Tr("Нечего сохранять (набор/очередь пусты)"));
             }, 10);
-            ((RectTransform)_tplBtn.transform).sizeDelta = new Vector2(60f, 26f);
-            _tplBtn.gameObject.AddComponent<LayoutElement>().minHeight = 26f;
+            ((RectTransform)_tplBtn.transform).sizeDelta = new Vector2(60f, 22f);
+            _tplBtn.gameObject.AddComponent<LayoutElement>().minHeight = 22f;
+            _noLandBtn = Button_(ctxGo.transform, "noLand", Loc.Tr("Без посадки"), () =>
+            {
+                if (_ctxAirbase != null)
+                    AirbaseAccess.SetLanding(_ctxAirbase, !AirbaseAccess.IsLandingOpen(_ctxAirbase));
+            }, 9);
+            ((RectTransform)_noLandBtn.transform).sizeDelta = new Vector2(62f, 22f);
+            _noLandBtn.gameObject.AddComponent<LayoutElement>().minHeight = 22f;
+            _noTakeoffBtn = Button_(ctxGo.transform, "noTakeoff", Loc.Tr("Без взлёта"), () =>
+            {
+                if (_ctxAirbase != null)
+                    AirbaseAccess.SetTakeoff(_ctxAirbase, !AirbaseAccess.IsTakeoffOpen(_ctxAirbase));
+            }, 9);
+            ((RectTransform)_noTakeoffBtn.transform).sizeDelta = new Vector2(62f, 22f);
+            _noTakeoffBtn.gameObject.AddComponent<LayoutElement>().minHeight = 22f;
             ctxGo.SetActive(false);
             }
             catch (System.Exception e)
@@ -789,7 +837,9 @@ step = "arrows";
             }
         }
 
-        /// <summary>Фабрика контекстных кнопок: верфь/депо/ангар/аэродром выделения.</summary>
+        /// <summary>Фабрика-представитель выделения (первая: верфь/депо/ангар/аэродром):
+        /// очередь «Шаблон+» и аэродром редактора лодаутов. Пауза/Цикл идут мимо —
+        /// группой по _ctxFactories.</summary>
         private object CtxFactory() =>
             _ctxDock != null ? (object)_ctxDock :
             _ctxDepot != null ? (object)_ctxDepot :
@@ -1143,7 +1193,11 @@ step = "arrows";
                     string name = !string.IsNullOrEmpty(ws.WeaponInfo.shortName)
                         ? ws.WeaponInfo.shortName
                         : ws.WeaponInfo.weaponName;
-                    string status = ws.Reloading ? Loc.Tr(" · перезарядка") : (ws.Ready() ? "" : Loc.Tr(" · пусто"));
+                    // Гейт держит станцию «неготовой» при полном боезапасе —
+                    // это не «пусто»; «пусто» — только расстрелянный боезапас.
+                    string status = !WeaponGateService.IsAllowed(u, ws) ? Loc.Tr(" · выкл")
+                        : ws.Reloading ? Loc.Tr(" · перезарядка")
+                        : (ws.Ammo > 0 ? "" : Loc.Tr(" · пусто"));
                     _infoWeapons[w++].text = Util.FitLine(
                         $"{name}: {ws.Ammo}/{ws.FullAmmo}{status}", FitBodyChars);
                 }
@@ -1459,9 +1513,14 @@ step = "arrows";
             bool showAir = hasAir;
             bool buildingsOnly = selCount > 0 && !hasAir && !hasGround;
             WeaponClass gateClasses = WeaponGateService.ClassesOf(controller.Selection.Selected);
+            // Состав типов чипов входит в ключ пересборки (как gateClasses): смена
+            // набора вооружения выделения перестраивает ряд чипов.
+            int typeKey = 0;
+            foreach (WeaponInfo wi in WeaponGateService.TypesOf(controller.Selection.Selected, TypeChipCap))
+                typeKey = typeKey * 31 + wi.GetInstanceID();
             int key = (showAir ? 1 : 0) | (hasGround ? 2 : 0) | (hasPlane ? 4 : 0) |
                       (hasMissileAir ? 8 : 0) | (singleAir != null ? 16 : 0) |
-                      (buildingsOnly ? 32 : 0) | ((int)gateClasses << 6);
+                      (buildingsOnly ? 32 : 0) | ((int)gateClasses << 6) | (typeKey << 12);
             if (key != _cmdContextKey)
             {
                 _cmdContextKey = key;
@@ -1549,6 +1608,18 @@ step = "arrows";
                 TintCommand("gate_" + cls,
                     state > 0 ? BtnActive : state == 0 ? WarnRed : WarnYellow,
                     (state > 0 ? "+ " : state == 0 ? "- " : "± ") + Catalog.ClassLabel(cls));
+            }
+
+            // Чипы ТИПОВ (v0.106): подпись «имя + суффикс состояния», цвет как у
+            // классов (зелёный без правил, красный выкл, жёлтый ограничение/вперемешку).
+            foreach (var (chipBtn, chipImg, chipLabel, chipWi) in _typeChips)
+            {
+                if (chipBtn == null)
+                    continue; // уничтожен пересборкой — список почистит сборка
+                TypeGateState? state = WeaponGateService.TypeStateOf(controller.Selection.Selected, chipWi);
+                chipImg.color = state == TypeGateState.None ? BtnActive
+                    : state == TypeGateState.Off ? WarnRed : WarnYellow;
+                chipLabel.text = TypeChipName(chipWi) + Catalog.TypeGateSuffix(state);
             }
 
             // Чипы станций: боезапас живой, выбранность — подсветкой. Кнопка st_i
@@ -1641,6 +1712,7 @@ step = "arrows";
                 Destroy(btn.gameObject);
             _cmdButtons.Clear();
             _chipStations.Clear();
+            _typeChips.Clear();
 
             var defs = new List<(string name, string label, System.Action a)>();
             if (!buildingsOnly)
@@ -1718,10 +1790,12 @@ step = "arrows";
                 _cmdButtons.Add((b, b.GetComponent<Image>(), action, b.GetComponentInChildren<Text>()));
             }
 
-            // Гейты вооружения (DESIGN §2.11): кнопка на каждый класс выделения —
-            // внизу карточки, тоггл всему выделению; гейт главнее явных приказов.
-            // С полосой низ сетки команд поднимается над ней (26 px + зазор).
+            // Гейты вооружения (DESIGN §2.11), два ряда внизу карточки: КЛАССЫ —
+            // тоггл всему выделению (гейт главнее явных приказов); ТИПЫ (v0.106) —
+            // чип на каждый тип вооружения выделения (кэп TypeChipCap, по убыванию
+            // полного боезапаса), ЛКМ циклит правило, колесо — туда-обратно.
             int gates = 0;
+            int types = 0;
             if (_gateStrip != null)
             {
                 WeaponClass classes = WeaponGateService.ClassesOf(controller.Selection.Selected);
@@ -1737,14 +1811,32 @@ step = "arrows";
                     _cmdButtons.Add((b, b.GetComponent<Image>(), null, b.GetComponentInChildren<Text>()));
                     gates++;
                 }
+                if (_gateTypes != null)
+                {
+                    foreach (WeaponInfo wi in WeaponGateService.TypesOf(
+                                 controller.Selection.Selected, TypeChipCap))
+                    {
+                        WeaponInfo w = wi;
+                        Button b = Button_(_gateTypes, "typechip_" + w.GetInstanceID(),
+                            TypeChipName(w), () => CycleTypeGate(controller, w, true), 10);
+                        ((RectTransform)b.transform).sizeDelta = new Vector2(64f, 22f);
+                        b.gameObject.AddComponent<LayoutElement>().minWidth = 64f;
+                        _cmdButtons.Add((b, b.GetComponent<Image>(), null, b.GetComponentInChildren<Text>()));
+                        _typeChips.Add((b, b.GetComponent<Image>(), b.GetComponentInChildren<Text>(), w));
+                        types++;
+                    }
+                    _gateTypes.gameObject.SetActive(types > 0);
+                }
             }
-            var gridRt = (RectTransform)grid;
-            gridRt.offsetMin = new Vector2(8f, gates > 0 ? 43f : 3f);
+            // Раскладка секции (снизу вверх): типы 3..25, классы 27..49, заголовок
+            // 51..64; сетка команд — над секцией; высота панели — в ApplyCommandLayout.
             _gateStrip.gameObject.SetActive(gates > 0);
             if (_gateHdr != null)
                 _gateHdr.gameObject.SetActive(gates > 0);
+            var gridRt = (RectTransform)grid;
+            gridRt.offsetMin = new Vector2(8f, gates > 0 ? (types > 0 ? 67f : 43f) : 3f);
             _cmdRows = rows;
-            _cmdGates = gates > 0;
+            _cmdGateHeight = gates > 0 ? (types > 0 ? 68f : 44f) : 3f;
             ApplyCommandLayout();
         }
 
@@ -1771,8 +1863,7 @@ step = "arrows";
                 if (_cmdGrid != null)
                     _cmdGrid.offsetMax = new Vector2(-8f, hint ? -33f : -17f);
                 float height = (hint ? 18f : 2f) + 13f + _cmdRows * 26f +
-                               Mathf.Max(0, _cmdRows - 1) * 4f + 5f +
-                               (_cmdGates ? 44f : 3f);
+                               Mathf.Max(0, _cmdRows - 1) * 4f + 5f + _cmdGateHeight;
                 _commandPanel.offsetMax = new Vector2(430f, 12f + height);
                 above = 12f + height + 6f;
             }
@@ -1784,6 +1875,61 @@ step = "arrows";
             }
             if (_infoPanel != null)
                 _infoPanel.offsetMin = new Vector2(12f, above);
+        }
+
+        // ---------- чипы ТИПОВ вооружения (v0.106, DESIGN §2.11) ----------
+
+        /// <summary>Подпись чипа типа: shortName до 7 символов (влезает в 64 px
+        /// при 10 кегле); пустое имя — «ст.».</summary>
+        private static string TypeChipName(WeaponInfo wi)
+        {
+            string name = !string.IsNullOrEmpty(wi.shortName) ? wi.shortName : wi.weaponName;
+            if (string.IsNullOrEmpty(name))
+                name = Loc.Tr("ст.");
+            return name.Length > 7 ? name.Substring(0, 7) : name;
+        }
+
+        /// <summary>Цикл правила типа по выделению (ЛКМ — вперёд, колесо — в обе
+        /// стороны): применяется всем юнитам выделения, у которых тип есть; Notice
+        /// называет выбранное состояние, карточка рефрешится немедленно.</summary>
+        private void CycleTypeGate(CommanderModeController controller, WeaponInfo wi, bool forward)
+        {
+            TypeGateState state =
+                Catalog.Next(WeaponGateService.TypeStateOf(controller.Selection.Selected, wi), forward);
+            WeaponGateService.ApplyTypeState(controller.Selection.Selected, wi, state);
+            // имя оружия — данные игры (не переводится), клей «: » — не фраза
+            CommanderHud.Notice(TypeChipName(wi) + ": " + Catalog.TypeGateLabel(state));
+            _nextRefresh = 0f;
+        }
+
+        /// <summary>Колесо над чипом типа — цикл правила туда-обратно (как колесо
+        /// лодаутов над плиткой каталога): скан прямоугольников чипов каждый кадр
+        /// с прокруткой, колесо УПОТРЕБЛЕНО UI — камера в этом кадре не зумит.</summary>
+        private void UpdateTypeChipWheel()
+        {
+            float wheel = Input.mouseScrollDelta.y;
+            if (wheel == 0f || RtsInput.Typing || _typeChips.Count == 0)
+                return;
+            var controller = CommanderModeController.Instance;
+            if (controller == null)
+                return;
+            for (int i = _typeChips.Count - 1; i >= 0; i--)
+            {
+                var chip = _typeChips[i];
+                if (chip.btn == null)
+                {
+                    _typeChips.RemoveAt(i); // уничтожен пересборкой карточки
+                    continue;
+                }
+                if (!chip.btn.gameObject.activeInHierarchy)
+                    continue;
+                if (!RectTransformUtility.RectangleContainsScreenPoint(
+                        (RectTransform)chip.btn.transform, Input.mousePosition, null))
+                    continue;
+                CycleTypeGate(controller, chip.wi, wheel > 0f);
+                RtsInput.WheelConsumedByUi = true;
+                return; // один чип за прокрутку
+            }
         }
 
         private void RefreshTabs()
@@ -1798,21 +1944,43 @@ step = "arrows";
             Building navalDock = null;
             Unit extractor = null;
             bool hasEngineer = false;
+            Airbase carrier = null; // корабль-аэродром (авианосец/LHA): Airbase —
+            // компонент корпуса (Ship.GetAirbase), полосы/точки едут вместе с ним
             var hangars = new List<Hangar>();
+            // Все фабрики выделения (депо/верфь/ангар) — групповые Пауза/Цикл и хэш
+            // очередей; представители выше — ПЕРВЫЕ своего типа (детерминизм).
+            _ctxFactories.Clear();
             int selHash = 17;
             foreach (Unit unit in selected)
             {
                 selHash = selHash * 31 + (unit != null ? unit.GetInstanceID() : 0);
                 if (BuildTasks.IsDock(unit))
-                    navalDock = unit as Building; // корпус-депо верфи — ФЛОТ, не техника
+                {
+                    if (navalDock == null) // Unity fake-null: мёртвую верфь заменяет живая
+                        navalDock = unit as Building; // корпус-депо верфи — ФЛОТ
+                    _ctxFactories.Add(unit);
+                }
                 else if (unit is VehicleDepot d)
-                    depot = d;
+                {
+                    if (depot == null)
+                        depot = d;
+                    _ctxFactories.Add(d);
+                }
                 else if (unit is Building b && b.GetComponent<Hangar>() != null)
+                {
                     hangars.Add(b.GetComponent<Hangar>());
+                    _ctxFactories.Add(b.GetComponent<Hangar>());
+                }
                 else if (EconomyService.IsExtractor(unit) && extractor == null)
                     extractor = unit;
                 else if (!hasEngineer && GameApi.IsEngineer(unit))
                     hasEngineer = true;
+                else if (carrier == null && unit is Ship)
+                {
+                    Airbase shipBase = unit.GetAirbase(); // не-авианосцу вернёт null
+                    if (shipBase != null)
+                        carrier = shipBase;
+                }
             }
             if (airbase != null)
                 selHash = selHash * 31 + airbase.GetInstanceID();
@@ -1827,7 +1995,7 @@ step = "arrows";
             if (_manualTabForSel != selHash)
             {
                 if (depot != null || navalDock != null || airbase != null ||
-                    hangars.Count > 0 || hasEngineer)
+                    hangars.Count > 0 || hasEngineer || carrier != null)
                     _activeTab = TabProduction;
                 else if (extractor != null && EconomyService.Running)
                     _activeTab = TabUpgrade;
@@ -1852,7 +2020,7 @@ step = "arrows";
             {
                 hash = hash * 31 + fundsKey + _prodTier * 7 + (depot != null ? 1 : 0) +
                        (airbase != null ? 2 : 0) + (hasEngineer ? 4 : 0) +
-                       (navalDock != null ? 8 : 0);
+                       (navalDock != null ? 8 : 0) + (carrier != null ? 16 : 0);
                 if (airbase != null)
                     hash = hash * 31 + AirbaseReserve.Version; // плитки резерва ангара
                 // смена лодаута колесом — перестройка каталога (суффикс «·ЛN» на плитке)
@@ -1879,14 +2047,10 @@ step = "arrows";
             if (hasEngineer)
                 foreach (BuildTasks.Task t in BuildTasks.All)
                     queueKey = queueKey * 31 + (int)(t.Progress01 * 20f) + (t.ZoneBlocked ? 3 : 0);
-            if (depot != null)
-                queueKey = queueKey * 31 + ProductionTasks.KeyFor(depot) + 7;
-            if (navalDock != null)
-                queueKey = queueKey * 31 + ProductionTasks.KeyFor(navalDock) + 17;
-            if (airbase != null)
-                queueKey = queueKey * 31 + ProductionTasks.KeyFor(airbase) + 11;
-            foreach (Hangar hangar in hangars)
-                queueKey = queueKey * 31 + ProductionTasks.KeyFor(hangar) + 13;
+            // Очереди ВСЕХ фабрик выделения: мультивыделение обновляет строку при
+            // изменении очереди любой из них (раньше хэшировалась одна — последняя).
+            foreach (object factory in _ctxFactories)
+                queueKey = queueKey * 31 + ProductionTasks.KeyFor(factory) + 13;
             bool queueShown = _activeTab == TabProduction || _activeTab == TabTemplates;
             if (queueShown && queueKey != _queueHash)
             {
@@ -1907,29 +2071,65 @@ step = "arrows";
                 ClearChildren(_strip2Content);
             }
 
-            // Контекстные кнопки: на «Производстве» у фабрики — Пауза/Цикл/Шаблон+,
-            // на «Ш» — только Шаблон+ (сохранить набор). Ангар — индивидуальная
-            // фабрия (группа = пер-ангарно); у панели аэропорта очереди нет.
+            // Контекстные кнопки: на «Производстве» у фабрик — Пауза/Цикл/Шаблон+,
+            // на «Ш» — только Шаблон+ (сохранить набор). Пауза/Цикл — ГРУППОВЫЕ:
+            // действуют на ВСЕ фабрики выделения (мульти-ангар/депо/верфь, канон
+            // SupCom «фабрики управляемы пачкой»); подсветка — «все в состоянии».
             _ctxDepot = depot;
             _ctxDock = navalDock;
             _ctxAirbase = airbase;
-            _ctxHangar = hangars.Count == 1 ? hangars[0] : null;
+            // У построенной ВПП нет вышки — тумблеры посадки/взлёта доступны и с
+            // ангара: его parentAirbase (все ангары выделения с ОДНОЙ базы;
+            // смешанное выделение — не показываем, база неоднозначна).
+            if (_ctxAirbase == null && hangars.Count > 0)
+            {
+                Airbase parent = hangars[0].parentAirbase;
+                bool same = parent != null;
+                for (int h = 1; h < hangars.Count && same; h++)
+                    same = hangars[h].parentAirbase == parent;
+                if (same)
+                    _ctxAirbase = parent;
+            }
+            // Авианосец: у палубы нет ни вышки, ни ангаров-зданий — тумблеры даём
+            // с выделения самого корабля (ромб летит вместе с ним — и тот путь есть).
+            if (_ctxAirbase == null && carrier != null)
+                _ctxAirbase = carrier;
+            _ctxHangar = hangars.Count > 0 ? hangars[0] : null;
             Transform ctx = _tabPanel != null ? _tabPanel.Find("factoryCtx") : null;
             if (ctx != null)
             {
-                bool ctxOnFactory = _activeTab == TabProduction &&
-                                    (_ctxDepot != null || _ctxHangar != null || _ctxDock != null);
-                ctx.gameObject.SetActive(ctxOnFactory || _activeTab == TabTemplates);
+                bool ctxOnFactory = _activeTab == TabProduction && _ctxFactories.Count > 0;
+                bool ctxOnAirbase = _activeTab == TabProduction && _ctxAirbase != null;
+                ctx.gameObject.SetActive(ctxOnFactory || ctxOnAirbase || _activeTab == TabTemplates);
                 if (_pauseBtn != null)
                     _pauseBtn.gameObject.SetActive(ctxOnFactory);
                 if (_cycleBtn != null)
                     _cycleBtn.gameObject.SetActive(ctxOnFactory);
+                if (_tplBtn != null)
+                    _tplBtn.gameObject.SetActive(ctxOnFactory || _activeTab == TabTemplates);
                 Image pi = _pauseBtn != null ? _pauseBtn.GetComponent<Image>() : null;
                 if (pi != null)
-                    pi.color = CtxFactory() != null && ProductionTasks.IsPaused(CtxFactory()) ? BtnActive : BtnBg;
+                    pi.color = ProductionTasks.AllPaused(_ctxFactories) ? BtnActive : BtnBg;
                 Image ci = _cycleBtn != null ? _cycleBtn.GetComponent<Image>() : null;
                 if (ci != null)
-                    ci.color = CtxFactory() != null && ProductionTasks.IsCycling(CtxFactory()) ? BtnActive : BtnBg;
+                    ci.color = ProductionTasks.AllCycling(_ctxFactories) ? BtnActive : BtnBg;
+                // Тумблеры аэродрома: видны при выделенном аэродроме, подсветка = закрыто.
+                if (_noLandBtn != null)
+                {
+                    _noLandBtn.gameObject.SetActive(ctxOnAirbase);
+                    Image nli = _noLandBtn.GetComponent<Image>();
+                    if (nli != null)
+                        nli.color = _ctxAirbase != null && !AirbaseAccess.IsLandingOpen(_ctxAirbase)
+                            ? BtnActive : BtnBg;
+                }
+                if (_noTakeoffBtn != null)
+                {
+                    _noTakeoffBtn.gameObject.SetActive(ctxOnAirbase);
+                    Image nti = _noTakeoffBtn.GetComponent<Image>();
+                    if (nti != null)
+                        nti.color = _ctxAirbase != null && !AirbaseAccess.IsTakeoffOpen(_ctxAirbase)
+                            ? BtnActive : BtnBg;
+                }
             }
 
             if (hash == _contextHash)

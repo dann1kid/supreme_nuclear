@@ -1,29 +1,37 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
 namespace SupremeNuclear
 {
     /// <summary>
-    /// Гейты вооружения (DESIGN §2.11): per-unit маска ВЫКЛЮЧЕННЫХ классов оружия.
-    /// Выключенный класс не применяется НИКОГДА — ни автоогнём, ни в атаке-движении,
-    /// ни в явной атаке (ПКМ по цели), ни в залпе V (решение игрока: гейт главнее).
-    /// Стойка hold-fire ортогональна (гасит всё сразу). Асы-люди не затрагиваются:
-    /// ручной пуск (CmdLaunchMissile → LaunchMount) идёт мимо Ready(), а борт с живым
-    /// пилотом-игроком Tick пропускает.
-    /// Применение — трёхуровневое, реестр Harmony-патчей не растёт (ARCHITECTURE §6):
-    /// 1) №2 Turret.AssessTargetPriority — турель выключенного класса не берёт цель;
-    /// 2) №3/№5 AssessHQTargets Postfix — перевыбор разрешённой станции / срыв боя;
-    /// 3) Tick: LastFiredTime = now для выключенных станций — жёсткий блок Ready()
-    ///    (FireGuns, турели и прочие пути мимо наших патчей). После включения класса
-    ///    станция готова через свой fireInterval — следов не остаётся.
-    /// Классы — Catalog.ClassOf; состояние переживает смену выделения, сбрасывается
-    /// в sceneLoaded (реестр ARCHITECTURE §4), мёртвые юниты вычищаются Prune.
+    /// Гейты вооружения (DESIGN §2.11): два этажа per-unit правил.
+    /// 1) Маска ВЫКЛЮЧЕННЫХ классов (WeaponClass) — выключенный класс не применяется
+    ///    НИКОГДА — ни автоогнём, ни в атаке-движении, ни в явной атаке, ни в залпе V.
+    /// 2) Правила по ТИПАМ вооружения (v0.106): per-unit разрешённые домены целей
+    ///    (TargetDomain) для конкретного WeaponInfo — «AGM-48 только по наземным»,
+    ///    платформенные пресеты «пуск только с наземных/воздушных», «выкл».
+    /// Стойка hold-fire ортогональна (гасит всё сразу). Асы-люди не затрагиваются.
+    /// ГЛАВНАЯ линия принуждения (v0.106) — префиксы WeaponStation.Fire/LaunchMount
+    /// (WeaponUseGatePatch, реестр ARCHITECTURE §6): единый предохранитель всех путей
+    /// применения — турели, FireControl ПВО/кораблей/пусковых, боевой AI, наш залп,
+    /// сетевые Cmd/Rpc-пуски. Дополнительно: №2 Turret.AssessTargetPriority — турель
+    /// без разрешённых против кандидата станций не берёт цель (не выдаёт себя
+    /// наведением); №3/№5 AssessHQTargets Postfix — перевыбор разрешённой станции
+    /// боевого AI; Tick: LastFiredTime = now для выключенных класс-гейтом станций.
+    /// Состояние переживает смену выделения, сбрасывается в sceneLoaded (реестр
+    /// ARCHITECTURE §4), мёртвые юниты вычищаются Prune.
     /// </summary>
     internal static class WeaponGateService
     {
         /// <summary>Выключенные классы per-unit; отсутствие записи = всё разрешено.</summary>
         private static readonly Dictionary<Unit, WeaponClass> Blocked =
             new Dictionary<Unit, WeaponClass>();
+
+        /// <summary>Правила типов per-unit: WeaponInfo → разрешённые домены целей.
+        /// Отсутствие записи/типа = без ограничений; Both не храним (словарь разрежен).</summary>
+        private static readonly Dictionary<Unit, Dictionary<WeaponInfo, TargetDomain>> TypeRules =
+            new Dictionary<Unit, Dictionary<WeaponInfo, TargetDomain>>();
 
         private static bool IsHost
         {
@@ -43,6 +51,168 @@ namespace SupremeNuclear
             if (station == null)
                 return true;
             return (BlockedOf(unit) & Catalog.ClassOf(station.WeaponInfo)) == 0;
+        }
+
+        // ---------- правила по типам вооружения (v0.106, DESIGN §2.11) ----------
+
+        /// <summary>Есть ли хоть какое-то ограничение в мире (класс-гейт/тип/стойка) —
+        /// быстрый выход префикса Fire/LaunchMount без единого обращения к словарям.</summary>
+        public static bool AnyRestrictions =>
+            Blocked.Count > 0 || TypeRules.Count > 0 || StanceService.AnyHolding;
+
+        /// <summary>Домен ЦЕЛИ для правил: летящий борт (radarAlt &gt; 1 м — эвристика
+        /// самого CombatAI) и ракета в полёте — Air; техника/флот/постройки/
+        /// паркованный борт — Surface.</summary>
+        public static TargetDomain DomainOf(Unit target)
+        {
+            if (target is Aircraft)
+                return target.radarAlt > 1f ? TargetDomain.Air : TargetDomain.Surface;
+            if (target is Missile)
+                return TargetDomain.Air;
+            return TargetDomain.Surface;
+        }
+
+        /// <summary>Тип разрешён юниту против конкретной цели (нет правила — разрешён).</summary>
+        public static bool TypeAllows(Unit unit, WeaponStation station, Unit target)
+        {
+            if (station == null || station.WeaponInfo == null || target == null)
+                return true;
+            if (!TypeRules.TryGetValue(unit, out Dictionary<WeaponInfo, TargetDomain> rules) ||
+                !rules.TryGetValue(station.WeaponInfo, out TargetDomain rule))
+                return true;
+            return (rule & DomainOf(target)) != 0;
+        }
+
+        /// <summary>Есть ли у юнита хоть одно правило типа (ранний выход AI-перевыбора).</summary>
+        public static bool HasTypeRules(Unit unit) => unit != null && TypeRules.ContainsKey(unit);
+
+        /// <summary>ЕДИНЫЙ ПРЕДОХРАНИТЕЛЬ (префиксы WeaponStation.Fire/LaunchMount):
+        /// true — применение запрещено (hold-fire / класс-гейт / правило типа против
+        /// домена этой цели). Цель null (пушки по вектору) — домен не проверяем,
+        /// стойка и класс работают. Ас-человек не проверяется здесь — см. патч.
+        /// Вызов каждый кадр у пушек: без ограничений в мире — нулевая работа.</summary>
+        public static bool BlocksUse(Unit owner, WeaponStation station, Unit target)
+        {
+            if (station == null || station.WeaponInfo == null)
+                return false;
+            if (StanceService.IsHoldFire(owner))
+                return true;
+            if ((BlockedOf(owner) & Catalog.ClassOf(station.WeaponInfo)) != 0)
+                return true;
+            return !TypeAllows(owner, station, target);
+        }
+
+        /// <summary>Может ли турель вступить в бой с кандидатом: хоть одна её станция
+        /// проходит класс-гейт и правило типа против КОНКРЕТНОГО кандидата. Выбор
+        /// станции внутри AssessTargetPriority остаётся нативным (натив может
+        /// выбрать и неразрешённую — выстрел режет предохранитель, компромисс §12).</summary>
+        public static bool TurretMayEngage(Turret turret, Unit unit, Unit candidate)
+        {
+            WeaponClass mask = BlockedOf(unit);
+            bool hasTypeRules = TypeRules.TryGetValue(unit, out Dictionary<WeaponInfo, TargetDomain> rules);
+            if (mask == WeaponClass.None && !hasTypeRules)
+                return true; // у юнита нет ограничений вовсе
+            WeaponStation[] stations = turret.GetWeaponStations();
+            if (stations == null)
+                return true;
+            foreach (WeaponStation st in stations)
+            {
+                if (st == null || st.WeaponInfo == null)
+                    continue;
+                if ((mask & Catalog.ClassOf(st.WeaponInfo)) != 0)
+                    continue;
+                if (hasTypeRules && rules.TryGetValue(st.WeaponInfo, out TargetDomain rule) &&
+                    candidate != null && (rule & DomainOf(candidate)) == 0)
+                    continue;
+                return true; // есть станция, которой можно бить этого кандидата
+            }
+            return false;
+        }
+
+        /// <summary>Есть ли у юнита боевая станция этого типа (грузы/десант не в счёт).</summary>
+        private static bool UnitHasWeapon(Unit unit, WeaponInfo wi)
+        {
+            if (unit == null || unit.weaponStations == null)
+                return false;
+            foreach (WeaponStation st in unit.weaponStations)
+                if (st != null && !st.Cargo && st.WeaponInfo == wi &&
+                    !wi.cargo && !wi.troops)
+                    return true;
+            return false;
+        }
+
+        /// <summary>Типы вооружения выделения (distinct WeaponInfo), по убыванию
+        /// суммарного ПОЛНОГО боезапаса (порядок стабилен в бою и после перезарядок;
+        /// при равенстве — по инстансу); max &gt; 0 — кэп для полосы чипов UI.</summary>
+        public static List<WeaponInfo> TypesOf(List<Unit> units, int max)
+        {
+            var totals = new Dictionary<WeaponInfo, int>();
+            if (units != null)
+                foreach (Unit unit in units)
+                {
+                    if (unit == null || unit.weaponStations == null)
+                        continue;
+                    foreach (WeaponStation st in unit.weaponStations)
+                    {
+                        if (st == null || st.Cargo || st.WeaponInfo == null ||
+                            st.WeaponInfo.cargo || st.WeaponInfo.troops)
+                            continue;
+                        totals.TryGetValue(st.WeaponInfo, out int n);
+                        totals[st.WeaponInfo] = n + Math.Max(0, st.FullAmmo);
+                    }
+                }
+            var list = new List<WeaponInfo>(totals.Keys);
+            list.Sort((a, b) => totals[b] != totals[a]
+                ? totals[b].CompareTo(totals[a])
+                : a.GetInstanceID().CompareTo(b.GetInstanceID()));
+            if (max > 0 && list.Count > max)
+                list.RemoveRange(max, list.Count - max);
+            return list;
+        }
+
+        /// <summary>Применить состояние чипа к выделению: юнитам, у которых тип ЕСТЬ,
+        /// пишется правило по их платформе (авиация/прочее); Both — запись снимается.</summary>
+        public static void ApplyTypeState(List<Unit> units, WeaponInfo wi, TypeGateState state)
+        {
+            if (units == null || wi == null)
+                return;
+            foreach (Unit unit in units)
+            {
+                if (unit == null || !UnitHasWeapon(unit, wi))
+                    continue;
+                TargetDomain rule = Catalog.RuleFor(state, unit is Aircraft);
+                if (!TypeRules.TryGetValue(unit, out Dictionary<WeaponInfo, TargetDomain> rules))
+                {
+                    if (rule == TargetDomain.Both)
+                        continue; // снимать нечего — записи и нет
+                    rules = new Dictionary<WeaponInfo, TargetDomain>();
+                    TypeRules[unit] = rules;
+                }
+                if (rule == TargetDomain.Both)
+                    rules.Remove(wi);
+                else
+                    rules[wi] = rule;
+                if (rules.Count == 0)
+                    TypeRules.Remove(unit);
+            }
+        }
+
+        /// <summary>Агрегат состояния чипа по выделению: null — вперемешку (±).</summary>
+        public static TypeGateState? TypeStateOf(List<Unit> units, WeaponInfo wi)
+        {
+            var perUnit = new List<(bool platformAir, TargetDomain rule)>();
+            if (units != null)
+                foreach (Unit unit in units)
+                {
+                    if (unit == null || !UnitHasWeapon(unit, wi))
+                        continue;
+                    TargetDomain rule = TargetDomain.Both;
+                    if (TypeRules.TryGetValue(unit, out Dictionary<WeaponInfo, TargetDomain> rules) &&
+                        rules.TryGetValue(wi, out TargetDomain r))
+                        rule = r;
+                    perUnit.Add((unit is Aircraft, rule));
+                }
+            return Catalog.AggregateState(perUnit);
         }
 
         /// <summary>Есть ли у юнита станция этого класса.</summary>
@@ -143,24 +313,30 @@ namespace SupremeNuclear
             }
         }
 
-        /// <summary>Мёртвые/удалённые юниты (Unity fake-null) — из масок.</summary>
+        /// <summary>Мёртвые/удалённые юниты (Unity fake-null) — из масок и правил типов.</summary>
         public static void Prune()
         {
-            if (Blocked.Count == 0)
+            if (Blocked.Count == 0 && TypeRules.Count == 0)
                 return;
             List<Unit> dead = null;
             foreach (KeyValuePair<Unit, WeaponClass> kv in Blocked)
                 if (kv.Key == null || kv.Key.disabled)
-                {
-                    if (dead == null)
-                        dead = new List<Unit>();
-                    dead.Add(kv.Key);
-                }
+                    (dead ??= new List<Unit>()).Add(kv.Key);
+            foreach (KeyValuePair<Unit, Dictionary<WeaponInfo, TargetDomain>> kv in TypeRules)
+                if (kv.Key == null || kv.Key.disabled)
+                    (dead ??= new List<Unit>()).Add(kv.Key);
             if (dead != null)
                 foreach (Unit unit in dead)
+                {
                     Blocked.Remove(unit);
+                    TypeRules.Remove(unit);
+                }
         }
 
-        public static void Reset() => Blocked.Clear();
+        public static void Reset()
+        {
+            Blocked.Clear();
+            TypeRules.Clear();
+        }
     }
 }

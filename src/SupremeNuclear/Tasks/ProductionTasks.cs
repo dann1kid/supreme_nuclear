@@ -6,10 +6,13 @@ using UnityEngine;
 namespace SupremeNuclear
 {
     /// <summary>Task-API v1.6 — очереди производства «фабрик» ЛЮБОГО типа (DESIGN 2.3a):
-    /// депо (техника) и аэродром (авиация). Потоковая оплата головной позиции; нет денег —
-    /// очередь стоит; пауза/цикл/отмена — на фабрике (кнопки нижней панели, DESIGN 2.10).
-    /// Ралли-маршруты — для депо (вышедший юнит получает маршрут; авиации — после появления
-    /// ссылки на борт в TrySpawnResult). Хост-авторитет, как BuildTasks.</summary>
+    /// депо (техника), ангар (авиация) и верфь (флот). Потоковая оплата головной позиции;
+    /// нет денег — очередь стоит; пауза/цикл/отмена — на фабрике (кнопки нижней панели,
+    /// DESIGN 2.10), при мультивыделении — сразу всем фабрикам выделения. Ралли-маршруты —
+    /// у любой фабрики: депо отдаёт маршрут вышедшему юниту, верфь — спущенному кораблю,
+    /// ангар — свежему борту по смене приватного Hangar.spawnedObject (SelfCheck; отложенный
+    /// спавн авианосца ждёт смены ссылки в Tick), ангар без своего ралли наследует ралли
+    /// аэродрома. Хост-авторитет, как BuildTasks.</summary>
     public static class ProductionTasks
     {
         public sealed class QueueItem
@@ -43,9 +46,34 @@ namespace SupremeNuclear
             new Dictionary<object, FactoryState>();
 
         // Ралли-маршруты фабрик: сложные цепочки, как приказы юнитам (DESIGN 2.3a).
-        private static readonly Dictionary<object, List<GlobalPosition>> Rally =
-            new Dictionary<object, List<GlobalPosition>>();
+        // Каждая точка несёт groupId клика (0 — нет): спущенный юнит получает цепочку
+        // ГРУППОВЫМИ вейпоинтами — маркер/лента/драг/удаление общие на пачку
+        // выпущенных одним маршрутом, как у приказов юнитам напрямую (§12-30).
+        public sealed class RallyRoute
+        {
+            public readonly List<GlobalPosition> Points = new List<GlobalPosition>();
+            /// <summary>Группа приказа каждой точки, параллельно Points.</summary>
+            public readonly List<int> Groups = new List<int>();
+            public int Count => Points.Count;
+        }
+        private static readonly Dictionary<object, RallyRoute> Rally =
+            new Dictionary<object, RallyRoute>();
         private static readonly HashSet<Unit> Routed = new HashSet<Unit>();
+
+        // Ралли авиации: TrySpawnResult борт не отдаёт — приватный Hangar.spawnedObject
+        // перезаписывается игрой в SpawnAircraft. Немедленный спавн: ссылка свежая в тот
+        // же кадр; отложенный (двери авианосца) — ждём смены ссылки (запомнив ПРОШЛУЮ).
+        private static readonly System.Reflection.FieldInfo HangarSpawnedField =
+            HarmonyLib.AccessTools.Field(typeof(Hangar), "spawnedObject");
+        private sealed class AirRallyWait
+        {
+            public GameObject Prev;
+            public float Deadline;
+        }
+        private static readonly Dictionary<Hangar, AirRallyWait> AirRallyWaits =
+            new Dictionary<Hangar, AirRallyWait>();
+        private const float AirRallyWaitSec = 30f;
+        private static readonly List<Hangar> _settledWaits = new List<Hangar>();
 
         public static int Version { get; private set; }
 
@@ -431,6 +459,7 @@ namespace SupremeNuclear
             Factories.Clear();
             Rally.Clear();
             Routed.Clear();
+            AirRallyWaits.Clear();
         }
 
         private static FactoryState StateOf(object factory)
@@ -603,50 +632,119 @@ namespace SupremeNuclear
             Version++;
         }
 
-        public static void TogglePause(object factory)
+        /// <summary>Групповая пауза (мультивыделение фабрик): состояние УНИФИЦИРУЕТСЯ —
+        /// все на паузу либо все сняты, а не инверсия каждого (смешанное выделение
+        /// не должно переворачиваться в противоположное смешанное).</summary>
+        public static void TogglePauseAll(IReadOnlyList<object> factories)
         {
-            if (!IsHost || factory == null)
+            if (!IsHost || factories == null || factories.Count == 0)
                 return;
-            Version++;
-            FactoryState state = StateOf(factory);
-            state.Paused = !state.Paused;
+            foreach (object factory in factories)
+                if (factory != null && !IsPaused(factory))
+                {
+                    SetPausedForAll(factories, true);
+                    return;
+                }
+            SetPausedForAll(factories, false);
         }
 
-        /// <summary>Цикл (зацикленная очередь): включение снимает текущую очередь фабрики;
-        /// когда опустеет — снимок ставится заново.</summary>
-        public static void ToggleCycle(object factory)
+        private static void SetPausedForAll(IReadOnlyList<object> factories, bool paused)
+        {
+            foreach (object factory in factories)
+                if (factory != null)
+                    StateOf(factory).Paused = paused;
+            Version++;
+        }
+
+        /// <summary>Все фабрики списка на паузе (тон кнопки; пустой список — false).</summary>
+        public static bool AllPaused(IReadOnlyList<object> factories)
+        {
+            if (factories == null || factories.Count == 0)
+                return false;
+            foreach (object factory in factories)
+                if (factory != null && !IsPaused(factory))
+                    return false;
+            return true;
+        }
+
+        /// <summary>Цикл (зацикленная очередь) фабрики: включение снимает текущую
+        /// очередь; когда опустеет — снимок ставится заново.</summary>
+        public static void SetCycling(object factory, bool cycling)
         {
             if (!IsHost || factory == null)
                 return;
             Version++;
             FactoryState state = StateOf(factory);
-            state.Cycling = !state.Cycling;
+            state.Cycling = cycling;
             state.CycleItems.Clear();
-            if (!state.Cycling)
+            if (!cycling)
                 return;
             foreach (QueueItem item in Queue)
                 if (item.Factory == factory && item.UnitDef != null)
                     state.CycleItems.Add(item.UnitDef);
         }
 
-        public static IReadOnlyList<GlobalPosition> RallyOf(object factory) =>
-            Rally.TryGetValue(factory, out List<GlobalPosition> route) ? route : null;
+        /// <summary>Групповой цикл (мультивыделение): унификация, как у паузы —
+        /// включение снимает текущую очередь каждой фабрии, выключение чистит снимки.</summary>
+        public static void ToggleCycleAll(IReadOnlyList<object> factories)
+        {
+            if (!IsHost || factories == null || factories.Count == 0)
+                return;
+            bool anyOff = false;
+            foreach (object factory in factories)
+                if (factory != null && !IsCycling(factory))
+                {
+                    anyOff = true;
+                    break;
+                }
+            foreach (object factory in factories)
+                if (factory != null)
+                    SetCycling(factory, anyOff);
+        }
 
-        public static void SetRally(object factory, Vector3 point)
+        /// <summary>Все фабрики списка в цикле (тон кнопки; пустой список — false).</summary>
+        public static bool AllCycling(IReadOnlyList<object> factories)
+        {
+            if (factories == null || factories.Count == 0)
+                return false;
+            foreach (object factory in factories)
+                if (factory != null && !IsCycling(factory))
+                    return false;
+            return true;
+        }
+
+        public static RallyRoute RallyOf(object factory) =>
+            Rally.TryGetValue(factory, out RallyRoute route) ? route : null;
+
+        /// <summary>Все фабрики с живыми ралли-маршрутами (отрисовка Shift-режима
+        /// видимости: невыделенные фабрики — приглушённо, как цепочки юнитов).</summary>
+        public static void CollectRallies(List<object> factories)
+        {
+            factories.Clear();
+            foreach (KeyValuePair<object, RallyRoute> kv in Rally)
+                if (kv.Value.Count > 0)
+                    factories.Add(kv.Key);
+        }
+
+        public static void SetRally(object factory, Vector3 point, int groupId)
         {
             if (factory == null)
                 return;
-            Rally[factory] = new List<GlobalPosition> { point.ToGlobalPosition() };
+            var route = new RallyRoute();
+            route.Points.Add(point.ToGlobalPosition());
+            route.Groups.Add(groupId);
+            Rally[factory] = route;
             Version++;
         }
 
-        public static void EnqueueRally(object factory, Vector3 point)
+        public static void EnqueueRally(object factory, Vector3 point, int groupId)
         {
             if (factory == null)
                 return;
-            if (!Rally.TryGetValue(factory, out List<GlobalPosition> route))
-                route = Rally[factory] = new List<GlobalPosition>();
-            route.Add(point.ToGlobalPosition());
+            if (!Rally.TryGetValue(factory, out RallyRoute route))
+                Rally[factory] = route = new RallyRoute();
+            route.Points.Add(point.ToGlobalPosition());
+            route.Groups.Add(groupId);
             Version++;
         }
 
@@ -685,7 +783,10 @@ namespace SupremeNuclear
         /// позиция ждёт и повторяет попытку).</summary>
         public static void Tick()
         {
-            if (!GameApi.InMission || !IsHost || Queue.Count == 0)
+            if (!GameApi.InMission || !IsHost)
+                return;
+            PumpAirRallyWaits(); // двери авианосца могли выпустить борт после сдачи позиции
+            if (Queue.Count == 0)
                 return;
             float dt = Time.deltaTime;
             var paidSlots = new Dictionary<(object factory, UnitDefinition def), int>();
@@ -759,9 +860,13 @@ namespace SupremeNuclear
                             fuel = 1f;
                         }
                         int livery = item.AirDef.aircraftParameters.GetRandomLiveryForFaction(hq.faction);
-                        spawned = item.Hangar.TrySpawnAircraft(
+                        GameObject prevSpawn = HangarSpawnedOf(item.Hangar);
+                        var result = item.Hangar.TrySpawnAircraft(
                             null, item.AirDef, new LiveryKey(livery),
-                            lo != null ? lo : new Loadout(), fuel).Allowed;
+                            lo != null ? lo : new Loadout(), fuel);
+                        spawned = result.Allowed;
+                        if (spawned)
+                            AfterAirSpawn(item.Hangar, prevSpawn, result.DelayedSpawn);
                     }
 
                     if (spawned)
@@ -782,22 +887,25 @@ namespace SupremeNuclear
         }
 
         /// <summary>Ралли спущенного корабля: NavalDock вернул ссылку — сразу
-        /// цепочка GroundOrders (искать по реестру, как у депо, не нужно).</summary>
+        /// цепочка GroundOrders (искать по реестру, как у депо, не нужно).
+        /// Точки несут groupId клика ралли — пачка кораблей одного маршрута
+        /// рисуется/редактируется как групповой приказ (§12-30).</summary>
         private static void DispatchShipByRally(Building dock, Ship ship)
         {
-            if (ship == null || !Rally.TryGetValue(dock, out List<GlobalPosition> route) ||
+            if (ship == null || !Rally.TryGetValue(dock, out RallyRoute route) ||
                 route.Count == 0)
                 return;
-            GroundOrders.Set(ship, route[0]);
+            GroundOrders.Set(ship, route.Points[0], false, route.Groups[0]);
             for (int i = 1; i < route.Count; i++)
-                GroundOrders.Enqueue(ship, route[i]);
+                GroundOrders.Enqueue(ship, route.Points[i], false, route.Groups[i]);
         }
 
         /// <summary>Захват вышедшего юнита депо (ссылку не отдаёт — ищем свежий
-        /// GroundVehicle нужного определения в зоне фабрики, ещё не отправленный).</summary>
+        /// GroundVehicle нужного определения в зоне фабрики, ещё не отправленный).
+        /// Точки — с groupId клика ралли (групповой приказ пачки, §12-30).</summary>
         private static void DispatchByRally(VehicleDepot depot, VehicleDefinition def)
         {
-            if (!Rally.TryGetValue(depot, out List<GlobalPosition> route) || route.Count == 0)
+            if (!Rally.TryGetValue(depot, out RallyRoute route) || route.Count == 0)
                 return;
             Vector3 p = depot.transform.position;
             const float radiusSq = 80f * 80f;
@@ -820,9 +928,84 @@ namespace SupremeNuclear
             if (spawned == null)
                 return;
             Routed.Add(spawned);
-            GroundOrders.Set(spawned, route[0]);
+            GroundOrders.Set(spawned, route.Points[0], false, route.Groups[0]);
             for (int i = 1; i < route.Count; i++)
-                GroundOrders.Enqueue(spawned, route[i]);
+                GroundOrders.Enqueue(spawned, route.Points[i], false, route.Groups[i]);
+        }
+
+        private static GameObject HangarSpawnedOf(Hangar hangar) =>
+            hangar != null && HangarSpawnedField != null
+                ? HangarSpawnedField.GetValue(hangar) as GameObject
+                : null;
+
+        /// <summary>Маршрут ралли ангара: свой; нет своего — ралли аэродрома
+        /// (панель аэропорта задаёт общий маршрут всем своим ангарам).</summary>
+        private static RallyRoute RouteOf(Hangar hangar)
+        {
+            if (Rally.TryGetValue(hangar, out RallyRoute route) && route.Count > 0)
+                return route;
+            Airbase airbase = hangar.parentAirbase;
+            if (airbase != null && Rally.TryGetValue(airbase, out route) && route.Count > 0)
+                return route;
+            return null;
+        }
+
+        /// <summary>Ралли свежего борта ангара. Немедленный спавн — ссылка на борт уже
+        /// сменилась в тот же кадр; отложенный (двери авианосца) — ждём смены ссылки
+        /// в Tick (Prev запоминается ДО вызова спавна: spawnedObject держит прошый борт).</summary>
+        private static void AfterAirSpawn(Hangar hangar, GameObject prev, bool delayed)
+        {
+            if (hangar == null)
+                return;
+            if (!delayed)
+            {
+                GameObject fresh = HangarSpawnedOf(hangar);
+                if (fresh != null && !ReferenceEquals(fresh, prev))
+                    DispatchAirByRally(fresh.GetComponent<Aircraft>(), hangar);
+                return;
+            }
+            AirRallyWaits[hangar] = new AirRallyWait
+            { Prev = prev, Deadline = Time.time + AirRallyWaitSec };
+        }
+
+        /// <summary>Отложенные спавны: spawnedObject ангара сменился — борт вышел,
+        /// выдаём ему ралли. Мёртвый ангар/таймаут — ожидание снимается тихо.</summary>
+        private static void PumpAirRallyWaits()
+        {
+            if (AirRallyWaits.Count == 0)
+                return;
+            _settledWaits.Clear();
+            foreach (var kv in AirRallyWaits)
+            {
+                if (kv.Key == null || Time.time > kv.Value.Deadline) // Unity fake-null
+                {
+                    _settledWaits.Add(kv.Key);
+                    continue;
+                }
+                GameObject fresh = HangarSpawnedOf(kv.Key);
+                if (fresh == null || ReferenceEquals(fresh, kv.Value.Prev))
+                    continue;
+                _settledWaits.Add(kv.Key);
+                DispatchAirByRally(fresh.GetComponent<Aircraft>(), kv.Key);
+            }
+            foreach (Hangar done in _settledWaits)
+                AirRallyWaits.Remove(done);
+        }
+
+        /// <summary>Ралли борта: план Transit по точкам маршрута (AircraftOrders.Set
+        /// сам выкатит стоящий борт — такси и взлёт, дальше маршрут). Точки — с
+        /// groupId клика ралли: пачка бортов одного маршрута — групповые
+        /// вейпоинты плана, как приказы напрямую (§12-30).</summary>
+        private static void DispatchAirByRally(Aircraft aircraft, Hangar hangar)
+        {
+            RallyRoute route = RouteOf(hangar);
+            if (aircraft == null || route == null)
+                return;
+            AircraftOrders.Set(aircraft, AirOrderMode.Transit,
+                route.Points[0].ToLocalPosition(), route.Groups[0]);
+            for (int i = 1; i < route.Count; i++)
+                AircraftOrders.Enqueue(aircraft, AirOrderMode.Transit,
+                    route.Points[i].ToLocalPosition(), route.Groups[i]);
         }
 
         private static void OnQueueAdvanced(object factory)
