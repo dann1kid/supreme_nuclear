@@ -271,6 +271,116 @@ namespace SupremeNuclear
             _ => "?",
         };
 
+        // ---------- правила применения по типам вооружения (v0.106, DESIGN §2.11) ----------
+
+        /// <summary>Правило чипа типа для одной платформы (platformAir — авиация):
+        /// какие домены целей разрешены этому юниту для этого типа вооружения.
+        /// Both — ограничений нет (сервис такое правило не хранит), None — выкл.
+        /// Платформенные пресеты — макрос: «пуск только с наземных» = авиации выкл,
+        /// наземке свободно. Чистое ядро — тестируется.</summary>
+        public static TargetDomain RuleFor(TypeGateState state, bool platformAir) => state switch
+        {
+            TypeGateState.SurfaceOnly => TargetDomain.Surface,
+            TypeGateState.AirOnly => TargetDomain.Air,
+            TypeGateState.GroundLaunch => platformAir ? TargetDomain.None : TargetDomain.Both,
+            TypeGateState.AirLaunch => platformAir ? TargetDomain.Both : TargetDomain.None,
+            TypeGateState.Off => TargetDomain.None,
+            _ => TargetDomain.Both,
+        };
+
+        /// <summary>Сводка правил выделения к состоянию чипа: в каждой платформенной
+        /// группе (авиация/прочее) правило едино; обе группы: пара «одна выкл, другая
+        /// свободна» — платформенный пресет, прочие расхождения — null (±, вперемешку).
+        /// Одна группа — её правило и есть состояние; пусто — None.</summary>
+        public static TypeGateState? AggregateState(List<(bool platformAir, TargetDomain rule)> units)
+        {
+            TargetDomain? airRule = null, groundRule = null;
+            foreach (var (platformAir, rule) in units)
+            {
+                if (platformAir)
+                {
+                    if (airRule == null)
+                        airRule = rule;
+                    else if (airRule != rule)
+                        return null;
+                }
+                else
+                {
+                    if (groundRule == null)
+                        groundRule = rule;
+                    else if (groundRule != rule)
+                        return null;
+                }
+            }
+            if (airRule != null && groundRule != null)
+            {
+                TargetDomain a = airRule.Value, g = groundRule.Value;
+                if (a == g)
+                    return StateOfRule(a);
+                if (a == TargetDomain.None && g == TargetDomain.Both)
+                    return TypeGateState.GroundLaunch;
+                if (g == TargetDomain.None && a == TargetDomain.Both)
+                    return TypeGateState.AirLaunch;
+                return null;
+            }
+            if (airRule != null)
+                return StateOfRule(airRule.Value);
+            if (groundRule != null)
+                return StateOfRule(groundRule.Value);
+            return TypeGateState.None;
+        }
+
+        /// <summary>Правило-без-платформы → состояние: Both → None, Surface →
+        /// SurfaceOnly, Air → AirOnly, 0 → Off.</summary>
+        private static TypeGateState StateOfRule(TargetDomain rule) => rule switch
+        {
+            TargetDomain.Both => TypeGateState.None,
+            TargetDomain.Surface => TypeGateState.SurfaceOnly,
+            TargetDomain.Air => TypeGateState.AirOnly,
+            _ => TypeGateState.Off,
+        };
+
+        /// <summary>Следующее состояние цикла чипа (вперёд/назад); вперемешку (null)
+        /// трактуется как None — клик начинает цикл с начала.</summary>
+        public static TypeGateState Next(TypeGateState? current, bool forward)
+        {
+            var order = new[]
+            {
+                TypeGateState.None, TypeGateState.SurfaceOnly, TypeGateState.AirOnly,
+                TypeGateState.GroundLaunch, TypeGateState.AirLaunch, TypeGateState.Off,
+            };
+            int i = Array.IndexOf(order, current ?? TypeGateState.None);
+            i = forward ? (i + 1) % order.Length : (i + order.Length - 1) % order.Length;
+            return order[i];
+        }
+
+        /// <summary>Суффикс чипа типа: пусто (без правил), «·Н»/«·В» (по наземным/
+        /// воздушным целям), «·з»/«·в» (пуск только с наземных/воздушных), «×» (выкл),
+        /// «±» (вперемешку). Символы Latin-1 (игровой шрифт), не переводятся —
+        /// как «+/−» класс-гейтов.</summary>
+        public static string TypeGateSuffix(TypeGateState? state) => state switch
+        {
+            null => "±",
+            TypeGateState.None => "",
+            TypeGateState.SurfaceOnly => "·Н",
+            TypeGateState.AirOnly => "·В",
+            TypeGateState.GroundLaunch => "·з",
+            TypeGateState.AirLaunch => "·в",
+            _ => "×",
+        };
+
+        /// <summary>Игроковая фраза состояния для Notice («AGM-48: только по наземным
+        /// целям») — локализуется.</summary>
+        public static string TypeGateLabel(TypeGateState state) => state switch
+        {
+            TypeGateState.SurfaceOnly => Loc.Tr("только по наземным целям"),
+            TypeGateState.AirOnly => Loc.Tr("только по воздушным целям"),
+            TypeGateState.GroundLaunch => Loc.Tr("пуск только с наземных"),
+            TypeGateState.AirLaunch => Loc.Tr("пуск только с воздушных"),
+            TypeGateState.Off => Loc.Tr("запрещено"),
+            _ => Loc.Tr("без ограничений"),
+        };
+
         // ---------- переводы состояний AI (инфопанель: строка «состояние») ----------
 
         /// <summary>Нативные stateDisplayName пилота (PilotBaseState.GetCurrentState) —
@@ -359,6 +469,32 @@ namespace SupremeNuclear
         Gun = 4,
         MissileAA = 8,
         MissileAS = 16,
+    }
+
+    /// <summary>Домен ЦЕЛИ для правил применения по типам (v0.106): Air — летящий
+    /// борт/ракета, Surface — техника/корабли/постройки/паркованные. Правило — биты
+    /// разрешённых доменов: 0 — выкл, оба — свободно. Не путать с WeaponDomain
+    /// (домены ЭФФЕКТИВНОСТИ оружия для тегов сводки).</summary>
+    [Flags]
+    internal enum TargetDomain : byte
+    {
+        None = 0,
+        Air = 1,
+        Surface = 2,
+        Both = Air | Surface,
+    }
+
+    /// <summary>Состояние чипа типа вооружения (цикл ЛКМ/колесом, DESIGN §2.11):
+    /// без правил → только по наземным → только по воздушным → пуск только
+    /// с наземных → пуск только с воздушных → выкл.</summary>
+    internal enum TypeGateState : byte
+    {
+        None = 0,
+        SurfaceOnly,
+        AirOnly,
+        GroundLaunch,
+        AirLaunch,
+        Off,
     }
 
     /// <summary>Домены целей оружия (битовая маска) для тега в сводке вооружения группы.</summary>

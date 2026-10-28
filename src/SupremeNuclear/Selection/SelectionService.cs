@@ -188,16 +188,47 @@ namespace SupremeNuclear
                 return;
             }
             // Shift+клик = ДОБАВИТЬ В ГРУППУ (режим добавления, SupCom): юниты и здания
-            // накапливаются в выделение (двойной клик без shift — как раньше).
+            // накапливаются в выделение; Shift+даблклик — добавить ВСЕХ того же типа
+            // на экране (ангар — все ангары аэродрома). Серия кликов считается и под
+            // shift: раньше ветка возвращалась ДО детекции даблклика и гасила
+            // _lastClickDefinition — быстрые shift-клики добавляли по одному юниту.
             if (RtsInput.Shift && hitUnit != null && GameApi.IsFriendlyUnit(hitUnit, localHq) &&
                 (hitUnit is Building || GameApi.IsSelectableFriendly(hitUnit, localHq)))
             {
+                bool doubleClick = Time.unscaledTime - _lastClickTime < Settings.DoubleClickSec
+                    && hitUnit.definition == _lastClickDefinition;
+                _lastClickTime = Time.unscaledTime;
+                _lastClickDefinition = hitUnit.definition;
                 if (!Selected.Contains(hitUnit))
                     Selected.Add(hitUnit);
+                if (doubleClick)
+                {
+                    if (hitUnit is Building hb && hb.Networkairbase != null)
+                        SelectAllHangarsOf(hb.Networkairbase, localHq);
+                    else
+                        SelectAllOfTypeOnScreen(hitUnit.definition, localHq);
+                }
                 SelectedAirbase = null;
                 Inspected = null;
-                _lastClickDefinition = null;
                 return;
+            }
+
+            // Клик по СВОЕМУ аэродрому БЕЗ вышки (построенная ВПП рождается без
+            // зданий — панель аэропорта была недостижима, v0.102): ромб на карте
+            // или полотно полосы — «представители» аэродрома. Осмотр чужих
+            // контактов приоритетнее ромба (красная иконка может его накрыть).
+            if (!RtsInput.Shift && hitUnit == null && TryPickInspectableAt(localHq) == null)
+            {
+                Airbase picked = TryPickAirbaseDiamond(localHq) ?? TryPickAirbaseRunway(localHq, hits);
+                if (picked != null)
+                {
+                    SelectedAirbase = picked;
+                    Selected.Clear();
+                    Inspected = null;
+                    _lastClickDefinition = null;
+                    LastClickDebug = "аэродром (ромб/полоса): " + picked.name;
+                    return;
+                }
             }
 
             SelectedAirbase = null;
@@ -280,6 +311,78 @@ namespace SupremeNuclear
                 }
             }
             return best;
+        }
+
+        /// <summary>Пик СВОЕГО аэродрома по ромбу карты (якорь тот же, что рисует
+        /// CommanderHud.DrawAirbaseDiamonds: центр + GroundY+20; радиус — как у
+        /// иконок юнитов). Для построенной ВПП без вышки ромб — единственный
+        /// «представитель» базы на стратегическом зуме.</summary>
+        private Airbase TryPickAirbaseDiamond(FactionHQ localHq)
+        {
+            if (FactionRegistry.airbaseLookup == null || localHq == null)
+                return null;
+            var cam = GameApi.MainCam;
+            if (cam == null)
+                return null;
+            Vector2 mouse = new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y);
+            Airbase best = null;
+            float bestDist = 14f;
+            foreach (Airbase airbase in FactionRegistry.airbaseLookup.Values)
+            {
+                if (airbase == null || airbase.CurrentHQ != localHq)
+                    continue;
+                Vector3 pos = airbase.transform.position;
+                Vector3 sp = cam.WorldToScreenPoint(
+                    new Vector3(pos.x, GameApi.GroundY(pos.x, pos.z) + 20f, pos.z));
+                if (sp.z <= 0f)
+                    continue;
+                float d = Vector2.Distance(new Vector2(sp.x, sp.y), mouse);
+                if (d < bestDist)
+                {
+                    bestDist = d;
+                    best = airbase;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>Пик СВОЕГО аэродрома по ПОЛОТНУ полосы: точка первого
+        /// не-юнит попадания клика внутри прямоугольника торцов×ширина какой-нибудь
+        /// своей полосы (Util.InRectXZ, запас на кромки). Осознанный трейд-офф:
+        /// клик приказов по земле, попавший на полосу, выделяет аэродром.</summary>
+        private Airbase TryPickAirbaseRunway(FactionHQ localHq, RaycastHit[] hits)
+        {
+            if (localHq == null || FactionRegistry.airbaseLookup == null)
+                return null;
+            Vector3? ground = null;
+            foreach (RaycastHit hit in hits)
+            {
+                if (hit.collider == null)
+                    continue;
+                if (hit.collider.GetComponentInParent<Unit>() != null)
+                    continue; // юниты распиканы выше — клик по телу не наш случай
+                ground = hit.point;
+                break;
+            }
+            if (ground == null)
+                return null;
+            Vector2 p = new Vector2(ground.Value.x, ground.Value.z);
+            foreach (Airbase airbase in FactionRegistry.airbaseLookup.Values)
+            {
+                if (airbase == null || airbase.CurrentHQ != localHq || airbase.runways == null)
+                    continue;
+                foreach (Airbase.Runway runway in airbase.runways)
+                {
+                    if (runway == null || runway.Start == null || runway.End == null)
+                        continue;
+                    if (Util.InRectXZ(p,
+                        new Vector2(runway.Start.position.x, runway.Start.position.z),
+                        new Vector2(runway.End.position.x, runway.End.position.z),
+                        runway.GetWidth() * 1.25f, 5f))
+                        return airbase;
+                }
+            }
+            return null;
         }
 
         /// <summary>Пик осматриваемой цели по 2D-иконке контакта: якорь совпадает с
@@ -396,7 +499,8 @@ namespace SupremeNuclear
             {
                 if (Selected.Count >= Settings.MaxSelected)
                     break;
-                if (unit.definition != definition || !GameApi.IsSelectableFriendly(unit, localHq))
+                if (unit.definition != definition || !GameApi.IsSelectableFriendly(unit, localHq) ||
+                    Selected.Contains(unit))
                     continue;
                 Vector3 sp = cam.WorldToScreenPoint(GameApi.UnitAnchorWorld(unit));
                 if (sp.z > 0f && sp.x >= 0f && sp.x <= Screen.width && sp.y >= 0f && sp.y <= Screen.height)
@@ -405,15 +509,17 @@ namespace SupremeNuclear
         }
 
         /// <summary>Все живые ангары аэродрома (даблклик по ангару — группа под
-        /// пакетный заказ; экран не фильтруем: аэродром — один «объект»).</summary>
+        /// пакетный заказ; экран не фильтруем: аэродром — один «объект»).
+        /// ДОБАВЛЯЕТ к выделению, сброс — обязанность вызывающего: shift-даблклик
+        /// докладывает ангары в накопленную группу.</summary>
         private void SelectAllHangarsOf(Airbase airbase, FactionHQ localHq)
         {
-            Selected.Clear();
             foreach (Building building in airbase.buildings)
             {
                 if (Selected.Count >= Settings.MaxSelected)
                     break;
-                if (building == null || building.GetComponent<Hangar>() == null)
+                if (building == null || building.GetComponent<Hangar>() == null ||
+                    Selected.Contains(building))
                     continue;
                 if (!GameApi.IsSelectableFriendly(building, localHq))
                     continue;

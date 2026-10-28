@@ -132,6 +132,7 @@ namespace SupremeNuclear
             PlacingActive = false;
             PendingYawDeg = 0f;
             MainlineNodes.Clear();
+            TaxiCollector.Reset();
             Docks.Clear();
             _dockDefResolved = false;
             Consumed = false;
@@ -365,47 +366,131 @@ namespace SupremeNuclear
             }
             _previewWasOk = true;
             points = new List<GlobalPosition> { exitPos.ToGlobalPosition(), start };
-            if (TryKneePoint(airbase, to, start, out GlobalPosition previewKnee))
-                points.Add(previewKnee);
-            points.Add(to);
+            TaxiKind kind = ResolveTaxi(airbase, start, ref to,
+                out Vector3 axis, out Vector3 farDir, out bool existed, out float farM);            if (kind == TaxiKind.Native)
+            {
+                points.Add(to);
+                return true;
+            }
+            if (kind == TaxiKind.Direct)
+            {
+                points.AddRange(DirectPoints(start.ToLocalPosition(), to.ToLocalPosition(), fwd, farDir));
+                points.Add(to);
+                return true;
+            }
+            TaxiCollector.Plan plan = TaxiCollector.PlanFor(to, axis, farDir, start, fwd, existed, farM);
+            points.AddRange(plan.Connector);
+            points.Add(plan.Junction);
+            points.AddRange(plan.Route); // стык → магистраль → S-кривая → торец
             return true;
+        }
+
+        /// <summary>Тип подключения ангара к аэродрому: нативный узел сети /
+        /// прямой тангенциальный подвод (почти на оси за порогом) / коллектор.</summary>
+        private enum TaxiKind { Native, Direct, Collector }
+
+        /// <summary>Разрешить подключение: у нативного аэродрома (есть своя
+        /// такси-сеть) — прямая дорога к её ближнему узлу; у своей ВПП —
+        /// КОЛЛЕКТОР стороны ангара (создаётся/растит), причём якорем служит
+        /// торец ПЕРВОГО ангара стороны, а не «ближайший» (одна магистраль на
+        /// сторону, v0.100); почти осевой ангар за порогом — Direct.
+        /// `to` на выходе — фактический конец дороги (узел/торец/якорь).</summary>
+        private static TaxiKind ResolveTaxi(Airbase airbase, GlobalPosition start,
+            ref GlobalPosition to, out Vector3 axis, out Vector3 farDir,
+            out bool existed, out float farM)
+        {
+            axis = default;
+            farDir = default;
+            existed = false;
+            farM = -1f;
+            Vector3 toLocal = to.ToLocalPosition();
+            if (MainlineOf(airbase).Count > 0 ||
+                !TryGetRunwayAxisAt(airbase, toLocal, out axis, out farDir))
+                return TaxiKind.Native;
+            Vector3 startLocal = start.ToLocalPosition();
+            if (TaxiCollector.TryGetAnchor(airbase, TaxiCollector.SideOf(toLocal, axis, startLocal),
+                    out GlobalPosition anchor, out farM))
+            {
+                to = anchor;
+                toLocal = anchor.ToLocalPosition();
+                if (!TryGetRunwayAxisAt(airbase, toLocal, out axis, out farDir))
+                    return TaxiKind.Native; // якорь потерял ось — прямое подключение
+                existed = true;
+            }
+            Vector3 fromStart = startLocal - toLocal;
+            float lateral0 = Vector3.Dot(new Vector3(-axis.z, 0f, axis.x), fromStart);
+            if (Mathf.Abs(lateral0) < 12f && Vector3.Dot(fromStart, farDir) < 0f)
+                return TaxiKind.Direct;
+            return TaxiKind.Collector;
         }
 
         private const float DoorClearanceM = 10f; // старт дороги от ворот — не по зданию
-        private const float TaxiKneeM = 90f;      // колено у торца: вылет поперёк оси ВПП
 
-        /// <summary>Колено рулёжки у торца ВПП: заход на полосу строго
-        /// ПЕРПЕНДИКУЛЯРНО её оси (живая аэродромная геометрия), на стороне
-        /// ангара. Прямая из ангара упирается в торец наискось — скошенный стык,
-        /// огрызки полотна и несовпадающая разметка (плейтест v0.96.1, скрин).
-        /// false — цель не у торца ВПП (нативный узел в глубине поля) или прямая
-        /// уже почти перпендикулярна — колено не нужно. Дорога и поверхность
-        /// строятся по одной полилинии: борт едет по точкам дороги между узлами,
-        /// асфальт ложится под колёса там же.</summary>
-        private static bool TryKneePoint(Airbase airbase, GlobalPosition to,
-            GlobalPosition start, out GlobalPosition knee)
+        /// <summary>Прямой тангенциальный подвод (ангар почти на оси за порогом):
+        /// одна Безье ворота → торец, касательная старта = направление выхода
+        /// ангара, финиша = ось ВПП. Ворота «спиной» к полосе — старт по оси:
+        /// контроль назад даёт складку на полилинии дороги (точки идут
+        /// назад-вперёд).</summary>
+        private static List<GlobalPosition> DirectPoints(Vector3 start, Vector3 to,
+            Vector3 exitFwd, Vector3 farDir)
         {
-            knee = default;
-            Vector3 toLocal = to.ToLocalPosition();
-            if (!TryGetRunwayAxisAt(airbase, toLocal, out Vector3 axis))
-                return false;
-            Vector3 fromStart = start.ToLocalPosition() - toLocal;
-            if (fromStart.sqrMagnitude < 1f)
-                return false;
-            Vector3 perp = new Vector3(-axis.z, 0f, axis.x);
-            Vector3 side = Vector3.Dot(perp, fromStart) < 0f ? -perp : perp;
-            if (Vector3.Dot(fromStart.normalized, side) > 0.95f)
-                return false; // заход уже почти перпендикулярен оси — колено лишнее
-            knee = (toLocal + side * TaxiKneeM).ToGlobalPosition();
-            return true;
+            var pts = new List<GlobalPosition>();
+            float chord = Vector3.Distance(start, to);
+            float d = Mathf.Clamp(chord * 0.35f, 30f, 200f);
+            Vector3 t1 = Vector3.Dot(exitFwd, farDir) < 0f ? farDir : exitFwd;
+            int n = Mathf.Max(3, Mathf.CeilToInt(chord * 1.3f / 15f));
+            for (int i = 1; i < n; i++)
+                pts.Add(Util.Bezier3(start, start + t1 * d, to - farDir * d, to,
+                    i / (float)n).ToGlobalPosition());
+            return pts;
         }
 
-        /// <summary>Ось ВПП, чей торец стоит рядом с точкой (узлы такси-сети
-        /// живут у торцов; запас 60 м — узел может быть чуть смещён от торца).
-        /// false — рядом торца нет.</summary>
-        private static bool TryGetRunwayAxisAt(Airbase airbase, Vector3 point, out Vector3 axis)
+        private static readonly System.Reflection.FieldInfo ServicePointsField =
+            HarmonyLib.AccessTools.Field(typeof(Airbase), "servicePoints");
+
+        /// <summary>Дополнить массив сервис-точек аэродрома (рефлексия): игра
+        /// строит его ТОЛЬКО из SavedAirbase при спайне — у построенной нами ВПП
+        /// он пуст, севшие борта не находят куда рулить (TryGetNearestServicePoint
+        /// пуст) и парком стоят на полосе. Точка = старт рулёжки ангара: на
+        /// апроне и в дорожной сети (обратный рулёж по нашим же дорогам).
+        /// ДОЛГ: точка на оси дороги — припаркованный борт частично перекрывает
+        /// выезд следующего (§12).</summary>
+        private static void AddServicePoint(Airbase airbase, GlobalPosition at)
+        {
+            try
+            {
+                if (airbase == null || airbase.transform == null || ServicePointsField == null)
+                    return;
+                var old = ServicePointsField.GetValue(airbase) as Transform[];
+                int count = old?.Length ?? 0;
+                Vector3 atLocal = at.ToLocalPosition();
+                for (int i = 0; i < count; i++)
+                    if (old[i] != null &&
+                        (old[i].position - atLocal).sqrMagnitude < 4f)
+                        return; // точка уже стоит (переподключение к тому же месту)
+                var go = new GameObject("SN-ServicePoint"); // 3d-go: мировая точка, не UI
+                go.transform.parent = airbase.transform;
+                go.transform.position = atLocal;
+                var updated = new Transform[count + 1];
+                for (int i = 0; i < count; i++)
+                    updated[i] = old[i];
+                updated[count] = go.transform;
+                ServicePointsField.SetValue(airbase, updated);
+            }
+            catch (System.Exception e)
+            {
+                Log.Error("Build: сервис-точка не добавлена — " + e.GetType().Name + ": " + e.Message);
+            }
+        }
+
+        /// <summary>Ось ВПП и направление ВГЛУБЬ полосы от торца, стоящего
+        /// рядом с точкой (узлы такси-сети живут у торцов; запас 60 м — узел
+        /// может быть чуть смещён от торца). false — рядом торца нет.</summary>
+        private static bool TryGetRunwayAxisAt(Airbase airbase, Vector3 point,
+            out Vector3 axis, out Vector3 farDir)
         {
             axis = default;
+            farDir = default;
             Airbase.Runway[] runways = airbase.runways;
             if (runways == null)
                 return false;
@@ -421,23 +506,28 @@ namespace SupremeNuclear
                     continue;
                 Vector3 ds = new Vector3(point.x - s.x, 0f, point.z - s.z);
                 Vector3 de = new Vector3(point.x - e.x, 0f, point.z - e.z);
-                if (ds.sqrMagnitude < snapM * snapM || de.sqrMagnitude < snapM * snapM)
+                float dsSq = ds.sqrMagnitude, deSq = de.sqrMagnitude;
+                if (dsSq < snapM * snapM || deSq < snapM * snapM)
                 {
                     axis = d.normalized;
+                    farDir = dsSq <= deSq ? axis : -axis; // от ближнего торца вглубь
                     return true;
                 }
             }
             return false;
         }
 
-        /// <summary>Дорисовка рулёжки к новому ангару: дорога «выход ангара → ближний
-        /// РОДНОЙ узел такси-сети» (торец ВПП, если сети нет). RegenerateNetwork
-        /// склеивает концы дорог в узлы в радиусе 10 м — новый ангар втыкается в общий
-        /// граф, и выруливающий борт не ищет вход в сеть через полкарты (или полем
-        /// напрямую, как без сети). Поверхность — ГРЕЙДИРОВАННАЯ лента от кромки
-        /// апрона (padY — штифт старта: сход с плиты пандусом ≤ MaxGrade, а не
-        /// обрывом юбки; конец штифтуется в высоту нашей ВПП через TopAt).
-        /// Хост-only; клиент сеть не синкает (руление AI — серверная логика).</summary>
+        /// <summary>Подключить новый ангар к аэродрому (v0.100 — КОЛЛЕКТОР):
+        /// ResolveTaxi выбирает ветку — нативный узел сети / прямой подвод
+        /// (почти осевой ангар за порогом) / магистраль-коллектор стороны
+        /// (создаётся первым ангаром, растёт хвостами). Дорога коннектора
+        /// добавляется ПОСЛЕДНЕЙ и режет магистраль в точке стыка
+        /// (CheckIntersection), RegenerateNetwork склеивает концы в узлы —
+        /// выруливающий борт сразу в общем графе. Поверхность — грейдированная
+        /// лента от кромки апрона (padY — штифт старта: сход с плиты пандусом
+        /// ≤ MaxGrade, не обрывом юбки); перекрытия прижаты заподлицо
+        /// (TaxiSurface.TopAt). Хост-only; клиент сеть не синкает (руление AI —
+        /// серверная логика).</summary>
         private static void ConnectTaxiway(Airbase airbase, Building hangarBuilding,
             float padY = float.NaN)
         {
@@ -472,30 +562,64 @@ namespace SupremeNuclear
 
                 if (!TryPickConnectTarget(airbase, start, fwd, out GlobalPosition to))
                     return;
+                TaxiKind kind = ResolveTaxi(airbase, start, ref to,
+                    out Vector3 axis, out Vector3 farDir, out bool existed, out float farM);
 
-                // Колено у торца ВПП: перпендикулярный заход (и дорога, и полотно).
-                bool knee = TryKneePoint(airbase, to, start, out GlobalPosition kneeAt);
-
-                var road = new Road();
-                road.AddPoint(start);
-                if (knee)
-                    road.AddPoint(kneeAt);
-                road.AddPoint(to);
-                road.CalcLength();
-                net.roads.Add(road);
-                net.RegenerateNetwork();
-                // Поверхность: граф ведёт борт, а плиты-коллайдеры несут шасси —
-                // без них на грунте (пустыня) тяжёлый борт вязнет и его катапультирует.
-                // Лента стартует С КРОМКИ АПРОНА (габарит + 6 м, геометрия Pad) —
-                // пандус накрывает юбку плиты; в зоне перекрытия с ВПП прижимается
-                // к её полотну на каждой станции (стык заподлицо).
+                // Дорога/полотно коннектора ангара; полотно стартует С КРОМКИ
+                // АПРОНА (габарит + 6 м, геометрия Pad) — пандус накрывает юбку
+                // плиты. Граф ведёт борта, а плиты-коллайдеры несут шасси — без
+                // них на грунте (пустыня) тяжёлый борт вязнет и его катапультирует.
                 Vector3 padEdge = hangarBuilding.transform.position +
                     new Vector3(fwd.x, 0f, fwd.z).normalized *
                     (hangarBuilding.definition.length * 0.5f + 6f);
-                var surface = new List<GlobalPosition> { padEdge.ToGlobalPosition() };
-                surface.AddRange(road.points);
+                var roadPts = new List<GlobalPosition>();
+                var surface = new List<GlobalPosition> { padEdge.ToGlobalPosition(), start };
+                TaxiCollector.Plan plan = null;
+                if (kind == TaxiKind.Native)
+                {
+                    roadPts.Add(to);
+                    surface.Add(to);
+                }
+                else if (kind == TaxiKind.Direct)
+                {
+                    roadPts.AddRange(DirectPoints(start.ToLocalPosition(), to.ToLocalPosition(),
+                        fwd, farDir));
+                    roadPts.Add(to);
+                    surface.AddRange(roadPts); // срез полотна = торцевая линия полосы
+                }
+                else
+                {
+                    plan = TaxiCollector.PlanFor(to, axis, farDir, start, fwd, existed, farM);
+                    TaxiCollector.Apply(airbase, plan, net); // магистраль/хвост + реестр
+                    if (plan.Creates)
+                        TaxiSurface.Register(plan.Body, graded: true);
+                    else if (plan.Extension.Count >= 2)
+                        TaxiSurface.Register(plan.Extension, graded: true);
+                    roadPts.AddRange(plan.Connector);
+                    roadPts.Add(plan.Junction);
+                    surface.AddRange(plan.Connector);
+                    surface.Add(plan.ConnectorStripEnd); // срез по дальней кромке магистрали
+                }
+
+                var road = new Road();
+                road.AddPoint(start);
+                foreach (GlobalPosition p in roadPts)
+                    road.AddPoint(p);
+                road.CalcLength();
+                net.roads.Add(road);
+                if (kind == TaxiKind.Collector)
+                    road.CheckIntersection(net); // Т-стык: магистраль режется в точке коннектора
+                net.RegenerateNetwork();
+                // Сервис-точка у выхода ангара: севший борт после пробега рулит
+                // по сети ОБРАТНО к апронам (TryGetNearestServicePoint), а не
+                // паркуется на полосе вечным препятствием.
+                AddServicePoint(airbase, start);
                 TaxiSurface.Register(surface, graded: true, startY: padY);
                 Log.Info("Build: рулёжка дорисована — " + airbase.name +
+                         (kind == TaxiKind.Collector
+                             ? " коллектор" + (plan.Creates ? " (создан" : " (расширена") +
+                               " до " + plan.NewFarM.ToString("F0") + " м)"
+                             : "") +
                          " (дорог " + net.roads.Count + ")");
             }
             catch (System.Exception e)

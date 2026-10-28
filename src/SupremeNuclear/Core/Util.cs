@@ -54,6 +54,120 @@ namespace SupremeNuclear
             return (proj - from).sqrMagnitude;
         }
 
+        /// <summary>Точка внутри прямоугольника-«полосы» вокруг отрезка a–b (XZ):
+        /// вдоль оси торцов ± длина/2, поперёк ± width/2, к обоим — запас margin
+        /// (кромки полотна). Пик полотна ВПП кликом (выделение аэродрома без
+        /// вышки, v0.102). Чистая — тестируется.</summary>
+        public static bool InRectXZ(Vector2 p, Vector2 a, Vector2 b, float widthM, float marginM)
+        {
+            Vector2 axis = b - a;
+            float len = axis.magnitude;
+            if (len < 1e-3f)
+                return (p - a).magnitude <= widthM * 0.5f + marginM;
+            Vector2 dir = axis / len;
+            Vector2 rel = p - (0.5f * (a + b));
+            float along = Vector2.Dot(rel, dir);
+            float across = rel.x * -dir.y + rel.y * dir.x;
+            return Mathf.Abs(along) <= len * 0.5f + marginM &&
+                   Mathf.Abs(across) <= widthM * 0.5f + marginM;
+        }
+
+        /// <summary>Точка кубической кривой Безье (t∈[0,1]). Сглаживание
+        /// рулёжек: касательные на концах задают контрольные точки (p1 —
+        /// направление выхода из ворот ангара, p2 — вход по оси ВПП), кривая
+        /// гладкая при любой расстановке — без «колен». Аффинность: любой
+        /// линейный функционал (например, боковой отступ от оси полосы) на
+        /// кривой ограничен его значениями на контрольных точках — зажатые
+        /// контроли гарантируют, что кривая не заходит в полосу. Чистая —
+        /// тестируется.</summary>
+        public static Vector3 Bezier3(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, float t)
+        {
+            float u = 1f - t;
+            return u * u * u * p0 + 3f * u * u * t * p1 + 3f * u * t * t * p2 + t * t * t * p3;
+        }
+
+        /// <summary>КОЛЛЕКТОР рулёжки (v0.100): точка стыка и коннектор ангара к
+        /// магистрали ПАРАЛЛЕЛЬНО оси ВПП (чистая, тестируется). Магистраль на
+        /// стороне ангара (отступ laneOffsetM от оси); дальность стыка — проекция
+        /// ангара на ось, но не ближе junctionMinM к торцу (не в зоне S-кривой).
+        /// Коннектор — Безье: касательная старта = направление выхода ангара,
+        /// финиша = хорда к стыку (перпендикулярные ворота дают почти прямую).
+        /// Ворота «мимо стыка» (спиной/поперёк) — касательная старта подмешивает
+        /// хорду (порог 0.25): контроль по чистому fwd давал складку-петлю на
+        /// полилинии («линия с изломами», плейтест v0.100.0). Вылет контролов
+        /// ≤ 0.45 хорды: у ангара вплотную к магистрали контроль 30 м на
+        /// короткой хорде вихлял кривую (v0.100.1). Контроль старта зажата по
+        /// боковому отступу ≥ магистрали — по выпуклости Безье коннектор не
+        /// подходит к полосе ближе отступа.
+        /// farM &lt; 0 — магистрали ещё нет. newFarM — дальность магистрали ПОСЛЕ
+        /// подключения: запас growM за стыком, минимум minFarM, назад не
+        /// ужимается. Хорда &lt; 8 м — коннектор пуст (прямая start → стык).</summary>
+        public static void TaxiCollectorPlan(Vector3 threshold, Vector3 start, Vector3 exitFwd,
+            Vector3 axis, Vector3 farDir, float laneOffsetM, float junctionMinM,
+            float growM, float minFarM, float farM,
+            out Vector3 side, out Vector3 junction, out List<Vector3> connector, out float newFarM)
+        {
+            Vector3 perp = new Vector3(-axis.z, 0f, axis.x);
+            Vector3 from = start - threshold;
+            side = Vector3.Dot(perp, from) < 0f ? -perp : perp;
+            float dfJ = Mathf.Max(Vector3.Dot(from, farDir), junctionMinM);
+            junction = threshold + farDir * dfJ + side * laneOffsetM;
+            newFarM = Mathf.Max(Mathf.Max(farM, 0f), Mathf.Max(dfJ + growM, minFarM));
+            connector = new List<Vector3>();
+            float chord = Vector3.Distance(start, junction);
+            if (chord < 8f)
+                return;
+            float d = Mathf.Min(chord * 0.45f, Mathf.Clamp(chord * 0.35f, 30f, 200f));
+            Vector3 chordDir = (junction - start).normalized;
+            Vector3 t0 = chordDir; // вырожденный fwd — старт по хорде
+            if (exitFwd.sqrMagnitude > 1e-6f)
+            {
+                float fdot = Vector3.Dot(exitFwd, chordDir);
+                t0 = fdot >= 0.25f
+                    ? exitFwd
+                    : (exitFwd + chordDir * (0.25f - fdot)).normalized;
+            }
+            Vector3 c1 = start + t0 * d;
+            float lateral = Vector3.Dot(c1 - threshold, side);
+            if (lateral < laneOffsetM)
+                c1 += side * (laneOffsetM - lateral);
+            Vector3 c2 = junction - chordDir * d;
+            int n = Mathf.Max(3, Mathf.CeilToInt(chord * 1.3f / 15f));
+            for (int i = 1; i < n; i++)
+                connector.Add(Bezier3(start, c1, c2, junction, i / (float)n));
+        }
+
+        /// <summary>S-кривая слияния магистрали с ВПП («смена полосы», v0.98.5):
+        /// Безье p1 → торец, касательная farDir на ОБОИХ концах, контроли на
+        /// кромках коридора «магистраль ↔ ось» — по аффинности кривая между
+        /// ними: ось не пересекает, за торец не заходит. Возвращает ТОЛЬКО
+        /// внутренние точки по возрастанию t (p1 и торец на совести звущего).
+        /// p1 = торец + side·mergeM − farDir·mergeM.</summary>
+        public static List<Vector3> TaxiMergeSamples(Vector3 threshold, Vector3 farDir,
+            Vector3 side, float mergeM)
+        {
+            Vector3 laneAt = threshold + side * mergeM;
+            Vector3 p1 = laneAt - farDir * mergeM;
+            var pts = new List<Vector3>();
+            int n = Mathf.Max(3, Mathf.CeilToInt(Vector3.Distance(p1, threshold) * 1.3f / 15f));
+            for (int i = 1; i < n; i++)
+                pts.Add(Bezier3(p1, laneAt, threshold - farDir * mergeM, threshold, i / (float)n));
+            return pts;
+        }
+
+        /// <summary>Точки магистрали по дальности от торца (вдоль farDir, отступ
+        /// side·laneOffsetM): шаг ≤ 15 м, ОБА конца включены — расширение
+        /// начинается точно со старого конца (склейка узлов в радиусе 10 м).</summary>
+        public static List<Vector3> TaxiLaneSamples(Vector3 threshold, Vector3 farDir,
+            Vector3 side, float laneOffsetM, float fromM, float toM)
+        {
+            var pts = new List<Vector3>();
+            int n = Mathf.Max(1, Mathf.CeilToInt((toM - fromM) / 15f));
+            for (int i = 0; i <= n; i++)
+                pts.Add(threshold + farDir * Mathf.Lerp(fromM, toM, i / (float)n) + side * laneOffsetM);
+            return pts;
+        }
+
         /// <summary>Радиус кольца остановки строителей вокруг площадки: габарит
         /// здания + запас (вне границы призрака), но НЕ дальше радиуса оплаты
         /// площадки (дальше деньги не капают) и не ближе минимума. Чистая —
@@ -440,5 +554,32 @@ namespace SupremeNuclear
 
         private static float Horiz(Vector3 a, Vector3 b) =>
             new Vector2(a.x - b.x, a.z - b.z).magnitude;
+
+        /// <summary>Маршрут уже встречался среди ранее нарисованных? seen — сплющенные
+        /// маршруты кадра, lens — их длины (дедуп общего ралли пачки фабрик: одинаковые
+        /// маршруты рисуются одной лентой). Чистая функция — тестируется.</summary>
+        public static bool RouteSeenBefore(IReadOnlyList<Vector3> seen, IReadOnlyList<int> lens,
+            IReadOnlyList<Vector3> route)
+        {
+            int n = route.Count;
+            for (int s = 0, idx = 0; s < lens.Count; s++)
+            {
+                int len = lens[s];
+                if (len == n)
+                {
+                    bool same = true;
+                    for (int i = 0; i < n; i++)
+                        if (seen[idx + i] != route[i])
+                        {
+                            same = false;
+                            break;
+                        }
+                    if (same)
+                        return true;
+                }
+                idx += len;
+            }
+            return false;
+        }
     }
 }

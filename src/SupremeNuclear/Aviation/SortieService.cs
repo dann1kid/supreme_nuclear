@@ -38,13 +38,43 @@ namespace SupremeNuclear
             if (!IsHost)
                 return;
             AirbaseReserve.Prune();
+            AirbaseAccess.Prune();
             AircraftOrders.CollectAll(Units, Plans);
             for (int i = 0; i < Units.Count; i++)
             {
                 AircraftOrders.OrderSegment seg = Plans[i].Count > 0 ? Plans[i][0] : null;
-                if (seg != null)
-                    TickSegment(Units[i] as Aircraft, Plans[i], seg);
+                if (seg == null)
+                    continue;
+                Aircraft aircraft = Units[i] as Aircraft;
+                TickSegment(aircraft, Plans[i], seg);
+                // Взлёт-вахта: борт стоит с живым НЕ-RTB планом (приказ пришёл при
+                // закрытом взлёте — Launch отказал) и базе открыли взлёт — запускаем.
+                if (seg.Mode != AirOrderMode.Rtb && aircraft != null)
+                    LaunchParkedWhenOpen(aircraft);
             }
+        }
+
+        /// <summary>Взлёт открыт на базе, где стоит борт (нет базы рядом — открыт:
+        /// аварийная посадка в чистом поле не должна запирать борт).</summary>
+        private static bool TakeoffHereOpen(Aircraft aircraft)
+        {
+            if (aircraft.NetworkHQ == null)
+                return true;
+            return !aircraft.NetworkHQ.AnyNearAirbase(aircraft.transform.position, out Airbase home) ||
+                   AirbaseAccess.IsTakeoffOpen(home);
+        }
+
+        /// <summary>Вахта закрытого взлёта: план жив, борт в паркинге и взлёт открыт —
+        /// выкат (Notice не спамим: Launch при открытом взлёте молча переключает).
+        /// Топлива мало — не трогаем: нативно севший по баку борт иначе зациклит
+        /// взлёт/посадку (патруль без RTB-сегмента сервис не проходит).</summary>
+        private static void LaunchParkedWhenOpen(Aircraft aircraft)
+        {
+            Pilot pilot = aircraft.pilots != null && aircraft.pilots.Length > 0 ? aircraft.pilots[0] : null;
+            if (pilot == null || !(pilot.currentState is PilotParkedState) ||
+                aircraft.GetFuelLevel() < Settings.RtbFuelLevel || !TakeoffHereOpen(aircraft))
+                return;
+            Launch(aircraft);
         }
 
         private static void TickSegment(Aircraft aircraft, IReadOnlyList<AircraftOrders.OrderSegment> plan,
@@ -137,7 +167,10 @@ namespace SupremeNuclear
 
         /// <summary>Новый приказ стоящему на базе борту: выкат из паркинга — самолёты
         /// через такси к полосе, вертолёты/тильтвинги вертикальным взлётом. Летящий/
-        /// садящийся/таксиующий борт не трогается (проверка состояния).</summary>
+        /// садящийся/таксиующий борт не трогается (проверка состояния). Самолёту на
+        /// базе с закрытым взлётом (AirbaseAccess) выкат запрещён — план ждёт,
+        /// взлёт-вахта в Tick запустит борт, когда базу откроют; вертолёты ВПП не
+        /// занимают и не ограничиваются.</summary>
         public static void Launch(Unit unit)
         {
             if (!(unit is Aircraft aircraft) || aircraft.pilots == null || aircraft.pilots.Length == 0)
@@ -145,6 +178,12 @@ namespace SupremeNuclear
             Pilot pilot = aircraft.pilots[0];
             if (!(pilot.currentState is PilotParkedState))
                 return;
+            if (pilot.pilotType == Pilot.PilotType.Plane && !TakeoffHereOpen(aircraft))
+            {
+                CommanderHud.Notice(Loc.F("Взлёт закрыт: {0} ждёт открытия полосы",
+                    aircraft.definition.unitName));
+                return;
+            }
             if (pilot.pilotType == Pilot.PilotType.Plane)
             {
                 if (pilot.AITaxiState == null)

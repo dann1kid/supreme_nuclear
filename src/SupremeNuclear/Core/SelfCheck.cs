@@ -33,6 +33,15 @@ namespace SupremeNuclear
                 if (!AircraftTargetPinPatch.FieldsOk)
                     throw new System.Exception("не найдены reflection-поля currentTarget/currentWeaponInfo/...");
             });
+            Check("FactionHQ.trackingDatabase (распределение целей авиации)", () =>
+            {
+                if (HarmonyLib.AccessTools.Field(typeof(FactionHQ), "trackingDatabase") == null)
+                    throw new System.Exception("поле trackingDatabase не найдено — распределение целей мертво");
+                if (HarmonyLib.AccessTools.Method(typeof(TrackingInfo), "TryGetUnit") == null)
+                    throw new System.Exception("TrackingInfo.TryGetUnit не найден — перебор целей трекинга мёртв");
+                if (HarmonyLib.AccessTools.Method(typeof(FactionHQ), "IsTargetPositionAccurate") == null)
+                    throw new System.Exception("FactionHQ.IsTargetPositionAccurate не найден — скоринг целей мёртв");
+            });
             Check("AIHeloCombatState (вертолётные патчи)", () =>
             {
                 if (HarmonyLib.AccessTools.Method(typeof(AIHeloCombatState), "AssessHQTargets") == null ||
@@ -59,6 +68,49 @@ namespace SupremeNuclear
                     throw new System.Exception("метод AnyNearAirbase не найден — патч мёртв");
                 if (HarmonyLib.AccessTools.Field(typeof(FactionHQ), "airbasesUnsorted") == null)
                     throw new System.Exception("поле airbasesUnsorted не найдено — патч не увидит аэродромы");
+            });
+            Check("AIPilotLandingState.LeaveState (снятие с landingList)", () =>
+            {
+                if (HarmonyLib.AccessTools.Method(typeof(AIPilotLandingState), "LeaveState") == null ||
+                    HarmonyLib.AccessTools.Method(typeof(AIPilotShortLandingState), "LeaveState") == null)
+                    throw new System.Exception("LeaveState посадок не найден — патч мёртв");
+                if (!LandingDeregisterPatch.FieldsOk)
+                    throw new System.Exception("нет полей runwayUsage/aircraft — патч не снимет с landingList");
+            });
+            Check("WeaponStation.Fire/LaunchMount (предохранитель правил оружия)", () =>
+            {
+                var fire = HarmonyLib.AccessTools.Method(typeof(WeaponStation), nameof(WeaponStation.Fire));
+                var launch = HarmonyLib.AccessTools.Method(typeof(WeaponStation), nameof(WeaponStation.LaunchMount));
+                if (fire == null || launch == null)
+                    throw new System.Exception("методы применения оружия не найдены — предохранитель мёртв");
+                foreach (System.Reflection.MethodInfo m in new[] { fire, launch })
+                {
+                    var ps = m.GetParameters();
+                    if (ps.Length < 2 || ps[0].Name != "owner" || ps[1].Name != "target")
+                        throw new System.Exception(m.Name + ": параметры owner/target переименованы — префикс не свяжется");
+                }
+                if (HarmonyLib.AccessTools.Method(typeof(Turret), nameof(Turret.GetWeaponStations)) == null)
+                    throw new System.Exception("Turret.GetWeaponStations не найден — проверка турели по кандидату мертва");
+                if (HarmonyLib.AccessTools.Property(typeof(Aircraft), nameof(Aircraft.Player)) == null)
+                    throw new System.Exception("Aircraft.Player не найден — исключение аса-человека не сработает");
+            });
+            Check("Airbase.servicePoints (сервис-точки севших бортов)", () =>
+            {
+                if (HarmonyLib.AccessTools.Field(typeof(Airbase), "servicePoints") == null)
+                    throw new System.Exception("поле servicePoints не найдено — севшие борты не припаркуются");
+            });
+            Check("Airbase.Runway.Landing/Takeoff + вертикальные точки (тумблеры аэродрома)", () =>
+            {
+                if (HarmonyLib.AccessTools.Field(typeof(Airbase), "runways") == null ||
+                    HarmonyLib.AccessTools.Field(typeof(Airbase.Runway), nameof(Airbase.Runway.Landing)) == null ||
+                    HarmonyLib.AccessTools.Field(typeof(Airbase.Runway), nameof(Airbase.Runway.Takeoff)) == null)
+                    throw new System.Exception("флаги полос не найдены — тумблеры аэродрома мертвы");
+                if (HarmonyLib.AccessTools.Method(typeof(Airbase.Runway), nameof(Airbase.Runway.GetWidth)) == null)
+                    throw new System.Exception("Runway.GetWidth не найден — пик полотна ВПП кликом мёртв");
+                if (HarmonyLib.AccessTools.Method(typeof(Unit), nameof(Unit.GetAirbase)) == null)
+                    throw new System.Exception("Unit.GetAirbase не найден — тумблеры авианосца мертвы");
+                if (!AirbaseAccessPatch.FieldsOk)
+                    throw new System.Exception("IsSuitable/TryRequestVerticalLanding не найдены — вертолёты не увидят закрытую посадку");
             });
             Check("Spawner.SpawnBuilding + unitPrefab (достройка ангаров)", () =>
             {
@@ -425,6 +477,8 @@ namespace SupremeNuclear
                     throw new System.Exception("WeaponChecker.GetAvailableWeaponsNonAlloc не найден");
                 if (HarmonyLib.AccessTools.Field(typeof(Hangar), "parentAirbase") == null)
                     throw new System.Exception("Hangar.parentAirbase не найден");
+                if (HarmonyLib.AccessTools.Field(typeof(Hangar), "spawnedObject") == null)
+                    throw new System.Exception("Hangar.spawnedObject не найден — ралли ангара не выдастся борту");
                 if (HarmonyLib.AccessTools.Field(typeof(WeaponInfo), "weaponIcon") == null)
                     throw new System.Exception("WeaponInfo.weaponIcon не найден");
                 if (HarmonyLib.AccessTools.Field(typeof(WeaponMount), "info") == null)

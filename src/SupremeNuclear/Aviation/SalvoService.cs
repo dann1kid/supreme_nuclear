@@ -118,10 +118,19 @@ namespace SupremeNuclear
 
         /// <summary>Пуск одной станции по распределённому списку целей (нативный путь
         /// UseMissiles: LookForMissileTargets → TargetListChanged → Fire → SalvoFire).
-        /// Станция отмечается отстрелянной только когда пуск реально состоялся.</summary>
+        /// Станция отмечается отстрелянной только когда пуск реально состоялся.
+        /// Стойка hold-fire и правило типа против цели залпа — станция отработана
+        /// без пуска (MarkFired): предохранитель всё равно резал бы пуск, а сегмент
+        /// не должен вечно ждать «сухую» станцию (v0.106).</summary>
         private static void TryFireStation(Aircraft aircraft, WeaponManager wm,
             AircraftOrders.OrderSegment seg, Unit primary, WeaponStation st, int idx)
         {
+            if (StanceService.IsHoldFire(aircraft) ||
+                !WeaponGateService.TypeAllows(aircraft, st, primary))
+            {
+                MarkFired(seg, idx); // огонь запрещён правилами — не ждём эту станцию
+                return;
+            }
             if (st.SalvoInProgress || !st.Ready() || st.SafetyIsOn(aircraft))
                 return; // залп/перезарядка/шасси — повторим в следующем тике
 

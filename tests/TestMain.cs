@@ -53,6 +53,166 @@ namespace SupremeNuclear.Tests
             Check("DistSqToSegmentXZ: вырожденный отрезок — точка",
                 UnityEngine.Mathf.Abs(Util.DistSqToSegmentXZ(new UnityEngine.Vector2(3f, 4f), UnityEngine.Vector2.zero, UnityEngine.Vector2.zero) - 25f) < 1e-4f);
 
+            // ---------- Util.InRectXZ: прямоугольник-полоса (пик полотна ВПП кликом) ----------
+            Check("InRectXZ: внутри вдоль и поперёк, снаружи за торцом и сбоку",
+                Util.InRectXZ(new UnityEngine.Vector2(50f, 10f), UnityEngine.Vector2.zero, new UnityEngine.Vector2(100f, 0f), 40f, 5f) &&
+                !Util.InRectXZ(new UnityEngine.Vector2(120f, 0f), UnityEngine.Vector2.zero, new UnityEngine.Vector2(100f, 0f), 40f, 5f) &&
+                !Util.InRectXZ(new UnityEngine.Vector2(50f, 40f), UnityEngine.Vector2.zero, new UnityEngine.Vector2(100f, 0f), 40f, 5f));
+            Check("InRectXZ: наклонённая полоса — система координат отрезка",
+                Util.InRectXZ(new UnityEngine.Vector2(103f, 103f), new UnityEngine.Vector2(100f, 100f), new UnityEngine.Vector2(200f, 200f), 30f, 2f) &&
+                !Util.InRectXZ(new UnityEngine.Vector2(115f, 85f), new UnityEngine.Vector2(100f, 100f), new UnityEngine.Vector2(200f, 200f), 30f, 2f));
+            Check("InRectXZ: запас margin расширяет вдоль и поперёк",
+                Util.InRectXZ(new UnityEngine.Vector2(104f, 0f), UnityEngine.Vector2.zero, new UnityEngine.Vector2(100f, 0f), 40f, 5f) &&
+                Util.InRectXZ(new UnityEngine.Vector2(50f, 26f), UnityEngine.Vector2.zero, new UnityEngine.Vector2(100f, 0f), 40f, 7f));
+            Check("InRectXZ: вырожденный отрезок — круг радиусом полوعины+запас",
+                Util.InRectXZ(new UnityEngine.Vector2(24f, 0f), UnityEngine.Vector2.zero, UnityEngine.Vector2.zero, 40f, 5f) &&
+                !Util.InRectXZ(new UnityEngine.Vector2(26f, 0f), UnityEngine.Vector2.zero, UnityEngine.Vector2.zero, 40f, 5f));
+
+            // ---------- Util.Bezier3: сглаживание рулёжек (подвод к дорожке слияния) ----------
+            var bp0 = new UnityEngine.Vector3(0f, 0f, 0f);
+            var bp1 = new UnityEngine.Vector3(30f, 0f, 0f);
+            var bp2 = new UnityEngine.Vector3(30f, 0f, 100f);
+            var bp3 = new UnityEngine.Vector3(0f, 0f, 100f);
+            Check("Bezier3: концы кривой = опорные точки",
+                (Util.Bezier3(bp0, bp1, bp2, bp3, 0f) - bp0).sqrMagnitude < 1e-6f &&
+                (Util.Bezier3(bp0, bp1, bp2, bp3, 1f) - bp3).sqrMagnitude < 1e-6f);
+            Check("Bezier3: касательная на концах = контрольные направления",
+                UnityEngine.Vector3.Dot((Util.Bezier3(bp0, bp1, bp2, bp3, 0.001f) - bp0).normalized,
+                    (bp1 - bp0).normalized) > 0.999f &&
+                UnityEngine.Vector3.Dot((bp3 - Util.Bezier3(bp0, bp1, bp2, bp3, 0.999f)).normalized,
+                    (bp3 - bp2).normalized) > 0.999f);
+            // Аффинность: линейный функционал (здесь z) на кривой не выходит
+            // за [min, max] по контрольным точкам — зажатые контроли не пускают
+            // кривую в полосу.
+            float zMin = UnityEngine.Mathf.Min(UnityEngine.Mathf.Min(bp0.z, bp1.z),
+                UnityEngine.Mathf.Min(bp2.z, bp3.z));
+            float zMax = UnityEngine.Mathf.Max(UnityEngine.Mathf.Max(bp0.z, bp1.z),
+                UnityEngine.Mathf.Max(bp2.z, bp3.z));
+            bool zBounded = true;
+            for (int i = 0; i <= 20; i++)
+            {
+                float z = Util.Bezier3(bp0, bp1, bp2, bp3, i / 20f).z;
+                zBounded &= z >= zMin - 1e-4f && z <= zMax + 1e-4f;
+            }
+            Check("Bezier3: аффинная ограниченность — кривая в границах контролов", zBounded);
+
+            // ---------- Util.Taxi*: геометрия КОЛЛЕКТОРА рулёжки (v0.100) ----------
+            // Порог (0,0,0), ось и farDir = +X, сторона ангара +Z: магистраль z=+50.
+            var thr = new UnityEngine.Vector3(0f, 0f, 0f);
+            var axisX = new UnityEngine.Vector3(1f, 0f, 0f);
+            var toSide = new UnityEngine.Vector3(0f, 0f, -1f); // ворота ангара к полосе
+            const float OFF = 50f, JMIN = 25f, GROW = 80f, MINF = 150f;
+
+            Util.TaxiCollectorPlan(thr, new UnityEngine.Vector3(240f, 0f, 110f), toSide,
+                axisX, axisX, OFF, JMIN, GROW, MINF, -1f,
+                out UnityEngine.Vector3 side1, out UnityEngine.Vector3 j1,
+                out System.Collections.Generic.List<UnityEngine.Vector3> c1, out float f1);
+            Check("Taxi: сторона магистрали — к ангару (+Z)",
+                side1.z > 0.99f);
+            Check("Taxi: стык под ангаром на магистрали (df=240, z=50)",
+                UnityEngine.Mathf.Abs(j1.x - 240f) < 0.01f && UnityEngine.Mathf.Abs(j1.z - 50f) < 0.01f);
+            Check("Taxi: создание — магистраль до max(240+80,150)=320",
+                UnityEngine.Mathf.Abs(f1 - 320f) < 0.01f);
+            float maxOff1 = 0f;
+            foreach (UnityEngine.Vector3 p in c1)
+            {
+                maxOff1 = UnityEngine.Mathf.Max(maxOff1, UnityEngine.Mathf.Sqrt(
+                    Util.DistSqToSegmentXZ(new UnityEngine.Vector2(p.x, p.z),
+                        new UnityEngine.Vector2(240f, 110f), new UnityEngine.Vector2(j1.x, j1.z))));
+            }
+            Check("Taxi: перпендикулярные ворота — коннектор почти прямая (<2 м от хорды)",
+                maxOff1 < 2f, "макс " + maxOff1.ToString("F2") + " м");
+            bool latOk1 = true;
+            foreach (UnityEngine.Vector3 p in c1)
+                latOk1 &= p.z >= OFF - 0.5f;
+            Check("Taxi: коннектор не подходит к полосе ближе магистрали (z ≥ 50)", latOk1);
+
+            Util.TaxiCollectorPlan(thr, new UnityEngine.Vector3(-150f, 0f, 120f), toSide,
+                axisX, axisX, OFF, JMIN, GROW, MINF, -1f,
+                out _, out UnityEngine.Vector3 j2, out _, out float f2);
+            Check("Taxi: ангар за порогом — стык клампится на JMIN=25",
+                UnityEngine.Mathf.Abs(j2.x - JMIN) < 0.01f);
+            Check("Taxi: дальность при создании ≥ MinFar",
+                UnityEngine.Mathf.Abs(f2 - MINF) < 0.01f);
+
+            Util.TaxiCollectorPlan(thr, new UnityEngine.Vector3(400f, 0f, 110f), toSide,
+                axisX, axisX, OFF, JMIN, GROW, MINF, 320f,
+                out _, out UnityEngine.Vector3 j3, out _, out float f3);
+            Check("Taxi: дальний ангар растит магистраль (400+80=480)",
+                UnityEngine.Mathf.Abs(j3.x - 400f) < 0.01f && UnityEngine.Mathf.Abs(f3 - 480f) < 0.01f);
+            Util.TaxiCollectorPlan(thr, new UnityEngine.Vector3(150f, 0f, 110f), toSide,
+                axisX, axisX, OFF, JMIN, GROW, MINF, 480f,
+                out _, out _, out _, out float f4);
+            Check("Taxi: ближний ангар внутри — магистраль не ужимается (480)",
+                UnityEngine.Mathf.Abs(f4 - 480f) < 0.01f);
+
+            // Непересечение коннекторов грида: каждый живёт в своём коридоре df
+            // (±40 м вокруг ангара) — при шаге грида 160 м коридоры не пересекаются.
+            bool corridorsOk = true;
+            for (float hx = 80f; hx <= 560f; hx += 160f)
+            {
+                Util.TaxiCollectorPlan(thr, new UnityEngine.Vector3(hx, 0f, 110f), toSide,
+                    axisX, axisX, OFF, JMIN, GROW, MINF, -1f,
+                    out _, out _, out System.Collections.Generic.List<UnityEngine.Vector3> cc, out _);
+                float lo = hx, hi = UnityEngine.Mathf.Max(hx, JMIN);
+                foreach (UnityEngine.Vector3 p in cc)
+                {
+                    lo = UnityEngine.Mathf.Min(lo, p.x);
+                    hi = UnityEngine.Mathf.Max(hi, p.x);
+                }
+                corridorsOk &= hi - lo < 80f;
+            }
+            Check("Taxi: коннекторы грида в непересекающихся коридорах (<80 м при шаге 160)",
+                corridorsOk);
+
+            // Без складок при воротах «мимо стыка» (спиной/поперёк/диагональю):
+            // каждый шаг полилинии обязан продвигаться к стыку (проекция на
+            // хорду не убывает) — контроль по чистому fwd давал петлю
+            // («линия с изломами», плейтест v0.100.0).
+            bool noFolds = true;
+            UnityEngine.Vector3[][] foldCases =
+            {
+                new[] { new UnityEngine.Vector3(240f, 0f, 110f), new UnityEngine.Vector3(0f, 0f, 1f) },        // спиной к магистрали
+                new[] { new UnityEngine.Vector3(240f, 0f, 110f), new UnityEngine.Vector3(0.7071f, 0f, 0.7071f) }, // диагональю от стыка
+                new[] { new UnityEngine.Vector3(240f, 0f, 60f), new UnityEngine.Vector3(0.7071f, 0f, 0.7071f) },   // вплотную к магистрали
+                new[] { new UnityEngine.Vector3(240f, 0f, 110f), new UnityEngine.Vector3(1f, 0f, 0f) },        // вдоль полосы
+            };
+            foreach (UnityEngine.Vector3[] fc in foldCases)
+            {
+                Util.TaxiCollectorPlan(thr, fc[0], fc[1], axisX, axisX, OFF, JMIN, GROW, MINF, -1f,
+                    out _, out UnityEngine.Vector3 fj, out System.Collections.Generic.List<UnityEngine.Vector3> fcPts, out _);
+                UnityEngine.Vector2 fchord = new UnityEngine.Vector2(fj.x - fc[0].x, fj.z - fc[0].z).normalized;
+                var whole = new System.Collections.Generic.List<UnityEngine.Vector2> { new UnityEngine.Vector2(fc[0].x, fc[0].z) };
+                foreach (UnityEngine.Vector3 p in fcPts)
+                    whole.Add(new UnityEngine.Vector2(p.x, p.z));
+                whole.Add(new UnityEngine.Vector2(fj.x, fj.z));
+                for (int fi = 1; fi < whole.Count; fi++)
+                    noFolds &= UnityEngine.Vector2.Dot(whole[fi] - whole[fi - 1], fchord) >= -0.05f;
+            }
+            Check("Taxi: ворота «мимо стыка» — коннектор без складок (монотонен к стыку)", noFolds);
+
+            var merge = Util.TaxiMergeSamples(thr, axisX, new UnityEngine.Vector3(0f, 0f, 1f), OFF);
+            bool mergeOk = merge.Count >= 2; // только внутренние точки: p1 и торец добавляет звущий
+            foreach (UnityEngine.Vector3 p in merge)
+                mergeOk &= p.x >= -50.1f && p.z >= -0.1f && p.z <= 50.1f;
+            Check("TaxiMerge: сэмплы только внутри коридора p1→торец (x≥−50, 0≤z≤50)",
+                mergeOk, merge.Count + " точек");
+            UnityEngine.Vector3 lastDir = thr - merge[merge.Count - 1];
+            Check("TaxiMerge: вход в торец вдоль оси (хорда последнего сэмпла ~farDir)",
+                UnityEngine.Vector3.Dot(lastDir.normalized, axisX) > 0.97f);
+
+            var lane = Util.TaxiLaneSamples(thr, axisX, new UnityEngine.Vector3(0f, 0f, 1f), OFF, -50f, 320f);
+            bool laneOk = UnityEngine.Mathf.Abs(lane[0].x + 50f) < 0.01f &&
+                          UnityEngine.Mathf.Abs(lane[lane.Count - 1].x - 320f) < 0.01f;
+            for (int li = 0; li < lane.Count; li++)
+            {
+                laneOk &= UnityEngine.Mathf.Abs(lane[li].z - 50f) < 0.01f;
+                if (li > 0)
+                    laneOk &= UnityEngine.Vector3.Distance(lane[li - 1], lane[li]) <= 15.01f;
+            }
+            Check("TaxiLane: оба конца включены, шаг ≤15 м, на магистрали z=50", laneOk,
+                lane.Count + " точек");
+
             // ---------- Util.RingPoints: кольцевой поиск воды для спуска корабля ----------
             var ring = Util.RingPoints(60f, 30f, 16, 400f);
             Check("RingPoints: размер = кольца × направления, ближние раньше",
@@ -540,6 +700,47 @@ namespace SupremeNuclear.Tests
                 Catalog.ClassLabel(WeaponClass.MissileAA) == "Рак.ВВ" &&
                 Catalog.ClassLabel(WeaponClass.MissileAS) == "Рак.АС");
 
+            // ---------- Правила ТИПОВ вооружения: цикл/агрегация (v0.106) ----------
+            Check("Тип-правило: RuleFor — целевые состояния одинаковы для платформ",
+                Catalog.RuleFor(TypeGateState.None, true) == TargetDomain.Both &&
+                Catalog.RuleFor(TypeGateState.None, false) == TargetDomain.Both &&
+                Catalog.RuleFor(TypeGateState.SurfaceOnly, true) == TargetDomain.Surface &&
+                Catalog.RuleFor(TypeGateState.SurfaceOnly, false) == TargetDomain.Surface &&
+                Catalog.RuleFor(TypeGateState.AirOnly, true) == TargetDomain.Air &&
+                Catalog.RuleFor(TypeGateState.Off, false) == TargetDomain.None);
+            Check("Тип-правило: RuleFor — платформенные пресеты гасят чужую платформу",
+                Catalog.RuleFor(TypeGateState.GroundLaunch, true) == TargetDomain.None &&
+                Catalog.RuleFor(TypeGateState.GroundLaunch, false) == TargetDomain.Both &&
+                Catalog.RuleFor(TypeGateState.AirLaunch, true) == TargetDomain.Both &&
+                Catalog.RuleFor(TypeGateState.AirLaunch, false) == TargetDomain.None);
+            Check("Тип-правило: агрегат — пусто и единые состояния",
+                Catalog.AggregateState(new List<(bool, TargetDomain)>()) == TypeGateState.None &&
+                Catalog.AggregateState(new List<(bool, TargetDomain)> { (false, TargetDomain.Surface) }) == TypeGateState.SurfaceOnly &&
+                Catalog.AggregateState(new List<(bool, TargetDomain)> { (true, TargetDomain.Air), (false, TargetDomain.Air) }) == TypeGateState.AirOnly &&
+                Catalog.AggregateState(new List<(bool, TargetDomain)> { (true, TargetDomain.None), (true, TargetDomain.None) }) == TypeGateState.Off);
+            Check("Тип-правило: агрегат — платформенные пресеты и вперемешку",
+                Catalog.AggregateState(new List<(bool, TargetDomain)> { (true, TargetDomain.None), (false, TargetDomain.Both) }) == TypeGateState.GroundLaunch &&
+                Catalog.AggregateState(new List<(bool, TargetDomain)> { (true, TargetDomain.Both), (false, TargetDomain.None) }) == TypeGateState.AirLaunch &&
+                Catalog.AggregateState(new List<(bool, TargetDomain)> { (true, TargetDomain.Air), (false, TargetDomain.Surface) }) == null &&
+                Catalog.AggregateState(new List<(bool, TargetDomain)> { (false, TargetDomain.Both), (false, TargetDomain.Surface) }) == null);
+            Check("Тип-правило: цикл 6 состояний в обе стороны, вперемешку = с начала",
+                Catalog.Next(TypeGateState.None, true) == TypeGateState.SurfaceOnly &&
+                Catalog.Next(TypeGateState.SurfaceOnly, true) == TypeGateState.AirOnly &&
+                Catalog.Next(TypeGateState.AirOnly, true) == TypeGateState.GroundLaunch &&
+                Catalog.Next(TypeGateState.GroundLaunch, true) == TypeGateState.AirLaunch &&
+                Catalog.Next(TypeGateState.AirLaunch, true) == TypeGateState.Off &&
+                Catalog.Next(TypeGateState.Off, true) == TypeGateState.None &&
+                Catalog.Next(TypeGateState.None, false) == TypeGateState.Off &&
+                Catalog.Next(null, true) == TypeGateState.SurfaceOnly);
+            Check("Тип-правило: суффиксы чипа (Latin-1)",
+                Catalog.TypeGateSuffix(TypeGateState.None) == "" &&
+                Catalog.TypeGateSuffix(TypeGateState.SurfaceOnly) == "·Н" &&
+                Catalog.TypeGateSuffix(TypeGateState.AirOnly) == "·В" &&
+                Catalog.TypeGateSuffix(TypeGateState.GroundLaunch) == "·з" &&
+                Catalog.TypeGateSuffix(TypeGateState.AirLaunch) == "·в" &&
+                Catalog.TypeGateSuffix(TypeGateState.Off) == "×" &&
+                Catalog.TypeGateSuffix(null) == "±");
+
             // ---------- Переводы состояний AI (инфопанель) ----------
             Check("Состояния пилота: известные переводятся",
                 Catalog.RuPilotState("Bombing") == "бомбометание" &&
@@ -944,6 +1145,30 @@ namespace SupremeNuclear.Tests
                 Util.TrailPointAt(trail, tailTurn, 10f, out var atAfter, out _) &&
                 atAfter.z > 10f && atAfter.z < 40f && UnityEngine.Mathf.Abs(atAfter.x - 75f) < 1f,
                 $"({atAfter.x:F1}, {atAfter.z:F1})");
+
+            // ---------- Util.RouteSeenBefore: дедуп общего ралли пачки фабрик ----------
+            var rA1 = new List<UnityEngine.Vector3> { new(10f, 0f, 10f), new(200f, 0f, 40f) };
+            var rA2 = new List<UnityEngine.Vector3> { new(10f, 0f, 10f), new(200f, 0f, 40f) };
+            var rB = new List<UnityEngine.Vector3> { new(10f, 0f, 10f), new(300f, 0f, 40f) };
+            var rAshort = new List<UnityEngine.Vector3> { new(10f, 0f, 10f) };
+            var seenFlat = new List<UnityEngine.Vector3>();
+            var seenLens = new List<int>();
+            Check("RouteSeenBefore: пустая история — не дубликат",
+                !Util.RouteSeenBefore(seenFlat, seenLens, rA1));
+            seenFlat.AddRange(rA1);
+            seenLens.Add(rA1.Count);
+            Check("RouteSeenBefore: тот же маршрут — дубликат",
+                Util.RouteSeenBefore(seenFlat, seenLens, rA2));
+            Check("RouteSeenBefore: другая точка — не дубликат",
+                !Util.RouteSeenBefore(seenFlat, seenLens, rB));
+            Check("RouteSeenBefore: префикс (другая длина) — не дубликат",
+                !Util.RouteSeenBefore(seenFlat, seenLens, rAshort));
+            seenFlat.AddRange(rB);
+            seenLens.Add(rB.Count);
+            Check("RouteSeenBefore: второй в истории ищется за первым",
+                Util.RouteSeenBefore(seenFlat, seenLens, rB) &&
+                Util.RouteSeenBefore(seenFlat, seenLens, rA1) &&
+                !Util.RouteSeenBefore(seenFlat, seenLens, rAshort));
 
             Console.WriteLine(_failed == 0 ? "ВСЕ ТЕСТЫ ПРОЙДЕНЫ" : "ПРОВАЛОВ: " + _failed);
             return _failed == 0 ? 0 : 1;

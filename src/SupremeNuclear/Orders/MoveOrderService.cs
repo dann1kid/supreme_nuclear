@@ -49,7 +49,7 @@ namespace SupremeNuclear
 
             // Ралли проверяется ПЕРВЫМ: выделение аэродрома живёт отдельно от списка
             // юнитов (Selected при этом пуст — ранний return его съедал).
-            if (RtsInput.RightDown && !RtsInput.PointerOverUi && TrySetRallyForDepotSelection())
+            if (RtsInput.RightDown && !RtsInput.PointerOverUi && TrySetRallyForFactorySelection())
                 return;
 
             if (_controller.Selection.Selected.Count == 0)
@@ -91,9 +91,9 @@ namespace SupremeNuclear
                     return;
                 }
 
-                // Ралли фабрик: выделение только из депо → ПКМ задаёт маршрут вышедшим
+                // Ралли фабрик: выделение только из фабрик → ПКМ задаёт маршрут вышедшим
                 // войскам (Shift — дописать точку), как приказы юнитам.
-                if (TrySetRallyForDepotSelection())
+                if (TrySetRallyForFactorySelection())
                     return;
 
                 // ПКМ на существующем вейпоинте авиаплана — превратить сегмент в патруль.
@@ -140,9 +140,10 @@ namespace SupremeNuclear
             return true;
         }
 
-        /// <summary>Выделение без мобильных юнитов, но с фабриками (депо/аэродром)?
-        /// → ПКМ задаёт ралли-маршрут фабрикам (Shift — дописать точку).</summary>
-        private bool TrySetRallyForDepotSelection()
+        /// <summary>Выделение без мобильных юнитов, но с фабриками (депо/ангар/верфь/
+        /// аэродром)? → ПКМ задаёт ралли-маршрут ВСЕМ фабрикам выделения (Shift —
+        /// дописать точку) — общий маршрут войскам пачки фабрик, как приказы юнитам.</summary>
+        private bool TrySetRallyForFactorySelection()
         {
             List<Unit> selected = _controller.Selection.Selected;
             var factories = new List<object>();
@@ -150,9 +151,23 @@ namespace SupremeNuclear
             {
                 if (unit == null)
                     continue;
-                if (unit is VehicleDepot d)
-                    factories.Add(d);
-                else if (unit is GroundVehicle || unit is Ship || unit is Aircraft)
+                if (unit is VehicleDepot depot)
+                {
+                    factories.Add(depot);
+                    continue;
+                }
+                Hangar hangar = unit is Building b ? b.GetComponent<Hangar>() : null;
+                if (hangar != null)
+                {
+                    factories.Add(hangar);
+                    continue;
+                }
+                if (BuildTasks.IsDock(unit))
+                {
+                    factories.Add(unit);
+                    continue;
+                }
+                if (unit is GroundVehicle || unit is Ship || unit is Aircraft)
                     return false; // есть мобильные — обычные приказы
             }
             Airbase airbase = _controller.Selection.SelectedAirbase;
@@ -161,15 +176,21 @@ namespace SupremeNuclear
             if (factories.Count == 0)
                 return false;
             Vector3 target = RouteEditor.SnapAt(GameApi.MainCam);
+            // Один клик = один групповой вейпоинт у ВСЕХ фабрик выделения (как у
+            // приказов юнитам): спущенные пачкой наследуют groupId — общий
+            // маркер/драг/удаление вместо N копий точки (§12-30).
+            int groupId = BuildTasks.NextGroupId();
             foreach (object factory in factories)
             {
                 if (RtsInput.Shift)
-                    ProductionTasks.EnqueueRally(factory, target);
+                    ProductionTasks.EnqueueRally(factory, target, groupId);
                 else
-                    ProductionTasks.SetRally(factory, target);
+                    ProductionTasks.SetRally(factory, target, groupId);
             }
-            int points = ProductionTasks.RallyOf(factories[0])?.Count ?? 0;
-            CommanderHud.Notice(Loc.F("Ралли фабрики: маршрут из {0} тчк", points));
+            CommanderHud.Notice(Loc.F("Ралли: {0} {1}, маршрут из {2} тчк",
+                factories.Count,
+                Loc.Plural(factories.Count, "фабрика", "фабрики", "фабрик"),
+                ProductionTasks.RallyOf(factories[0])?.Count ?? 0));
             return true;
         }
 
@@ -336,10 +357,12 @@ namespace SupremeNuclear
         {
             bool queue = RtsInput.Shift;
             int n = 0;
+            int air = 0;
             foreach (Unit unit in selected)
             {
                 if (!(unit is Aircraft aircraft))
                     continue;
+                air++;
                 Airbase airbase = SortieService.NearestOwnAirbase(aircraft);
                 if (airbase == null)
                     continue;
@@ -353,7 +376,9 @@ namespace SupremeNuclear
                 ? queue
                     ? Loc.F("На базу (в очередь): бортов — {0}", n)
                     : Loc.F("На базу: бортов — {0}", n)
-                : Loc.Tr("В выделении нет бортов или нет своего аэродрома"));
+                : air > 0
+                    ? Loc.Tr("Посадка недоступна: нет своего аэродрома с открытой посадкой")
+                    : Loc.Tr("В выделении нет бортов"));
         }
 
         /// <summary>Мгновенная отмена всех приказов выделенных.</summary>
@@ -371,6 +396,18 @@ namespace SupremeNuclear
                 if (unit is VehicleDepot depot)
                 {
                     ProductionTasks.ClearRally(depot);
+                    continue;
+                }
+                // Ангар/верфь — тоже фабрики: отмена снимает и их ралли.
+                Hangar hangar = unit is Building b ? b.GetComponent<Hangar>() : null;
+                if (hangar != null)
+                {
+                    ProductionTasks.ClearRally(hangar);
+                    continue;
+                }
+                if (BuildTasks.IsDock(unit))
+                {
+                    ProductionTasks.ClearRally(unit);
                     continue;
                 }
                 if (unit == null)

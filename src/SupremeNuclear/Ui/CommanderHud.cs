@@ -363,7 +363,32 @@ namespace SupremeNuclear
                     }
                 }
                 DrawRect(new Rect(gx - 2f, gy - 2f, 4f, 4f), c);
+                // Тумблеры аэродрома (DESIGN §2.11b): своё закрытие видно на ромбе —
+                // внизу метки «посадка закрыта»/«взлёт закрыт» (только свои, не разведка).
+                if (owner == hq)
+                {
+                    int line = 0;
+                    if (!AirbaseAccess.IsLandingOpen(airbase))
+                        ClosedLabel(gx, gy + d * 0.7f + line++ * 14f, Loc.Tr("посадка закрыта"));
+                    if (!AirbaseAccess.IsTakeoffOpen(airbase))
+                        ClosedLabel(gx, gy + d * 0.7f + line * 14f, Loc.Tr("взлёт закрыт"));
+                }
             }
+        }
+
+        /// <summary>Цвет метки закрытого режима аэродрома (тумблеры §2.11b).</summary>
+        private static readonly Color ClosedTint = new Color(1f, 0.6f, 0.15f, 0.95f);
+
+        /// <summary>Подпись под ромбом аэродрома: стиль возвращаем (общий _small).</summary>
+        private static void ClosedLabel(float cx, float y, string text)
+        {
+            var prevColor = _small.normal.textColor;
+            var prevAlign = _small.alignment;
+            _small.normal.textColor = ClosedTint;
+            _small.alignment = TextAnchor.MiddleCenter;
+            GUI.Label(new Rect(cx - 70f, y, 140f, 16f), text, _small);
+            _small.normal.textColor = prevColor;
+            _small.alignment = prevAlign;
         }
 
         /// <summary>Чужие юниты и здания — ТОЛЬКО по разведке: без контакта скрыты,
@@ -948,6 +973,67 @@ namespace SupremeNuclear
         private static readonly List<float> ChainAlphas = new List<float>();
         private static readonly List<Vector3> RibbonPts = new List<Vector3>();
         private static readonly List<int> RibbonLegs = new List<int>();
+        // Ралли фабрик: точки текущего маршрута + сплющенные «уже нарисованные в кадре»
+        // маршруты с их длинами — дедуп общего ралли пачки фабрик (без аллокаций).
+        private static readonly List<Vector3> RallyWps = new List<Vector3>();
+        private static readonly List<Vector3> RallySeenPts = new List<Vector3>();
+        private static readonly List<int> RallySeenLens = new List<int>();
+        // Все фабрики с живыми ралли (Shift-режим видимости невыделенных).
+        private static readonly List<object> RallyAll = new List<object>();
+
+        /// <summary>Ралли-маршрут фабрики: лента + вейпоинты от корпуса; маршрут,
+        /// уже нарисованный в этом кадре (общее ралли пачки фабрик), не дублируется.</summary>
+        private static void DrawFactoryRally(Camera cam, Vector3 anchorPos, object factory, Color c, float a)
+        {
+            var route = ProductionTasks.RallyOf(factory);
+            if (route == null || route.Count == 0)
+                return;
+            RallyWps.Clear();
+            foreach (GlobalPosition gp in route.Points)
+                RallyWps.Add(GroundVec(gp));
+            if (Util.RouteSeenBefore(RallySeenPts, RallySeenLens, RallyWps))
+                return;
+            RallySeenPts.AddRange(RallyWps);
+            RallySeenLens.Add(RallyWps.Count);
+            Vector3 anchor = new Vector3(anchorPos.x, 0f, anchorPos.z);
+            anchor.y = GameApi.GroundY(anchor.x, anchor.z);
+            ChainPts.Clear();
+            ChainCols.Clear();
+            ChainAlphas.Clear();
+            ChainPts.Add(anchor);
+            for (int i = 0; i < RallyWps.Count; i++)
+            {
+                ChainPts.Add(RallyWps[i]);
+                ChainCols.Add(c);
+                ChainAlphas.Add(a);
+            }
+            DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+            DrawWorldWaypoints(cam, RallyWps, c, a);
+        }
+
+        /// <summary>Якорь ралли-ленты фабрики (её корпус); мёртвая/чужеродная
+        /// запись реестра ралли якоря не даёт — null.</summary>
+        private static Vector3? RallyAnchor(object factory)
+        {
+            switch (factory)
+            {
+                case VehicleDepot depot:
+                    return depot != null && !depot.disabled
+                        ? new Vector3?(depot.transform.position) : null;
+                case Hangar hangar:
+                    if (hangar == null || hangar.Disabled)
+                        return null;
+                    Unit hu = hangar.attachedUnit;
+                    return hu != null ? hu.transform.position : hangar.transform.position;
+                case Building dock:
+                    return BuildTasks.IsDock(dock)
+                        ? (Vector3?)dock.transform.position : null;
+                case Airbase airbase:
+                    return airbase != null ? new Vector3?(airbase.transform.position) : null;
+                default:
+                    return null;
+            }
+        }
         // Групповые вейпоинты по groupId: групповая точка — свойство точки, не
         // выделения. Накопители центроидов (xyz = сумма, w = счётчик), дедуп общих
         // сегментов/маркеров/входов между юнитами (gid из одного счётчика — общие).
@@ -1429,58 +1515,41 @@ namespace SupremeNuclear
             // Shift-режим видимости инженерных очередей уже покрыт циклом выше:
             // невыделенные рисуются приглушённо (a=0.3) тем же групповым слиянием.
 
-            // Ралли-маршруты выделенных фабрик (депо и аэродром) — как цепочки наземки.
+            // Ралли-маршруты фабрик (депо/ангар/верфь/аэродром) — как цепочки
+            // наземки; одинаковые маршруты пачки фабрик (общее ралли) рисуются ОДНОЙ
+            // лентой и одним набором маркеров (дедуп DrawFactoryRally). Shift-режим
+            // видимости рисует и НЕвыделенные фабрики приглушённо — как цепочки
+            // юнитов (верфь/депо без выделения раньше были невидимы вовсе, §12-30).
             Airbase selAirbase = controller.Selection.SelectedAirbase;
+            Color rallyColor = ModeColor(AirOrderMode.Transit);
+            RallySeenPts.Clear();
+            RallySeenLens.Clear();
             if (selAirbase != null)
-            {
-                var airRoute = ProductionTasks.RallyOf(selAirbase);
-                if (airRoute != null && airRoute.Count > 0)
-                {
-                    Color ac = ModeColor(AirOrderMode.Transit);
-                    Vector3 aAnchor = selAirbase.transform.position;
-                    aAnchor.y = GameApi.GroundY(aAnchor.x, aAnchor.z);
-                    var aWps = new List<Vector3>(airRoute.Count);
-                    foreach (GlobalPosition gp in airRoute)
-                        aWps.Add(GroundVec(gp));
-                    ChainPts.Clear();
-                    ChainCols.Clear();
-                    ChainAlphas.Clear();
-                    ChainPts.Add(aAnchor);
-                    for (int i = 0; i < aWps.Count; i++)
-                    {
-                        ChainPts.Add(aWps[i]);
-                        ChainCols.Add(ac);
-                        ChainAlphas.Add(0.85f);
-                    }
-                    DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
-                    DrawWorldWaypoints(cam, aWps, ac, 0.85f);
-                }
-            }
+                DrawFactoryRally(cam, selAirbase.transform.position, selAirbase, rallyColor, 0.85f);
             foreach (Unit unit in controller.Selection.Selected)
             {
-                if (!(unit is VehicleDepot depot))
+                if (unit == null)
                     continue;
-                var route = ProductionTasks.RallyOf(depot);
-                if (route == null || route.Count == 0)
-                    continue;
-                Color c = ModeColor(AirOrderMode.Transit);
-                Vector3 anchor = new Vector3(unit.transform.position.x, 0f, unit.transform.position.z);
-                anchor.y = GameApi.GroundY(anchor.x, anchor.z);
-                var wps = new List<Vector3>(route.Count);
-                foreach (GlobalPosition gp in route)
-                    wps.Add(GroundVec(gp));
-                ChainPts.Clear();
-                ChainCols.Clear();
-                ChainAlphas.Clear();
-                ChainPts.Add(anchor);
-                for (int i = 0; i < wps.Count; i++)
+                if (unit is VehicleDepot depot)
+                    DrawFactoryRally(cam, unit.transform.position, depot, rallyColor, 0.85f);
+                else if (unit is Building b)
                 {
-                    ChainPts.Add(wps[i]);
-                    ChainCols.Add(c);
-                    ChainAlphas.Add(0.85f);
+                    Hangar hangar = b.GetComponent<Hangar>();
+                    object factory = hangar != null ? (object)hangar
+                        : BuildTasks.IsDock(b) ? (object)b : null;
+                    if (factory != null)
+                        DrawFactoryRally(cam, unit.transform.position, factory, rallyColor, 0.85f);
                 }
-                DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
-                DrawWorldWaypoints(cam, wps, c, 0.85f);
+            }
+            if (shiftHeld)
+            {
+                ProductionTasks.CollectRallies(RallyAll);
+                for (int ri = 0; ri < RallyAll.Count; ri++)
+                {
+                    Vector3? anchor = RallyAnchor(RallyAll[ri]);
+                    if (anchor.HasValue)
+                        DrawFactoryRally(cam, anchor.Value, RallyAll[ri], rallyColor, 0.3f);
+                }
             }
 
             // Авиация: планы по сегментам. Групповые точки (groupId≠0) — маркер ОДИН
