@@ -94,14 +94,21 @@ def main():
 
     code, prev = run(["git", "-C", ROOT, "rev-parse", "--verify", "main"])
     parents = ["-p", prev.strip()] if code == 0 else []
+    reuse = False
+    if parents:
+        code, prev_tree = run(["git", "-C", ROOT, "rev-parse", "main^{tree}"])
+        reuse = code == 0 and prev_tree.strip() == tree
     code, subject = run(["git", "-C", ROOT, "log", "-1", "--format=%s", "master"])
-    msg = "Supreme Nuclear v%s — публикация\n\n%s" % (version, subject.strip())
-    new_main = subprocess.run(
-        ["git", "-C", ROOT, "commit-tree", tree] + parents + ["-m", msg],
-        check=True, capture_output=True).stdout.decode().strip()
+    if reuse:
+        new_main = prev.strip()
+    else:
+        msg = "Supreme Nuclear v%s — публикация\n\n%s" % (version, subject.strip())
+        new_main = subprocess.run(
+            ["git", "-C", ROOT, "commit-tree", tree] + parents + ["-m", msg],
+            check=True, capture_output=True).stdout.decode().strip()
     subprocess.run(["git", "-C", ROOT, "branch", "-f", "main", new_main], check=True)
-    step("Снимок main создан", True, "%s (родитель: %s)"
-         % (new_main[:9], (prev.strip()[:9] if parents else "нет — первый)")))
+    step("Снимок main создан", True, "%s (%s)"
+         % (new_main[:9], "дерево не менялось" if reuse else "новый снимок"))
 
     # ---------- 2. Сборка артефакта в изолированном worktree ----------
     run(["git", "-C", ROOT, "worktree", "remove", "--force", WORKTREE])
