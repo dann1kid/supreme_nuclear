@@ -16,7 +16,27 @@ The mod UI ships in **Russian** (source language) and **English** — set
 `General.Language` in the BepInEx config (`auto` follows your OS language). New locales
 are a single JSON file; untranslated entries fall back to English, then Russian.
 
-## Что уже есть (v0.72)
+## Установка (для игрока)
+
+1. Установи BepInEx 5 в Nuclear Option (если ещё нет — так же, как для Ground Control).
+2. Скачай `SupremeNuclear-<версия>.zip` из [релизов](../../releases) и распакуй в
+   `Nuclear Option/BepInEx/plugins/` — должна получиться папка `SupremeNuclear`
+   с DLL и `Locales/`.
+3. В игре: выйди из кабины → **F10** — режим командира. Горячие клавиши — раздел
+   «Тест в игре» ниже.
+
+Сборка из исходников — раздел «Сборка» ниже.
+
+## Quick start (English)
+
+SupCom-style RTS layer on top of Nuclear Option: strategic camera, box selection,
+waypoint orders (queues, patrols, attacks, escort), build-anywhere engineers,
+factories with production queues (depot / airbase / naval yard), economy, weapon
+gates, aircraft loadouts. UI ships in English and Russian (`General.Language` in
+the BepInEx config). Leave the cockpit and press **F10** for commander mode.
+Controls/UX feedback is welcome — GitHub Issues (feedback template).
+
+## Что уже есть (v0.98.1)
 
 - **Каркас** BepInEx-плагина; Harmony-патчей ровно пять (руление авиации с приказом —
   самолёты и вертолёты, пиннинг цели приказа — самолёты и вертолёты, стойка «не
@@ -198,6 +218,16 @@ python tools/build.py   # конвейер: пересборка (предупр
 
 Настройки: `BepInEx/config/com.supremenuclear.rts.cfg`.
 Баланс экономики: `BepInEx/plugins/SupremeNuclear/Economy/<профиль>.json` (образец создаётся сам).
+
+## Известные ограничения
+
+- **Мультиплеер**: командирский режим работает только у хоста (клиент-командир
+  не заложен); гейты вооружения и whitelist станций залпа — тоже состояние хоста.
+- **Флот** — самый свежий срез: палубная авиация CV/LHA, поведение T3-кораблей,
+  снос недостроев и плавучесть Jackknife ещё не обкатаны плейтестами.
+- Смена профиля высоты/скорости посреди Shift-серии патруля может создать
+  «недостижимый» второй цикл (в разработке — [ARCHITECTURE §12](ARCHITECTURE.md#12-реестр-известных-долгов), долг 32).
+- Диагностика (логи, SelfCheck, F11-оверлей) — только по-русски.
 
 ## Что дальше
 
