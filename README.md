@@ -199,6 +199,9 @@ python tools/build.py   # конвейер: пересборка (предупр
 
 Требуется .NET SDK (пакет reference-сборок net472 подтянется NuGet'ом автоматически).
 
+**Релизы обновляются автоматически из master**: `python tools/publish.py` — снимок master →
+публичная ветка main → релиз GitHub со свежим zip (требует `gh auth login`).
+
 ## Тест в игре
 
 1. Запусти Nuclear Option (BepInEx 5 — уже стоит вместе с Ground Control).
