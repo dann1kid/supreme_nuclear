@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Linq.Expressions;
+using System.Reflection;
 using UnityEngine;
 
 namespace SupremeNuclear
@@ -18,6 +20,22 @@ namespace SupremeNuclear
             if (h.sqrMagnitude < 1e-6f || t.sqrMagnitude < 1e-6f)
                 return true;
             return Vector2.Angle(h, t) <= maxDeg;
+        }
+
+        /// <summary>Скомпилированный сеттер поля экземпляра (Expression): замена
+        /// FieldInfo.SetValue в горячих путях — патчи руления пишут destination
+        /// (структура GlobalPosition) на каждом физтике каждого борта, а SetValue
+        /// боксит структуру — стабильный GC-поток. Промах AccessTools (null) → null.
+        /// Чистая — тестируется.</summary>
+        public static Action<object, T> FieldSetter<T>(FieldInfo field)
+        {
+            if (field == null)
+                return null;
+            ParameterExpression inst = Expression.Parameter(typeof(object), "inst");
+            ParameterExpression value = Expression.Parameter(typeof(T), "value");
+            BinaryExpression body = Expression.Assign(
+                Expression.Field(Expression.Convert(inst, field.DeclaringType), field), value);
+            return Expression.Lambda<Action<object, T>>(body, inst, value).Compile();
         }
 
         /// <summary>Кривая наклона стратегической камеры по дистанции (SupCom strategic
@@ -86,85 +104,66 @@ namespace SupremeNuclear
             return u * u * u * p0 + 3f * u * u * t * p1 + 3f * u * t * t * p2 + t * t * t * p3;
         }
 
-        /// <summary>КОЛЛЕКТОР рулёжки (v0.100): точка стыка и коннектор ангара к
-        /// магистрали ПАРАЛЛЕЛЬНО оси ВПП (чистая, тестируется). Магистраль на
-        /// стороне ангара (отступ laneOffsetM от оси); дальность стыка — проекция
-        /// ангара на ось, но не ближе junctionMinM к торцу (не в зоне S-кривой).
-        /// Коннектор — Безье: касательная старта = направление выхода ангара,
-        /// финиша = хорда к стыку (перпендикулярные ворота дают почти прямую).
-        /// Ворота «мимо стыка» (спиной/поперёк) — касательная старта подмешивает
-        /// хорду (порог 0.25): контроль по чистому fwd давал складку-петлю на
-        /// полилинии («линия с изломами», плейтест v0.100.0). Вылет контролов
-        /// ≤ 0.45 хорды: у ангара вплотную к магистрали контроль 30 м на
-        /// короткой хорде вихлял кривую (v0.100.1). Контроль старта зажата по
-        /// боковому отступу ≥ магистрали — по выпуклости Безье коннектор не
-        /// подходит к полосе ближе отступа.
-        /// farM &lt; 0 — магистрали ещё нет. newFarM — дальность магистрали ПОСЛЕ
-        /// подключения: запас growM за стыком, минимум minFarM, назад не
-        /// ужимается. Хорда &lt; 8 м — коннектор пуст (прямая start → стык).</summary>
-        public static void TaxiCollectorPlan(Vector3 threshold, Vector3 start, Vector3 exitFwd,
-            Vector3 axis, Vector3 farDir, float laneOffsetM, float junctionMinM,
-            float growM, float minFarM, float farM,
-            out Vector3 side, out Vector3 junction, out List<Vector3> connector, out float newFarM)
+        /// <summary>Подвод рулёжки ангара к торцу ВПП — «якоря и Безье» (v0.102.2,
+        /// канон игрока; коллектор v0.100 отвергнут плейтестом — «ломаная»).
+        /// Якорь А: ПРЯМОЙ выезд из ворот (стаб 10–80 м — линия резко не
+        /// сворачивает на выходе; не длиннее сближения с полосой, ворота «мимо»
+        /// торца — без стаба). Якорь Б: въезд на полосу ПО ОСИ в торец «в
+        /// сторону взлёта» (касательная финиша = farDir); у ангара ВДОЛЬ
+        /// полосы (за линией торца дальше 40 м) якорь — прямая по оси ЗА
+        /// порогом (запас 40–90 м): дуга разворота успевает лечь с боковым
+        /// запасом, без резкого V у самой оси. Якоря скрепляет ОДНО плавное
+        /// Безье: касательная старта = направление выхода (при воротах «мимо»
+        /// цели — подмес хорды, порог 0.25, иначе складка-петля), контроль
+        /// старта зажат не ниже кромки полосы (34.5 м — полоса+полоса ленты)
+        /// — кривая не пробивает ВПП насквозь. Чистая, тестируется.
+        /// Возвращает точки МЕЖДУ start и торцом (не включая их).</summary>
+        public static List<Vector3> TaxiApproachPoints(Vector3 threshold, Vector3 start,
+            Vector3 exitFwd, Vector3 farDir)
         {
-            Vector3 perp = new Vector3(-axis.z, 0f, axis.x);
-            Vector3 from = start - threshold;
-            side = Vector3.Dot(perp, from) < 0f ? -perp : perp;
-            float dfJ = Mathf.Max(Vector3.Dot(from, farDir), junctionMinM);
-            junction = threshold + farDir * dfJ + side * laneOffsetM;
-            newFarM = Mathf.Max(Mathf.Max(farM, 0f), Mathf.Max(dfJ + growM, minFarM));
-            connector = new List<Vector3>();
-            float chord = Vector3.Distance(start, junction);
-            if (chord < 8f)
-                return;
-            float d = Mathf.Min(chord * 0.45f, Mathf.Clamp(chord * 0.35f, 30f, 200f));
-            Vector3 chordDir = (junction - start).normalized;
-            Vector3 t0 = chordDir; // вырожденный fwd — старт по хорде
-            if (exitFwd.sqrMagnitude > 1e-6f)
+            var pts = new List<Vector3>();
+            float d = Vector3.Distance(start, threshold);
+            if (d < 8f)
+                return pts;
+            Vector3 dirT = (threshold - start).normalized;
+            Vector3 perp = new Vector3(-farDir.z, 0f, farDir.x);
+            float lat = Vector3.Dot(start - threshold, perp);
+            float aLat = Mathf.Abs(lat);
+            Vector3 side = lat < 0f ? -perp : perp;
+
+            float stub = Mathf.Min(Mathf.Clamp(d * 0.15f, 10f, 80f), Mathf.Max(0f, aLat - 35f));
+            if (Vector3.Dot(exitFwd, dirT) < 0.1f)
+                stub = 0f; // ворота «мимо» торца — без стаба, сразу кривая
+            Vector3 p0 = start + exitFwd * stub;
+            if (stub > 0.01f)
+                pts.Add(p0);
+
+            float e0 = Vector3.Dot(start - threshold, farDir) > 40f
+                ? Mathf.Clamp(d * 0.15f, 40f, 90f)
+                : 0f;
+            Vector3 p3 = threshold - farDir * e0;
+            float dp = Vector3.Distance(p0, p3);
+            if (dp < 8f)
             {
-                float fdot = Vector3.Dot(exitFwd, chordDir);
-                t0 = fdot >= 0.25f
-                    ? exitFwd
-                    : (exitFwd + chordDir * (0.25f - fdot)).normalized;
+                if (e0 > 0.01f && (p3 - start).sqrMagnitude > 0.25f)
+                    pts.Add(p3);
+                return pts;
             }
-            Vector3 c1 = start + t0 * d;
-            float lateral = Vector3.Dot(c1 - threshold, side);
-            if (lateral < laneOffsetM)
-                c1 += side * (laneOffsetM - lateral);
-            Vector3 c2 = junction - chordDir * d;
-            int n = Mathf.Max(3, Mathf.CeilToInt(chord * 1.3f / 15f));
+            Vector3 dirP3 = (p3 - p0).normalized;
+            float fdot = Vector3.Dot(exitFwd, dirP3);
+            Vector3 t1 = fdot >= 0.25f
+                ? exitFwd
+                : (exitFwd + dirP3 * (0.25f - fdot)).normalized;
+            Vector3 c1 = p0 + t1 * Mathf.Clamp(dp * 0.35f, 30f, 250f);
+            float latFloor = Mathf.Min(aLat, 34.5f);
+            if (Vector3.Dot(c1 - threshold, side) < latFloor)
+                c1 = threshold + side * latFloor + Vector3.Project(c1 - threshold, farDir);
+            Vector3 c2 = p3 - farDir * Mathf.Clamp(dp * 0.22f, 30f, 70f);
+            int n = Mathf.Max(3, Mathf.CeilToInt(dp * 1.3f / 15f));
             for (int i = 1; i < n; i++)
-                connector.Add(Bezier3(start, c1, c2, junction, i / (float)n));
-        }
-
-        /// <summary>S-кривая слияния магистрали с ВПП («смена полосы», v0.98.5):
-        /// Безье p1 → торец, касательная farDir на ОБОИХ концах, контроли на
-        /// кромках коридора «магистраль ↔ ось» — по аффинности кривая между
-        /// ними: ось не пересекает, за торец не заходит. Возвращает ТОЛЬКО
-        /// внутренние точки по возрастанию t (p1 и торец на совести звущего).
-        /// p1 = торец + side·mergeM − farDir·mergeM.</summary>
-        public static List<Vector3> TaxiMergeSamples(Vector3 threshold, Vector3 farDir,
-            Vector3 side, float mergeM)
-        {
-            Vector3 laneAt = threshold + side * mergeM;
-            Vector3 p1 = laneAt - farDir * mergeM;
-            var pts = new List<Vector3>();
-            int n = Mathf.Max(3, Mathf.CeilToInt(Vector3.Distance(p1, threshold) * 1.3f / 15f));
-            for (int i = 1; i < n; i++)
-                pts.Add(Bezier3(p1, laneAt, threshold - farDir * mergeM, threshold, i / (float)n));
-            return pts;
-        }
-
-        /// <summary>Точки магистрали по дальности от торца (вдоль farDir, отступ
-        /// side·laneOffsetM): шаг ≤ 15 м, ОБА конца включены — расширение
-        /// начинается точно со старого конца (склейка узлов в радиусе 10 м).</summary>
-        public static List<Vector3> TaxiLaneSamples(Vector3 threshold, Vector3 farDir,
-            Vector3 side, float laneOffsetM, float fromM, float toM)
-        {
-            var pts = new List<Vector3>();
-            int n = Mathf.Max(1, Mathf.CeilToInt((toM - fromM) / 15f));
-            for (int i = 0; i <= n; i++)
-                pts.Add(threshold + farDir * Mathf.Lerp(fromM, toM, i / (float)n) + side * laneOffsetM);
+                pts.Add(Bezier3(p0, c1, c2, p3, i / (float)n));
+            if (e0 > 0.01f)
+                pts.Add(p3); // прямой выкат по оси до торца добавит звущий
             return pts;
         }
 
@@ -400,6 +399,56 @@ namespace SupremeNuclear
                 taken[bestU] = true;
                 capacity[bestT]--;
                 result[bestU] = bestT;
+            }
+            return result;
+        }
+
+        /// <summary>Распределение пула точек по юнитам КУЧКАМИ (Disperse стройки,
+        /// v0.108): точек больше, чем исполнителей — каждому СВОЯ подвыборка вдоль
+        /// его пути. Раундами: наименее загруженный юнит (при равенстве — меньший
+        /// индекс) берёт БЛИЖАЙШУЮ к концу своего маршрута свободную точку (XZ,
+        /// sqrMagnitude; равные дистанции — меньший индекс точки); конец маршрута
+        /// сдвигается во взятую точку — кучка собирается вдоль пути, а не вокруг
+        /// стартовой позиции. Баланс ⌈M/N⌉/⌊M/N⌋. Возвращает индекс юнита на
+        /// каждую точку пула; пустой пул или пустые юниты → null. Чистая
+        /// функция — тестируется.</summary>
+        public static int[] AssignSpread(IReadOnlyList<Vector3> units, IReadOnlyList<Vector3> points)
+        {
+            int m = points.Count;
+            int n = units.Count;
+            if (m == 0 || n == 0)
+                return null;
+            var result = new int[m];
+            var cursor = new Vector3[n];
+            for (int i = 0; i < n; i++)
+                cursor[i] = units[i];
+            var counts = new int[n];
+            var taken = new bool[m];
+            for (int k = 0; k < m; k++)
+            {
+                int who = 0;
+                for (int i = 1; i < n; i++)
+                    if (counts[i] < counts[who])
+                        who = i;
+                int best = -1;
+                float bestSq = float.MaxValue;
+                for (int p = 0; p < m; p++)
+                {
+                    if (taken[p])
+                        continue;
+                    float dx = cursor[who].x - points[p].x;
+                    float dz = cursor[who].z - points[p].z;
+                    float d = dx * dx + dz * dz;
+                    if (d < bestSq) // строго меньше: равные остаются у меньших индексов
+                    {
+                        bestSq = d;
+                        best = p;
+                    }
+                }
+                taken[best] = true;
+                counts[who]++;
+                cursor[who] = points[best];
+                result[best] = who;
             }
             return result;
         }

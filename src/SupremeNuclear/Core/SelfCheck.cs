@@ -61,6 +61,14 @@ namespace SupremeNuclear
                 if (HarmonyLib.AccessTools.Method(typeof(Airbase), "GetAvailableAircraft") == null ||
                     HarmonyLib.AccessTools.Method(typeof(Hangar), "GetAvailableAircraft") == null)
                     throw new System.Exception("GetAvailableAircraft не найден");
+                if (HarmonyLib.AccessTools.Property(typeof(Airbase), "AttachedAirbase") == null)
+                    throw new System.Exception("Airbase.AttachedAirbase не найден — заголовок панели авианосца мёртв");
+            });
+            Check("Hangar.availableAircraft (каталог недостроя ангара)", () =>
+            {
+                if (HarmonyLib.AccessTools.Field(typeof(Hangar), "availableAircraft") == null)
+                    throw new System.Exception(
+                        "Hangar.availableAircraft не найден — каталог очереди недостроя ангара пуст");
             });
             Check("FactionHQ.AnyNearAirbase (руление к ближней полосе)", () =>
             {
@@ -98,6 +106,23 @@ namespace SupremeNuclear
             {
                 if (HarmonyLib.AccessTools.Field(typeof(Airbase), "servicePoints") == null)
                     throw new System.Exception("поле servicePoints не найдено — севшие борты не припаркуются");
+            });
+            Check("Выкат ВПП: exit/сервис-точки + повторный взлёт (v0.109)", () =>
+            {
+                if (HarmonyLib.AccessTools.Field(typeof(SavedRunway), nameof(SavedRunway.exitPoints)) == null)
+                    throw new System.Exception("SavedRunway.exitPoints не найден — съезды с ВПП не задать");
+                if (HarmonyLib.AccessTools.Field(typeof(SavedAirbase), nameof(SavedAirbase.ServicePoints)) == null)
+                    throw new System.Exception("SavedAirbase.ServicePoints не найден — парковка севших не задать");
+                if (HarmonyLib.AccessTools.Field(typeof(Airbase.Runway), nameof(Airbase.Runway.exitPoints)) == null)
+                    throw new System.Exception("Airbase.Runway.exitPoints не найден — доворот съездов мёртв");
+                if (HarmonyLib.AccessTools.Method(typeof(Airbase), nameof(Airbase.AircraftIsOnRunway)) == null)
+                    throw new System.Exception("Airbase.AircraftIsOnRunway не найден — парковка вне полосы не проверится");
+                var fi = HarmonyLib.AccessTools.Field(typeof(Pilot), nameof(Pilot.flightInfo));
+                if (fi == null || HarmonyLib.AccessTools.Field(typeof(Pilot.FlightInfo),
+                        nameof(Pilot.FlightInfo.HasTakenOff)) == null)
+                    throw new System.Exception("Pilot.flightInfo/HasTakenOff не найдены — повторный выкат сломан");
+                if (HarmonyLib.AccessTools.Field(typeof(Airbase.Runway), "takeoffQueue") == null)
+                    throw new System.Exception("Airbase.Runway.takeoffQueue не найден — янитор очереди взлёта мёртв");
             });
             Check("Airbase.Runway.Landing/Takeoff + вертикальные точки (тумблеры аэродрома)", () =>
             {
@@ -152,8 +177,6 @@ namespace SupremeNuclear
                     throw new System.Exception("ShipDefinition.shipType не найден");
                 if (HarmonyLib.AccessTools.Field(typeof(Encyclopedia), "ships") == null)
                     throw new System.Exception("Encyclopedia.ships не найден — каталог флота пуст");
-                if (HarmonyLib.AccessTools.Property(typeof(Unit), "rb") == null)
-                    throw new System.Exception("Unit.rb не найден — плавучесть инженера мертва");
                 if (HarmonyLib.AccessTools.Property(typeof(LevelInfo), "seaLanes") == null ||
                     HarmonyLib.AccessTools.Method(typeof(RoadPathfinding.RoadNetwork), "Exists") == null)
                     throw new System.Exception("LevelInfo.seaLanes/RoadNetwork.Exists не найдены");
@@ -208,7 +231,11 @@ namespace SupremeNuclear
                     throw new System.Exception("PathfindingAgent.Pathfind не найден — патч маршрута мёртв");
                 if (HarmonyLib.AccessTools.Method(typeof(PathfindingAgent), "Shortcut") == null)
                     throw new System.Exception("PathfindingAgent.Shortcut не найден");
-                if (HarmonyLib.AccessTools.Method(typeof(PathfindingAgent), "RaycastTerrain") == null)
+                // Две перегрузки (GlobalPosition/Vector3) — ищем ТУ, что зовёт мод
+                // (GroundPathfindPatch.CrossesWater); поиск по одному имени кидал
+                // AmbiguousMatchException после игрового апдейта.
+                if (HarmonyLib.AccessTools.Method(typeof(PathfindingAgent), "RaycastTerrain",
+                        new[] { typeof(Vector3), typeof(RaycastHit).MakeByRefType() }) == null)
                     throw new System.Exception("PathfindingAgent.RaycastTerrain не найден (проверка воды)");
                 if (!GroundPathfindPatch.FieldsOk)
                     throw new System.Exception("PathfindingAgent.unit не найден (фильтр наземки)");

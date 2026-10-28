@@ -382,6 +382,9 @@ namespace SupremeNuclear
 
         // ---------- иконки ----------
 
+        /// <summary>Набор блипов, отрисованных в текущем проходе (переиспользуется).</summary>
+        private static readonly HashSet<Unit> BlipsUsed = new HashSet<Unit>();
+
         private void UpdateBlips(Vector2 min, Vector2 max)
         {
             GameApi.TryGetLocalHQ(out FactionHQ hq);
@@ -391,7 +394,9 @@ namespace SupremeNuclear
             float iconScale = Mathf.Clamp(1f / _viewSize.x, 1f, IconScaleMax);
             // Отрисованные в этом проходе: всё, чего нет в наборе (умер, вышел из разведки,
             // мигает «скрытой» фазой) — сносим, иначе призраки копятся на старых позициях.
-            HashSet<Unit> used = new HashSet<Unit>();
+            // Буфер переиспользуется (10-Гц рефреш с new HashSet гнал GC-поток).
+            HashSet<Unit> used = BlipsUsed;
+            used.Clear();
 
             foreach (Unit unit in UnitRegistry.allUnits)
             {

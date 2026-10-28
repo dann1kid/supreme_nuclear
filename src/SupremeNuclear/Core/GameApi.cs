@@ -302,20 +302,41 @@ namespace SupremeNuclear
 
         /// <summary>Пик юнита ПО ТЕЛУ (экранный bbox всех мешей): клик/шифт-клик в любую
         /// часть модели выделяет её — не надо попадать в точку-центр. Выбирается объект
-        /// с наименьшей площадью на экране (ближний из перекрывающихся).</summary>
+        /// с наименьшей площадью на экране (ближний из перекрывающихся).
+        /// Перф (§12-45б, v0.112): до обхода мешей — дешёвый отсев по экран-кругу
+        /// габаритной сферы юнита (клик мимо видимого силуэта не трогает меши:
+        /// раньше каждый клик брал GetComponentsInChildren (массив на юнита) и
+        /// 9 проекций на КАЖДОГО выделемого юнита); список рендереров — non-alloc.</summary>
+        private static readonly List<Renderer> PickRenderers = new List<Renderer>();
+
         public static Unit TryPickUnitByBody(Camera cam, Vector2 mouse, FactionHQ localHq)
         {
             if (cam == null)
                 return null;
             Unit best = null;
             float bestArea = float.MaxValue;
+            float pxPerRad = Screen.height / (2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad));
+            Vector3 camPos = cam.transform.position;
             foreach (Unit unit in UnitRegistry.allUnits)
             {
                 if (unit == null || unit.disabled || !IsSelectableFriendly(unit, localHq))
                     continue;
+                // Отсев: клик вне экран-круга габаритной сферы (якорь иконки + запас
+                // 25%+8px на перспективу у краёв экрана) — модель точно не под мышью.
+                Vector3 anchor = UnitAnchorWorld(unit);
+                Vector3 asp = cam.WorldToScreenPoint(anchor);
+                if (asp.z <= 0f)
+                    continue;
+                float dist = Vector3.Distance(camPos, anchor);
+                float rPx = unit.maxRadius * 2f / Mathf.Max(dist, 1f) * pxPerRad * 1.25f + 8f;
+                float ddx = asp.x - mouse.x, ddy = asp.y - mouse.y;
+                if (ddx * ddx + ddy * ddy > rPx * rPx)
+                    continue;
                 Bounds bounds = default;
                 bool has = false;
-                foreach (Renderer r in unit.GetComponentsInChildren<Renderer>())
+                PickRenderers.Clear();
+                unit.GetComponentsInChildren(false, PickRenderers);
+                foreach (Renderer r in PickRenderers)
                 {
                     if (r == null || !r.enabled || r.GetType().Name == "ParticleSystemRenderer")
                         continue;
@@ -367,18 +388,31 @@ namespace SupremeNuclear
         /// (Jackknife): строит здания (DESIGN §2.3; модовые определения юнитов — позже).
         /// Морской инженер (v0.96): десантный катер LC — единственный нативный
         /// ховер-амфибия (AirCushion), сам ходит к водным площадкам по seaLanes,
-        /// без костылей плавучести; строит верфи и будущие морские постройки.</summary>
+        /// без костылей плавучести; строит верфи и будущие морские постройки.
+        /// Кэш по ОПРЕДЕЛЕНИЮ (неизменно): покадровые сканы зоны стройки зовут
+        /// IsEngineer на каждого наземного/надводного юнита, а имя-фитиль
+        /// «jack» с ToLowerInvariant аллоцировал строку на каждый вызов.</summary>
+        private static readonly Dictionary<UnitDefinition, bool> _engineerDef =
+            new Dictionary<UnitDefinition, bool>();
+
         public static bool IsEngineer(Unit unit)
         {
-            if (unit is Ship && unit.definition is ShipDefinition sea &&
-                sea.shipType == ShipType.LC)
-                return true;
-            if (!(unit is GroundVehicle) || !(unit.definition is VehicleDefinition vd))
+            if (!(unit is Ship) && !(unit is GroundVehicle))
                 return false;
-            if (vd.vehicleType == VehicleType.TRUCK)
-                return true;
-            string name = vd.unitName ?? vd.jsonKey ?? "";
-            return name.ToLowerInvariant().Contains("jack");
+            UnitDefinition def = unit.definition;
+            if (def == null)
+                return false;
+            if (_engineerDef.TryGetValue(def, out bool isEngineer))
+                return isEngineer;
+            if (def is ShipDefinition sea && sea.shipType == ShipType.LC)
+                isEngineer = true;
+            else if (def is VehicleDefinition vd)
+                isEngineer = vd.vehicleType == VehicleType.TRUCK ||
+                             (vd.unitName ?? vd.jsonKey ?? "").ToLowerInvariant().Contains("jack");
+            else
+                isEngineer = false;
+            _engineerDef[def] = isEngineer;
+            return isEngineer;
         }
 
         /// <summary>Вертолётное семейство (вертолёты/тильтвинги): свой автопилот
@@ -412,6 +446,34 @@ namespace SupremeNuclear
             return info != null && Time.timeSinceLevelLoad - info.lastSpottedTime <= Settings.StaleContactSec;
         }
 
+
+        /// <summary>Свой аэродром, чьё ПОЛОТНО полосы содержит мировую точку
+        /// (XZ-прямоугольник торцов×ширина с запасом на кромки, Util.InRectXZ).
+        /// Единый пик ЛКМ (панель аэропорта без вышки) и ПКМ (приказ посадки
+        /// на указанную базу) — клик по земле, попавший на полосу, адресован
+        /// аэродрому, а не точке маршрута.</summary>
+        public static Airbase OwnRunwayAirbaseAt(Vector3 worldPoint, FactionHQ hq)
+        {
+            if (hq == null || FactionRegistry.airbaseLookup == null)
+                return null;
+            Vector2 p = new Vector2(worldPoint.x, worldPoint.z);
+            foreach (Airbase airbase in FactionRegistry.airbaseLookup.Values)
+            {
+                if (airbase == null || airbase.CurrentHQ != hq || airbase.runways == null)
+                    continue;
+                foreach (Airbase.Runway runway in airbase.runways)
+                {
+                    if (runway == null || runway.Start == null || runway.End == null)
+                        continue;
+                    if (Util.InRectXZ(p,
+                        new Vector2(runway.Start.position.x, runway.Start.position.z),
+                        new Vector2(runway.End.position.x, runway.End.position.z),
+                        runway.GetWidth() * 1.25f, 5f))
+                        return airbase;
+                }
+            }
+            return null;
+        }
 
         /// <summary>Видимый размер юнита на экране, px — критерий «различим глазами или нужна иконка».</summary>
         public static float ApparentSizePx(Unit unit, Camera cam)

@@ -1026,6 +1026,36 @@ namespace SupremeNuclear
             return true;
         }
 
+        /// <summary>Disperse целей (Alt+Shift+R): очередь целей юнита := ОДНА назначенная
+        /// цель. Атакующая цепочка переключает погоню немедленно (по образцу
+        /// TickPursuit: Holding/LastPoint сброс, перевыдача подхода force); ждущая
+        /// цель смешанной очереди встаёт за всеми оставшимися точками. false —
+        /// назначенная цель не из очереди юнита (чужая серия — её не портим).</summary>
+        public static bool DisperseTargets(Unit unit, Unit target)
+        {
+            if (target == null || target.disabled || !Chains.TryGetValue(unit, out Chain ch) ||
+                !ch.TargetQueue.Contains(target))
+                return false;
+            Version++;
+            ch.TargetQueue.Clear();
+            ch.TargetAfter.Clear();
+            ch.TargetQueue.Add(target);
+            if (ch.Kind == GroundOrderKind.Attack)
+            {
+                ch.TargetAfter.Add(ch.Index); // позиция уже достигнута — цель без задержки
+                if (ch.Target != target)
+                {
+                    ch.Target = target;
+                    ch.Holding = false;
+                    ch.LastPoint = default;
+                    IssuePursuit(unit, ch, PursueRange(unit, target), force: true);
+                }
+            }
+            else
+                ch.TargetAfter.Add(ch.Points.Count); // за всеми оставшимися точками
+            return true;
+        }
+
         public static void Prune()
         {
             List<Unit> dead = null;

@@ -22,7 +22,7 @@ namespace SupremeNuclear
         public readonly List<Marker> Markers = new List<Marker>();
         public readonly Dictionary<Unit, GlobalPosition> LastDestinations = new Dictionary<Unit, GlobalPosition>();
 
-        /// <summary>Накопленные цели «Атаки веером» (R): ПКМ по врагам копит список,
+        /// <summary>Накопленные цели «Распределения» (R): ПКМ по врагам копит список,
         /// ПКМ по земле — раздача группе. CommanderHud рисует маркеры, пока режим
         /// заряжен; чистится зарядом и выдачей.</summary>
         public readonly List<Unit> FanTargets = new List<Unit>();
@@ -77,11 +77,11 @@ namespace SupremeNuclear
                 Unit enemy = TryPickEnemyAt(localHq);
                 if (OrderModes.Pending == OrderMode.DisperseAttack && enemy != null)
                 {
-                    // «Атака веером»: копим цели (дедуп), режим держим заряженным —
+                    // «Распределение»: копим цели (дедуп), режим держим заряженным —
                     // раздача по ПКМ по земле.
                     if (!FanTargets.Contains(enemy))
                         FanTargets.Add(enemy);
-                    CommanderHud.Notice(Loc.F("Веер: целей — {0}", FanTargets.Count));
+                    CommanderHud.Notice(Loc.F("Распределение: целей — {0}", FanTargets.Count));
                     return;
                 }
                 if (enemy != null && IssueAttackOrders(enemy))
@@ -116,6 +116,12 @@ namespace SupremeNuclear
                 if (OrderModes.Pending == OrderMode.Move && TryIssueEscortOrders(localHq))
                     return;
 
+                // ПКМ по ПОЛОТНУ своей ВПП = посадка НА ЭТУ базу (v0.107): тоже
+                // только дефолтный «Движение» — заряженные спец-режимы сохраняют
+                // свою семантику.
+                if (OrderModes.Pending == OrderMode.Move && TryIssueLandingOrders(localHq))
+                    return;
+
                 IssuePending(_controller.Selection.Selected, RtsInput.Shift);
                 if (!RtsInput.Shift)
                     OrderModes.Pending = OrderMode.Move;
@@ -137,6 +143,8 @@ namespace SupremeNuclear
                 return false;
             if (hit.Kind == WaypointKind.BuildSite)
                 CommanderHud.Notice(Loc.Tr("Площадка снесена"));
+            else if (hit.Kind == WaypointKind.RallyPoint)
+                CommanderHud.Notice(Loc.Tr("Точка ралли снята"));
             return true;
         }
 
@@ -147,6 +155,14 @@ namespace SupremeNuclear
         {
             List<Unit> selected = _controller.Selection.Selected;
             var factories = new List<object>();
+            // Ctrl+ПКМ — ралли ДЛЯ ФАБРИК даже при «мобильной» природе: авианосец —
+            // и корабль, и аэродром; обычный ПКМ двигает КОРАБЛЬ (приказ), Ctrl+ПКМ
+            // задаёт ралли его авиакрылу (депо/верфь/ангар в выделении — тоже).
+            // Прочая мобильная техника в выделении сохраняет veto — смешанное
+            // боевое выделение живёт обычными приказами. Ctrl+Shift — удаление
+            // вейпоинтов (гейт в Tick выше), поэтому ралли по Ctrl только ЗАМЕНЯЕТ
+            // маршрут (дописать точку — ПКМ по базе без корабля в выделении).
+            bool rallyMode = RtsInput.Ctrl && !RtsInput.Shift;
             foreach (Unit unit in selected)
             {
                 if (unit == null)
@@ -167,12 +183,29 @@ namespace SupremeNuclear
                     factories.Add(unit);
                     continue;
                 }
+                if (rallyMode && unit is Ship ship)
+                {
+                    // корабль-аэродром (CV/LHA): ралли получает его Airbase —
+                    // ангары корпуса наследуют (ProductionTasks.RouteOf)
+                    Airbase shipBase = ship.GetAirbase();
+                    if (shipBase != null)
+                        factories.Add(shipBase);
+                    continue;
+                }
                 if (unit is GroundVehicle || unit is Ship || unit is Aircraft)
                     return false; // есть мобильные — обычные приказы
             }
             Airbase airbase = _controller.Selection.SelectedAirbase;
             if (airbase != null)
                 factories.Add(airbase);
+            // Недострой-фабрика (Selected при этом пуст, как у аэродрома): ралли
+            // получает ПЛОЩАДКА — маршрут переедет на здание по завершении стройки
+            // (ProductionTasks.AdoptSite). Чужую площадку ралли не кормим.
+            if (factories.Count == 0 && selected.Count == 0 &&
+                BuildTasks.IsFactorySite(BuildTasks.SelectedTask) &&
+                GameApi.TryGetLocalHQ(out FactionHQ rallyHq) &&
+                BuildTasks.SelectedTask.Faction == rallyHq)
+                factories.Add(BuildTasks.SelectedTask);
             if (factories.Count == 0)
                 return false;
             Vector3 target = RouteEditor.SnapAt(GameApi.MainCam);
@@ -187,10 +220,22 @@ namespace SupremeNuclear
                 else
                     ProductionTasks.SetRally(factory, target, groupId);
             }
-            CommanderHud.Notice(Loc.F("Ралли: {0} {1}, маршрут из {2} тчк",
-                factories.Count,
-                Loc.Plural(factories.Count, "фабрика", "фабрики", "фабрик"),
-                ProductionTasks.RallyOf(factories[0])?.Count ?? 0));
+            // Всё — авианосцы (attached-аэродромы): честное имя ралли — авиакрыло
+            bool airWing = factories.Count > 0;
+            foreach (object factory in factories)
+                if (!(factory is Airbase ab && ab.AttachedAirbase))
+                {
+                    airWing = false;
+                    break;
+                }
+            if (airWing)
+                CommanderHud.Notice(Loc.F("Ралли авиакрыла: маршрут из {0} тчк",
+                    ProductionTasks.RallyOf(factories[0])?.Count ?? 0));
+            else
+                CommanderHud.Notice(Loc.F("Ралли: {0} {1}, маршрут из {2} тчк",
+                    factories.Count,
+                    Loc.Plural(factories.Count, "фабрика", "фабрики", "фабрик"),
+                    ProductionTasks.RallyOf(factories[0])?.Count ?? 0));
             return true;
         }
 
@@ -379,6 +424,83 @@ namespace SupremeNuclear
                 : air > 0
                     ? Loc.Tr("Посадка недоступна: нет своего аэродрома с открытой посадкой")
                     : Loc.Tr("В выделении нет бортов"));
+        }
+
+        // Наземка/флот смешанного выделения при ПКМ-посадке: им достаётся обычное
+        // движение в точку клика (скретч, чистится каждым вызовом).
+        private readonly List<Unit> _landingGround = new List<Unit>();
+
+        /// <summary>ПКМ по ПОЛОТНУ своей ВПП (v0.107, дефолтный режим «Движение»,
+        /// в выделении есть авиация) — посадка НА УКАЗАННУЮ базу: терминальный RTB
+        /// к аэродрому клика (Shift — RTB в хвост очереди, как Shift+G). Стоящий
+        /// у ДРУГОЙ базы борт перебазируется (SortieService выкатит его вахтой
+        /// «сел не у цели»). База проверяется каждому борту нативным
+        /// Airbase.IsSuitable (длина/трос/вертикальные точки) и должна быть
+        /// открыта для посадки (тумблеры AirbaseAccess). Наземка/флот смешанного
+        /// выделения получают обычное движение в точку клика.</summary>
+        private bool TryIssueLandingOrders(FactionHQ localHq)
+        {
+            bool anyAir = false;
+            foreach (Unit unit in _controller.Selection.Selected)
+                if (unit is Aircraft)
+                {
+                    anyAir = true;
+                    break;
+                }
+            if (!anyAir ||
+                !GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 ground))
+                return false;
+            Airbase airbase = GameApi.OwnRunwayAirbaseAt(ground, localHq);
+            if (airbase == null)
+                return false;
+
+            bool queue = RtsInput.Shift;
+            bool landingOpen = AirbaseAccess.IsLandingOpen(airbase);
+            int landed = 0, unsuitable = 0;
+            _landingGround.Clear();
+            foreach (Unit unit in _controller.Selection.Selected)
+            {
+                if (unit == null || unit.disabled)
+                    continue; // Unity fake-null: мёртвый между кадрами не приказывается
+                if (!(unit is Aircraft aircraft))
+                {
+                    _landingGround.Add(unit);
+                    continue;
+                }
+                if (!landingOpen)
+                    continue;
+                if (!airbase.IsSuitable(SortieService.LandingQuery(aircraft)))
+                {
+                    unsuitable++;
+                    continue;
+                }
+                if (queue)
+                    AircraftOrders.EnqueueRtb(aircraft, airbase);
+                else
+                    AircraftOrders.ReturnToBase(aircraft, airbase);
+                landed++;
+            }
+
+            if (landed > 0)
+            {
+                // Маркер-крест только при «чистой» посадке: наземному хвосту его
+                // поставит свой IssuePending (не дублируем перекрестья).
+                if (_landingGround.Count == 0)
+                    Markers.Add(new Marker(ground, Time.unscaledTime));
+                CommanderHud.Notice(queue
+                    ? Loc.F("Посадка на ВПП (в очередь): бортов — {0}", landed)
+                    : Loc.F("Посадка на ВПП: бортов — {0}", landed));
+            }
+            if (!landingOpen)
+                CommanderHud.Notice(Loc.Tr("Посадка на этой базе закрыта тумблером"));
+            if (unsuitable > 0)
+                CommanderHud.Notice(Loc.F("ВПП не подходит: {0} {1}", unsuitable,
+                    Loc.Plural(unsuitable, "борт", "борта", "бортов")));
+
+            // Наземка/флот не садятся — обычное движение в точку клика.
+            if (_landingGround.Count > 0)
+                IssuePending(_landingGround, queue);
+            return true;
         }
 
         /// <summary>Мгновенная отмена всех приказов выделенных.</summary>
@@ -656,14 +778,14 @@ namespace SupremeNuclear
             return any;
         }
 
-        /// <summary>Заряд «Атаки веером» (R / кнопка): список целей копится с нуля.</summary>
+        /// <summary>Заряд «Распределения» (R / кнопка): список целей копится с нуля.</summary>
         public void ChargeFanAttack()
         {
             FanTargets.Clear();
             OrderModes.Pending = OrderMode.DisperseAttack;
         }
 
-        /// <summary>Раздача «веера»: каждая цель получает ёмкость N/M (+1 первым по
+        /// <summary>Раздача «распределения»: каждая цель получает ёмкость N/M (+1 первым по
         /// порядку клика), каждый атакующий — БЛИЖАЙШУЮ цель со свободной ёмкостью
         /// (Util.AssignBalanced). Авиация — атака-вылет, наземка/флот — преследование;
         /// инженеры не воюют. Якорь борта — позиция его цели.</summary>
@@ -674,7 +796,7 @@ namespace SupremeNuclear
                     FanTargets.RemoveAt(i);
             if (FanTargets.Count == 0)
             {
-                CommanderHud.Notice(Loc.Tr("Веер: цели потеряны"));
+                CommanderHud.Notice(Loc.Tr("Распределение: цели потеряны"));
                 return;
             }
 
@@ -686,7 +808,7 @@ namespace SupremeNuclear
                     attackers.Add(unit);
             if (attackers.Count == 0)
             {
-                CommanderHud.Notice(Loc.Tr("Веер: в выделении нет атакующих"));
+                CommanderHud.Notice(Loc.Tr("Распределение: в выделении нет атакующих"));
                 FanTargets.Clear();
                 return;
             }
@@ -707,7 +829,7 @@ namespace SupremeNuclear
                 else
                     GroundOrders.SetAttack(attackers[i], target);
             }
-            CommanderHud.Notice(Loc.F("Веер: {0} → {1} {2}", attackers.Count, FanTargets.Count,
+            CommanderHud.Notice(Loc.F("Распределение: {0} → {1} {2}", attackers.Count, FanTargets.Count,
                 Loc.Plural(FanTargets.Count, "цель", "цели", "целей")));
             FanTargets.Clear();
         }
@@ -716,23 +838,38 @@ namespace SupremeNuclear
         /// вейпоинтов выделенных распределяется — юнит i получает группу точек
         /// i mod G (порядок кликов = возрастание groupId), у каждого остаётся ОДНА
         /// точка — прямой вектор вместо общего маршрута. Наземка/флот и авиация
-        /// распределяются независимо; инженеры (общая очередь стройки) не участвуют.</summary>
+        /// распределяются независимо.
+        /// v0.107: распределяются и ЦЕЛИ атак — пачка с серией ПКМ по куче целей
+        /// (каждый юнит несёт всю серию в очереди) получает по ОДНОЙ цели на
+        /// юнита (Util.AssignBalanced — ближайшая цель со свободной ёмкостью, как в
+        /// режиме «Распределение»); у юнита остаётся максимум одна точка и одна цель
+        /// за ней.
+        /// v0.108: распределяется и СТРОЙКА — серия площадок очередей выделенных
+        /// инженеров делится между ними кучками (Util.AssignSpread: наименее
+        /// загруженный берёт ближайшую к концу своего маршрута), каждый строит
+        /// свою подвыборку (BuildTasks.DisperseSequences, хост).</summary>
         public void IssueDisperseMove(List<Unit> selected)
         {
             var ground = new List<Unit>();
             var air = new List<Unit>();
+            var engineers = new List<Unit>();
             foreach (Unit unit in selected)
             {
                 if (unit == null || unit.disabled)
                     continue;
                 if (unit is Aircraft)
                     air.Add(unit);
-                else if ((unit is GroundVehicle || unit is Ship) && !GameApi.IsEngineer(unit))
-                    ground.Add(unit);
+                else if (unit is GroundVehicle || unit is Ship)
+                {
+                    if (GameApi.IsEngineer(unit))
+                        engineers.Add(unit); // стройка раскладывается своей раздачей
+                    else
+                        ground.Add(unit);
+                }
             }
 
             var groups = new List<int>();
-            int dispersed = 0, vectors = 0;
+            int points = 0, vectors = 0, targets = 0, targetKinds = 0, sites = 0;
 
             CollectGroundGroups(ground, groups);
             if (groups.Count > 0)
@@ -740,23 +877,128 @@ namespace SupremeNuclear
                 vectors += groups.Count;
                 for (int i = 0; i < ground.Count; i++)
                     if (GroundOrders.DisperseKeep(ground[i], groups[i % groups.Count]))
-                        dispersed++;
+                        points++;
             }
+            targets += DisperseGroundTargets(ground);
+            targetKinds += _targetPool.Count;
 
             CollectAirGroups(air, groups);
-            if (groups.Count > 0)
+            int[] airAssigned = CollectAirTargets(air);
+            targetKinds += _airPool.Count;
+            if (groups.Count > 0 || airAssigned != null)
             {
                 vectors += groups.Count;
                 for (int i = 0; i < air.Count; i++)
-                    if (AircraftOrders.DisperseKeep(air[i], groups[i % groups.Count]))
-                        dispersed++;
+                    if (AircraftOrders.DisperseKeep(air[i],
+                            groups.Count > 0 ? groups[i % groups.Count] : 0,
+                            airAssigned != null && airAssigned[i] >= 0
+                                ? _airPool[airAssigned[i]]
+                                : null, out bool keptPoint))
+                    {
+                        if (keptPoint)
+                            points++;
+                        if (airAssigned != null && airAssigned[i] >= 0)
+                            targets++;
+                    }
             }
+            sites += BuildTasks.DisperseSequences(engineers);
 
-            CommanderHud.Notice(dispersed > 0
-                ? Loc.F("Распределение: {0} {1} на {2} {3}", dispersed,
-                      Loc.Plural(dispersed, "юнит", "юнита", "юнитов"), vectors,
-                      Loc.Plural(vectors, "вектор", "вектора", "векторов"))
-                : Loc.Tr("Нет очереди вейпоинтов"));
+            if (points > 0)
+                CommanderHud.Notice(Loc.F("Рассредоточение: {0} {1} на {2} {3}", points,
+                    Loc.Plural(points, "юнит", "юнита", "юнитов"), vectors,
+                    Loc.Plural(vectors, "вектор", "вектора", "векторов")));
+            if (targets > 0)
+                CommanderHud.Notice(Loc.F("Рассредоточение атак: {0} {1} на {2} {3}", targets,
+                    Loc.Plural(targets, "юнит", "юнита", "юнитов"), targetKinds,
+                    Loc.Plural(targetKinds, "цель", "цели", "целей")));
+            if (points == 0 && targets == 0 && sites == 0)
+                CommanderHud.Notice(Loc.Tr("Нет очереди вейпоинтов"));
+        }
+
+        // Пулы живых целей раздачи Disperse: живут между вызовами, чистятся в начале сбора.
+        private readonly List<Unit> _targetPool = new List<Unit>();
+        private readonly List<Unit> _airPool = new List<Unit>();
+
+        /// <summary>Раздача целей атак наземки/флота при Disperse: пул живых целей
+        /// очередей выделения (порядок встреч = порядок серии), каждому охотнику —
+        /// БЛИЖАЙШАЯ цель со свободной ёмкостью. Возвращает число юнитов, которым
+        /// цель назначена (назначенная цель не из очереди юнита — чужая серия,
+        /// юнита не трогаем). Пул остаётся в <see cref="_targetPool"/>.</summary>
+        private int DisperseGroundTargets(List<Unit> ground)
+        {
+            _targetPool.Clear();
+            var hunters = new List<Unit>();
+            foreach (Unit unit in ground)
+            {
+                var queue = GroundOrders.TargetQueueOf(unit);
+                if (queue == null)
+                    continue;
+                hunters.Add(unit);
+                foreach (Unit target in queue)
+                    if (target != null && !target.disabled && !_targetPool.Contains(target))
+                        _targetPool.Add(target);
+            }
+            if (_targetPool.Count == 0)
+                return 0;
+            var unitPos = new List<Vector3>(hunters.Count);
+            var targetPos = new List<Vector3>(_targetPool.Count);
+            foreach (Unit unit in hunters)
+                unitPos.Add(unit.transform.position);
+            foreach (Unit target in _targetPool)
+                targetPos.Add(target.transform.position);
+            int[] assigned = Util.AssignBalanced(unitPos, targetPos);
+            int n = 0;
+            for (int i = 0; i < hunters.Count; i++)
+                if (GroundOrders.DisperseTargets(hunters[i], _targetPool[assigned[i]]))
+                    n++;
+            return n;
+        }
+
+        /// <summary>Пул живых Attack-целей планов бортов выделения (порядок встреч)
+        /// и раздача по бортам (AssignBalanced, ближайшая со свободной ёмкостью).
+        /// null — целей нет; иначе индекс пула на каждый борт из <paramref name="air"/>
+        /// (-1 — борт без целей). Пул остаётся в <see cref="_airPool"/>.</summary>
+        private int[] CollectAirTargets(List<Unit> air)
+        {
+            _airPool.Clear();
+            var hunters = new List<Unit>();
+            var hunterIdx = new int[air.Count];
+            for (int i = 0; i < air.Count; i++)
+            {
+                hunterIdx[i] = -1;
+                if (!AircraftOrders.TryGetPlan(air[i], out var plan))
+                    continue;
+                bool hunter = false;
+                foreach (AircraftOrders.OrderSegment seg in plan)
+                {
+                    if (seg.Mode != AirOrderMode.Attack)
+                        continue;
+                    Unit t = seg.Target;
+                    if (t == null || t.disabled)
+                        continue;
+                    hunter = true;
+                    if (!_airPool.Contains(t))
+                        _airPool.Add(t);
+                }
+                if (hunter)
+                {
+                    hunterIdx[i] = hunters.Count;
+                    hunters.Add(air[i]);
+                }
+            }
+            if (_airPool.Count == 0)
+                return null;
+            var unitPos = new List<Vector3>(hunters.Count);
+            var targetPos = new List<Vector3>(_airPool.Count);
+            foreach (Unit unit in hunters)
+                unitPos.Add(unit.transform.position);
+            foreach (Unit target in _airPool)
+                targetPos.Add(target.transform.position);
+            int[] hunterAssigned = Util.AssignBalanced(unitPos, targetPos);
+            var assigned = new int[air.Count];
+            for (int i = 0; i < air.Count; i++)
+                assigned[i] = hunterIdx[i] >= 0 ? hunterAssigned[hunterIdx[i]] : -1;
+            return assigned;
         }
 
         /// <summary>Групповые клики в ОСТАВШИХСЯ очередях наземки (groupId по возрастанию

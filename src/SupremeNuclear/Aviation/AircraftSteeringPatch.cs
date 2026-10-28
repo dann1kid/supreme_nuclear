@@ -1,3 +1,4 @@
+using System;
 using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
@@ -31,6 +32,14 @@ namespace SupremeNuclear
         private static readonly FieldInfo TimeWithoutTargetField =
             AccessTools.Field(typeof(AIPilotCombatModes), "timeWithoutTarget");
 
+        // Сеттеры скомпилированы (Util.FieldSetter): FieldInfo.SetValue боксит
+        // структуру GlobalPosition на каждом физтике каждого борта — GC-поток.
+        private static readonly Action<object, GlobalPosition> SetDestination =
+            Util.FieldSetter<GlobalPosition>(DestinationField);
+
+        private static readonly Action<object, float> SetTimeWithoutTarget =
+            Util.FieldSetter<float>(TimeWithoutTargetField);
+
         private static bool Prefix(AIPilotCombatModes __instance)
         {
             Aircraft aircraft = AircraftField?.GetValue(__instance) as Aircraft;
@@ -43,7 +52,7 @@ namespace SupremeNuclear
 
             // Пока план жив — таймер «без цели» не тикает (иначе AI уйдёт на возврат
             // через 15 с даже посреди подлёта/атаки-движения).
-            TimeWithoutTargetField?.SetValue(__instance, 0f);
+            SetTimeWithoutTarget?.Invoke(__instance, 0f);
 
             // Авто-защита «Авто» (DESIGN §2.11): ракетное предупреждение — руление и
             // контрмеры берёт нативный AI (манёвр увода + ловушки/джаммер по типу ГСН);
@@ -78,7 +87,7 @@ namespace SupremeNuclear
             // Режим «Ловушки»: маршрут держим, контрмеры сбрасываем по интервалу.
             DefenseService.TickFlares(aircraft);
 
-            DestinationField?.SetValue(__instance, destination);
+            SetDestination?.Invoke(__instance, destination);
             if (InputsField?.GetValue(__instance) is ControlInputs inputs)
                 inputs.throttle = AircraftOrders.ThrottleOf(aircraft, speed); // режим скорости сегмента
 

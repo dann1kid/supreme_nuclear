@@ -139,21 +139,56 @@ namespace SupremeNuclear
             }
         }
 
+        // Хиты клика — non-alloc буфер (RaycastAll аллоцировал массив на каждый клик,
+        // §12-45б); сортировка диапазона — компаратор без замыкания.
+        private static readonly RaycastHit[] ClickHits = new RaycastHit[128];
+
+        private sealed class HitDistanceOrder : System.Collections.Generic.IComparer<RaycastHit>
+        {
+            public int Compare(RaycastHit a, RaycastHit b) => a.distance.CompareTo(b.distance);
+        }
+
+        private static readonly HitDistanceOrder ClickHitOrder = new HitDistanceOrder();
+
+        /// <summary>Ближайший юнит по хитам, уже отсортированным по дистанции.</summary>
+        private static Unit FirstUnitOf(RaycastHit[] hits, int count, ref UnitPart part)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                part = hits[i].collider != null ? hits[i].collider.GetComponentInParent<UnitPart>() : null;
+                Unit unit = part != null ? part.parentUnit
+                    : (hits[i].collider != null ? hits[i].collider.GetComponentInParent<Unit>() : null);
+                if (unit == null)
+                    continue;
+                return unit;
+            }
+            return null;
+        }
+
         private void ClickSelect()
         {
             Ray ray = GameApi.ScreenRay(RtsInput.MousePos);
             Unit hitUnit = null;
             UnitPart part = null;
-            RaycastHit[] hits = Physics.RaycastAll(ray, 60000f);
-            System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
-            foreach (RaycastHit hit in hits)
+            RaycastHit[] sortedHits;
+            int sortedCount;
+            int hitCount = Physics.RaycastNonAlloc(ray, ClickHits, 60000f);
+            if (hitCount >= ClickHits.Length)
             {
-                part = hit.collider != null ? hit.collider.GetComponentInParent<UnitPart>() : null;
-                Unit unit = part != null ? part.parentUnit : (hit.collider != null ? hit.collider.GetComponentInParent<Unit>() : null);
-                if (unit == null)
-                    continue;
-                hitUnit = unit;
-                break;
+                // Переполнение буфера (экстремально плотный коллайдерами кадр под
+                // кликом) — честный RaycastAll, чтобы не потерять юнита за спиной.
+                RaycastHit[] hits = Physics.RaycastAll(ray, 60000f);
+                System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+                sortedHits = hits;
+                sortedCount = hits.Length;
+                hitUnit = FirstUnitOf(hits, hits.Length, ref part);
+            }
+            else
+            {
+                System.Array.Sort(ClickHits, 0, hitCount, ClickHitOrder);
+                sortedHits = ClickHits;
+                sortedCount = hitCount;
+                hitUnit = FirstUnitOf(ClickHits, hitCount, ref part);
             }
 
             GameApi.TryGetLocalHQ(out FactionHQ localHq);
@@ -219,7 +254,8 @@ namespace SupremeNuclear
             // контактов приоритетнее ромба (красная иконка может его накрыть).
             if (!RtsInput.Shift && hitUnit == null && TryPickInspectableAt(localHq) == null)
             {
-                Airbase picked = TryPickAirbaseDiamond(localHq) ?? TryPickAirbaseRunway(localHq, hits);
+                Airbase picked = TryPickAirbaseDiamond(localHq) ??
+                                 TryPickAirbaseRunway(localHq, sortedHits, sortedCount);
                 if (picked != null)
                 {
                     SelectedAirbase = picked;
@@ -348,41 +384,26 @@ namespace SupremeNuclear
 
         /// <summary>Пик СВОЕГО аэродрома по ПОЛОТНУ полосы: точка первого
         /// не-юнит попадания клика внутри прямоугольника торцов×ширина какой-нибудь
-        /// своей полосы (Util.InRectXZ, запас на кромки). Осознанный трейд-офф:
+        /// своей полосы (сам прямоугольник — общий пик GameApi.OwnRunwayAirbaseAt,
+        /// его же использует ПКМ-посадка). Осознанный трейд-офф:
         /// клик приказов по земле, попавший на полосу, выделяет аэродром.</summary>
-        private Airbase TryPickAirbaseRunway(FactionHQ localHq, RaycastHit[] hits)
+        private Airbase TryPickAirbaseRunway(FactionHQ localHq, RaycastHit[] hits, int hitCount)
         {
-            if (localHq == null || FactionRegistry.airbaseLookup == null)
+            if (localHq == null)
                 return null;
             Vector3? ground = null;
-            foreach (RaycastHit hit in hits)
+            for (int i = 0; i < hitCount; i++)
             {
-                if (hit.collider == null)
+                if (hits[i].collider == null)
                     continue;
-                if (hit.collider.GetComponentInParent<Unit>() != null)
+                if (hits[i].collider.GetComponentInParent<Unit>() != null)
                     continue; // юниты распиканы выше — клик по телу не наш случай
-                ground = hit.point;
+                ground = hits[i].point;
                 break;
             }
             if (ground == null)
                 return null;
-            Vector2 p = new Vector2(ground.Value.x, ground.Value.z);
-            foreach (Airbase airbase in FactionRegistry.airbaseLookup.Values)
-            {
-                if (airbase == null || airbase.CurrentHQ != localHq || airbase.runways == null)
-                    continue;
-                foreach (Airbase.Runway runway in airbase.runways)
-                {
-                    if (runway == null || runway.Start == null || runway.End == null)
-                        continue;
-                    if (Util.InRectXZ(p,
-                        new Vector2(runway.Start.position.x, runway.Start.position.z),
-                        new Vector2(runway.End.position.x, runway.End.position.z),
-                        runway.GetWidth() * 1.25f, 5f))
-                        return airbase;
-                }
-            }
-            return null;
+            return GameApi.OwnRunwayAirbaseAt(ground.Value, localHq);
         }
 
         /// <summary>Пик осматриваемой цели по 2D-иконке контакта: якорь совпадает с

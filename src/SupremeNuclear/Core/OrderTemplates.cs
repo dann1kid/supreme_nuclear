@@ -175,7 +175,15 @@ namespace SupremeNuclear
             var template = new Template { name = Loc.F("Шаблон {0}", _all.Count + 1) };
             foreach (ProductionTasks.QueueItem item in ProductionTasks.All)
             {
-                if (item.Factory != factory || item.UnitDef == null)
+                if (item.UnitDef == null)
+                    continue;
+                // Аэродром-агрегат (вышка/авианосец): позиции живут пер-ангарно —
+                // снимаем очередь ВСЕХ его ангаров, не пустышку самого Airbase.
+                object f = item.Factory;
+                bool ours = f == factory ||
+                    (factory is Airbase airbase && f is Hangar hangar &&
+                     hangar.parentAirbase == airbase);
+                if (!ours)
                     continue;
                 Item existing = template.items.FirstOrDefault(i => i.key == item.UnitDef.jsonKey);
                 if (existing != null)
@@ -249,6 +257,13 @@ namespace SupremeNuclear
                     else if (def is AircraftDefinition ad && factory is Airbase airbase)
                     {
                         if (!ProductionTasks.EnqueueAirDistributed(airbase, ad))
+                            break;
+                    }
+                    else if (factory is BuildTasks.Task site)
+                    {
+                        // Недострой-фабрика: неподходящий роду площадки позиции
+                        // ПРОПУСКАЕМ (смешанный набор), а не рвём шаблон.
+                        if (!ProductionTasks.EnqueueSite(site, def))
                             break;
                     }
                     else

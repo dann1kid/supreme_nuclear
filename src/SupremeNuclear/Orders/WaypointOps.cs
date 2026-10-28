@@ -17,6 +17,7 @@ namespace SupremeNuclear
         private static readonly List<Unit> GroupUnits = new List<Unit>();
         private static readonly List<int> GroupIdx = new List<int>();
         private static readonly List<int> GroupIdx2 = new List<int>();
+        private static readonly List<object> GroupRallyFactories = new List<object>();
 
         /// <summary>Удалить вейпоинт под курсором (Ctrl+Shift+ПКМ; allUnits — Shift,
         /// поиск по всем юнитам). Групповой вейпоинт (groupId≠0) удаляется у ВСЕХ
@@ -66,6 +67,22 @@ namespace SupremeNuclear
                         for (int m = 0; m < GroupUnits.Count; m++)
                             if (GroupUnits[m] != hit.Owner)
                                 AircraftOrders.RemoveByGroupId(GroupUnits[m], gid);
+                    }
+                    return true;
+                }
+                case WaypointKind.RallyPoint:
+                {
+                    // Точка ралли-маршрута фабрики: один клик задаёт точку ВСЕМ фабрикам
+                    // выделения — групповой фан-аут по groupId клика снимает её у всех
+                    // (лента дедупится в одну — правится то, что рисуется).
+                    int gid = ProductionTasks.RallyGroupIdOf(hit.RallyFactory, hit.Index);
+                    ProductionTasks.RemoveRallyPoint(hit.RallyFactory, hit.Index);
+                    if (gid != 0)
+                    {
+                        ProductionTasks.CollectRallyGroup(gid, GroupRallyFactories, GroupIdx);
+                        for (int m = 0; m < GroupRallyFactories.Count; m++)
+                            if (!ReferenceEquals(GroupRallyFactories[m], hit.RallyFactory))
+                                ProductionTasks.RemoveRallyByGroupId(GroupRallyFactories[m], gid);
                     }
                     return true;
                 }
@@ -119,6 +136,9 @@ namespace SupremeNuclear
                     break;
                 case WaypointKind.AirPoint:
                     AircraftOrders.SetPoint(hit.Owner, hit.Segment, hit.Index, world);
+                    break;
+                case WaypointKind.RallyPoint:
+                    ProductionTasks.SetRallyPoint(hit.RallyFactory, hit.Index, world);
                     break;
             }
         }

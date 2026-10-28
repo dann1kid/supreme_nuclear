@@ -366,8 +366,8 @@ namespace SupremeNuclear
             if (Selection.Selected.Count > 0)
             {
                 // Alt+Shift+R — Disperse Move (FAF-стиль): очередь вейпоинтов группы
-                // распределяется прямыми векторами. Комбо первым в цепи: R без
-                // модификаторов ниже заряжает «Атаку веером».
+                // рассредоточивается прямыми векторами. Комбо первым в цепи: R без
+                // модификаторов ниже заряжает «Распределение».
                 if (alt && shiftHeld && RtsInput.KeyDown(KeyCode.R))
                     MoveOrders.IssueDisperseMove(Selection.Selected);
                 else if (RtsInput.KeyDown(KeyCode.M)) OrderModes.Pending = OrderMode.Move;
@@ -376,7 +376,7 @@ namespace SupremeNuclear
                 else if (RtsInput.KeyDown(KeyCode.T)) OrderModes.Pending = OrderMode.Attack;
                 else if (RtsInput.KeyDown(KeyCode.V)) OrderModes.Pending = OrderMode.Salvo;
                 else if (RtsInput.KeyDown(KeyCode.R))
-                    MoveOrders.ChargeFanAttack(); // «Атака веером»: копим цели ПКМ-ами
+                    MoveOrders.ChargeFanAttack(); // «Распределение»: копим цели ПКМ-ами
                 else if (RtsInput.KeyDown(KeyCode.S))
                     MoveOrders.CancelAll(Selection.Selected); // мгновенная отмена
                 if (RtsInput.KeyDown(KeyCode.G))

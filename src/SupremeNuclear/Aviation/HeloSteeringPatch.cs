@@ -1,3 +1,4 @@
+using System;
 using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
@@ -25,6 +26,14 @@ namespace SupremeNuclear
         private static readonly FieldInfo TimeWithoutTargetField =
             AccessTools.Field(typeof(AIHeloCombatState), "timeWithoutTarget");
 
+        // Сеттеры скомпилированы (Util.FieldSetter): без боксинга структур в
+        // физическом тике (как у самолётного патча №1).
+        private static readonly Action<object, GlobalPosition> SetDestination =
+            Util.FieldSetter<GlobalPosition>(DestinationField);
+
+        private static readonly Action<object, float> SetTimeWithoutTarget =
+            Util.FieldSetter<float>(TimeWithoutTargetField);
+
         /// <summary>Все reflection-поля на месте (проверяется в SelfCheck).</summary>
         public static bool FieldsOk =>
             DestinationField != null && AircraftField != null && TimeWithoutTargetField != null;
@@ -41,7 +50,7 @@ namespace SupremeNuclear
 
             // Пока план жив — таймер «без цели» не тикает (иначе вертолёт уйдёт в
             // автопосадку через 15 с возле базы).
-            TimeWithoutTargetField?.SetValue(__instance, 0f);
+            SetTimeWithoutTarget?.Invoke(__instance, 0f);
 
             // Авто-защита «Авто»: предупреждение — нативный EvadeMissiles вертолёта
             // (нотчинг + снижение + defensive jamming); после угрозы план продолжится.
@@ -73,7 +82,7 @@ namespace SupremeNuclear
             // Режим «Ловушки»: маршрут держим, контрмеры сбрасываем по интервалу.
             DefenseService.TickFlares(aircraft);
 
-            DestinationField?.SetValue(__instance, destination);
+            SetDestination?.Invoke(__instance, destination);
             if (aircraft.autopilot != null)
             {
                 // Вертолётная перегрузка: altitudeHold — ВЫСОТА НАД РЕЛЬЕФОМ (AGL
