@@ -14,6 +14,7 @@ namespace SupremeNuclear
         private void Awake()
         {
             Log.Init(Logger);
+            Loc.Bootstrap(Settings.BindLanguage(Config)); // до Bind: описания настроек локализуются
             Settings.Bind(Config);
 
             if (!Settings.ModEnabled)
@@ -46,6 +47,7 @@ namespace SupremeNuclear
                 AirbaseReserve.Reset(); // резервы ангаров умершей сцены недействительны
                 SelectionService.ResetGroups();
                 RangeRings.Reset(); // кольца дальности: круги/буферы сцены
+                TaxiSurface.Reset(); // плиты дорисованных рулёжек умершей сцены
                 RouteRibbonMesh.Destroy(); // меши/материалы от донора умершей сцены
                 CommanderAudio.Restore(); // страховка: вернуть доплер источникам, если вышли без Deactivate
                 OrderModes.Pending = OrderMode.None;
@@ -55,6 +57,7 @@ namespace SupremeNuclear
             gameObject.AddComponent<CommanderHud>();
             gameObject.AddComponent<SupcomUi>();
             gameObject.AddComponent<MinimapPanel>();
+            gameObject.AddComponent<EngineerFloat>(); // плавучесть инженеров (FixedUpdate, host)
 
             Log.Info($"{PluginInfo.Name} {PluginInfo.Version} загружен — {Settings.ToggleCommanderKey} в миссии включает режим командира");
         }

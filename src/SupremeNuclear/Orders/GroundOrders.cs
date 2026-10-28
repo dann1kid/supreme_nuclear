@@ -12,7 +12,17 @@ namespace SupremeNuclear
         AttackMove,
         /// <summary>Атака цели: подход на дальность вооружения, стоп, нативный огонь;
         /// цель ушла — точка подхода обновляется.</summary>
-        Attack
+        Attack,
+        /// <summary>Патруль (v0.95): цикл — точки проходятся по кругу, последняя
+        /// замыкается на первую. Ноги — как атака-движение (stop-and-fire; флот
+        /// дерётся на ходу). Инженерам патруль даёт авто-достройку близлежащих
+        /// недостроев (BuildTasks, SupCom).</summary>
+        Patrol,
+        /// <summary>Сопровождение союзного юнита (v0.97, SupCom escort/assist):
+        /// следование за целью СВОИМ сектором (веер группы), рядом с целью —
+        /// защита как атака-движение (stop-and-fire, флот дерётся на ходу).
+        /// Инженеры в сопровождении ассистят стройкам цели (BuildTasks).</summary>
+        Escort
     }
 
     /// <summary>Цепочки вейпоинтов для наземки/флота: SetDestination выдаёт следующую точку,
@@ -29,6 +39,8 @@ namespace SupremeNuclear
         private const float ArriveM = 90f;
         private const float ScanIntervalSec = 0.5f; // троттлинг обзора на юнита
         private const float PursueReissueM = 60f;   // цель сдвинулась сильнее — новая точка подхода
+        private const float EscortReissueM = 15f;   // якорь сопровождения ушел дальше — перевыдача (скользит по следу, частые мелкие шаги)
+        private const float EscortSettleSec = 2f;   // цель стоит дольше — охрана собирается кольцом вокруг (а не стоит на следе)
 
         /// <summary>Растёт при любом изменении цепочек — инвалидирует меш-ленту.</summary>
         public static int Version;
@@ -56,6 +68,9 @@ namespace SupremeNuclear
             /// угол «цель → точка подхода» — юнит держит СВОЙ сектор, пока цель
             /// двигается. NaN — живой азимут юнит→цель (одиночная атака).</summary>
             public float ApproachBearing = float.NaN;
+            /// <summary>Escort: цель сопровождения (живёт в цепочке отдельно от
+            /// Target атаки — смешанная очередь атак не должна её терять).</summary>
+            public Unit EscortTarget;
         }
 
         private static readonly Dictionary<Unit, Chain> Chains = new Dictionary<Unit, Chain>();
@@ -70,12 +85,19 @@ namespace SupremeNuclear
         public static Unit TargetOf(Unit unit) =>
             Chains.TryGetValue(unit, out Chain ch) && ch.Kind == GroundOrderKind.Attack ? ch.Target : null;
 
+        /// <summary>Цель сопровождения юнита (для отрисовки/ассиста), иначе null.</summary>
+        public static Unit EscortTargetOf(Unit unit) =>
+            Chains.TryGetValue(unit, out Chain ch) && ch.Kind == GroundOrderKind.Escort ? ch.EscortTarget : null;
+
         /// <summary>Юнит без активных приказов: непройденных точек нет И целей нет.
         /// Атака/очередь целей — занят даже при пустой цепочке точек (раньше атаку
-        /// «занятой» делала производная точка подхода — её больше нет).</summary>
+        /// «занятой» делала производная точка подхода — её больше нет).
+        /// Сопровождение — стоящий приказ: занят всегда (выталкивание из зоны
+        /// стройки не должно рвать связь).</summary>
         public static bool IsIdle(Unit unit) =>
             !Chains.TryGetValue(unit, out Chain ch) ||
-            (ch.Index >= ch.Points.Count && ch.TargetQueue.Count == 0);
+            (ch.Kind != GroundOrderKind.Escort &&
+             ch.Index >= ch.Points.Count && ch.TargetQueue.Count == 0);
 
         /// <summary>Цель дозрела: точки ДО её позиции серии пройдены. Удаления точек
         /// могли сдвинуть позицию — клампим к длине очереди. Чистая — тестируется.</summary>
@@ -194,6 +216,336 @@ namespace SupremeNuclear
             ch.PointGroups.Add(groupId);
         }
 
+        /// <summary>Патруль наземки/флота: цикл точек (последняя замыкается на первую).
+        /// Перезаписывает текущий приказ (как любой новый приказ без Shift).</summary>
+        public static void SetPatrol(Unit unit, GlobalPosition destination, int groupId = 0)
+        {
+            Version++;
+            var ch = new Chain { Kind = GroundOrderKind.Patrol };
+            ch.Points.Add(destination);
+            ch.PointGroups.Add(groupId);
+            Chains[unit] = ch;
+            unit.GetComponent<UnitCommand>()?.SetDestination(destination, playerCommand: true);
+        }
+
+        /// <summary>Дописать точку в патрульный цикл (Shift); юнит не в патруле —
+        /// патруль начинается с этой точки (смешать цикл с линейной очередью нельзя).</summary>
+        public static void EnqueuePatrol(Unit unit, GlobalPosition destination, int groupId = 0)
+        {
+            if (Chains.TryGetValue(unit, out Chain ch) && ch.Kind == GroundOrderKind.Patrol)
+            {
+                Version++;
+                ch.Points.Add(destination);
+                ch.PointGroups.Add(groupId);
+                return;
+            }
+            SetPatrol(unit, destination, groupId);
+        }
+
+        /// <summary>ПКМ по вейпоинту цепочки: маршрут замыкается в патрульный цикл.
+        /// Атака (погоня) не конвертится; меньше двух точек замыкать нечего.</summary>
+        public static bool ConvertToPatrol(Unit unit)
+        {
+            if (!Chains.TryGetValue(unit, out Chain ch) ||
+                ch.Kind == GroundOrderKind.Attack || ch.Kind == GroundOrderKind.Patrol ||
+                ch.Points.Count < 2)
+                return false;
+            Version++;
+            ch.Kind = GroundOrderKind.Patrol;
+            return true;
+        }
+
+        /// <summary>Снимок патрульной цепочки (авто-достройка снимает патруль на время
+        /// стройки и возвращает после). true — юнит в живом патрульном цикле.</summary>
+        public static bool TryGetPatrolSnapshot(Unit unit, List<GlobalPosition> points,
+            List<int> groups, out int index)
+        {
+            points.Clear();
+            groups.Clear();
+            index = 0;
+            if (!Chains.TryGetValue(unit, out Chain ch) ||
+                ch.Kind != GroundOrderKind.Patrol || ch.Points.Count == 0)
+                return false;
+            points.AddRange(ch.Points);
+            groups.AddRange(ch.PointGroups);
+            index = ch.Index;
+            return true;
+        }
+
+        /// <summary>Вернуть снятый патруль (восстановление после авто-достройки):
+        /// цикл ставится на сохранённую точку маршрута.</summary>
+        public static void RestorePatrol(Unit unit, IReadOnlyList<GlobalPosition> points,
+            IReadOnlyList<int> groups, int index)
+        {
+            if (points == null || points.Count == 0)
+                return;
+            Version++;
+            var ch = new Chain
+            {
+                Kind = GroundOrderKind.Patrol,
+                Index = Mathf.Clamp(index, 0, points.Count - 1)
+            };
+            ch.Points.AddRange(points);
+            if (groups != null)
+                ch.PointGroups.AddRange(groups);
+            Chains[unit] = ch;
+            unit.GetComponent<UnitCommand>()?.SetDestination(ch.Points[ch.Index], playerCommand: true);
+        }
+
+        /// <summary>Юниты в живом патрульном цикле (скан авто-достройки).</summary>
+        public static void CollectPatrols(List<Unit> units)
+        {
+            units.Clear();
+            foreach (KeyValuePair<Unit, Chain> kv in Chains)
+                if (kv.Key != null && !kv.Key.disabled &&
+                    kv.Value.Kind == GroundOrderKind.Patrol && kv.Value.Points.Count > 0)
+                    units.Add(kv.Key);
+        }
+
+        // == СОПРОВОЖДЕНИЕ (v0.97, SupCom escort/assist): вейпоинт «привязан к
+        // союзному юниту» — следование за целью своим сектором (веер группы,
+        // ApproachBearing), рядом с целью защита stop-and-fire (флот дерётся на
+        // ходу), инженеры ассистят стройкам цели (BuildTasks.TickEscortAssist).
+
+        /// <summary>Приказ сопровождения (перезапись текущего, как любой приказ
+        /// без Shift). bearing — сектор веера группы (NaN — живой азимут).</summary>
+        public static void SetEscort(Unit unit, Unit target, float bearing = float.NaN)
+        {
+            Version++;
+            var ch = new Chain
+            {
+                Kind = GroundOrderKind.Escort,
+                EscortTarget = target,
+                ApproachBearing = bearing
+            };
+            Chains[unit] = ch;
+            IssueFollow(unit, ch, force: true);
+        }
+
+        /// <summary>Снапшот сопровождения (эскорт-ассист снимает связь на время
+        /// стройки и возвращает после).</summary>
+        public static bool TryGetEscortSnapshot(Unit unit, out Unit target, out float bearing)
+        {
+            target = null;
+            bearing = float.NaN;
+            if (!Chains.TryGetValue(unit, out Chain ch) ||
+                ch.Kind != GroundOrderKind.Escort || ch.EscortTarget == null)
+                return false;
+            target = ch.EscortTarget;
+            bearing = ch.ApproachBearing;
+            return true;
+        }
+
+        /// <summary>Вернуть снятое сопровождение (после эскорт-ассиста).</summary>
+        public static void RestoreEscort(Unit unit, Unit target, float bearing)
+        {
+            if (target == null)
+                return;
+            SetEscort(unit, target, bearing);
+        }
+
+        /// <summary>Живые связи сопровождения: пары «эскорт → цель» (отрисовка,
+        /// скан вейпоинта-связи, отмена по цели).</summary>
+        public static void CollectEscorts(List<Unit> units, List<Unit> targets)
+        {
+            units.Clear();
+            targets.Clear();
+            foreach (KeyValuePair<Unit, Chain> kv in Chains)
+            {
+                if (kv.Key == null || kv.Key.disabled ||
+                    kv.Value.Kind != GroundOrderKind.Escort || kv.Value.EscortTarget == null)
+                    continue;
+                units.Add(kv.Key);
+                targets.Add(kv.Value.EscortTarget);
+            }
+        }
+
+        /// <summary>Снять сопровождение ВСЕХ юнитов, следующих за целью
+        /// (Ctrl+Shift+ПКМ по связи). Возвращает число снятых связей.</summary>
+        public static int CancelEscortOf(Unit target)
+        {
+            List<Unit> drop = null;
+            foreach (KeyValuePair<Unit, Chain> kv in Chains)
+                if (kv.Value.Kind == GroundOrderKind.Escort && kv.Value.EscortTarget == target)
+                    (drop ??= new List<Unit>()).Add(kv.Key);
+            if (drop == null)
+                return 0;
+            foreach (Unit unit in drop)
+                Clear(unit);
+            return drop.Count;
+        }
+
+        /// <summary>Точка следования: якорь скользит ПО СЛЕДУ ЦЕЛИ (Catmull-Rom по
+        /// breadcrumbs) — колонна идёт по траектории цели плавно, без рывков между
+        /// перевыдачами; деградации в кольцо вокруг текущей позиции — следа нет,
+        /// цель стоит (охрана собирается вокруг), эскорт далеко (догоняет напрямую).
+        /// Перевыдача — когда якорь уехал дальше EscortReissueM.</summary>
+        private static void IssueFollow(Unit unit, Chain ch, bool force)
+        {
+            if (ch.EscortTarget == null)
+                return;
+            Unit target = ch.EscortTarget;
+            Vector3 tp = target.transform.position;
+            float standoff = Settings.EscortStandoffM + target.maxRadius + unit.maxRadius;
+            float bearing = ch.ApproachBearing;
+            if (float.IsNaN(bearing))
+                bearing = Mathf.Atan2(unit.transform.position.x - tp.x, unit.transform.position.z - tp.z);
+            Vector3 follow = FollowAnchor(unit, target, tp, standoff, bearing);
+            follow.y = GameApi.GroundY(follow.x, follow.z);
+            GlobalPosition point = follow.ToGlobalPosition();
+            Vector3 last = ch.LastPoint.ToLocalPosition();
+            if (!force && new Vector2(last.x - follow.x, last.z - follow.z).magnitude < EscortReissueM)
+                return;
+            ch.LastPoint = point;
+            unit.GetComponent<UnitCommand>()?.SetDestination(point, playerCommand: true);
+        }
+
+        /// <summary>Якорь следования эскорта. Базовый режим — ПЛАВНО ПО СЛЕДУ: точка
+        /// на сплайне-следе (Util.TrailPointAt) на скорректированной дуге позади
+        /// цели + боковое смещение сектора веера (перпендикуляр курсу следа):
+        /// сектор «в голову колонны» — ближе к цели, «в хвост» — дальше, фланги —
+        /// сбоку от траектории. Деградация в кольцо вокруг текущей позиции цели
+        /// (прежнее поведение): следа нет/короче дуги, цель стоит дольше
+        /// EscortSettleSec, эскорт далеко (догоняет прямым вектором).</summary>
+        private static Vector3 FollowAnchor(Unit unit, Unit target, Vector3 tp,
+            float standoff, float bearing)
+        {
+            Vector3 ring = new Vector3(tp.x + Mathf.Sin(bearing) * standoff, 0f,
+                tp.z + Mathf.Cos(bearing) * standoff);
+            if (!EscortTrails.TryGetValue(target, out EscortTrail trail) || trail.Points.Count == 0)
+                return ring;
+            if (Time.time - trail.LastMoveAt > EscortSettleSec)
+                return ring; // цель стоит — охрана собирается кольцом, а не толпится на следе
+            Vector3 up = unit.transform.position;
+            float dist = new Vector2(up.x - tp.x, up.z - tp.z).magnitude;
+            if (dist > standoff * 2.5f + ArriveM)
+                return ring; // догоняет — прямой вектор быстрее хвоста маршрута
+            TrailBuf.Clear();
+            for (int i = 0; i < trail.Points.Count; i++)
+            {
+                Vector3 l = trail.Points[i].ToLocalPosition();
+                TrailBuf.Add(new Vector3(l.x, 0f, l.z));
+            }
+            Vector3 tail = new Vector3(tp.x, 0f, tp.z);
+            if (!Util.TrailPointAt(TrailBuf, tail, standoff, out Vector3 at, out float heading))
+                return ring; // след короче дистанции станции
+            // Сектор веера в системе координат следа: дельта bearing−курс →
+            // продольная позиция (0.25..1×standoff позади) и боковое смещение.
+            float delta = Mathf.Repeat(bearing - heading + Mathf.PI, Mathf.PI * 2f) - Mathf.PI;
+            float arc = standoff * Mathf.Clamp((1f - Mathf.Cos(delta)) * 0.5f, 0.25f, 1f);
+            float side = standoff * 0.8f * Mathf.Sin(delta);
+            if (!Util.TrailPointAt(TrailBuf, tail, arc, out at, out _))
+                return ring;
+            Vector3 anchor = new Vector3(at.x + Mathf.Cos(heading) * side, 0f,
+                at.z - Mathf.Sin(heading) * side);
+            return anchor;
+        }
+
+        // == СЛЕД ЦЕЛИ СОПРОВОЖДЕНИЯ (v0.98): breadcrumbs траектории цели (шаг
+        // EscortTrailSampleM, длина EscortTrailLengthM, GlobalPosition — origin-proof),
+        // по ним ведётся Catmull-Rom-якорь эскортов (FollowAnchor). Реестр живёт,
+        // пока цель сопровождают (чистка по LastTouchAt в Prune).
+
+        private sealed class EscortTrail
+        {
+            public readonly List<GlobalPosition> Points = new List<GlobalPosition>();
+            public GlobalPosition LastSample;   // позиция последнего сэмпла (для порога шага)
+            public float LastMoveAt = -999f;    // Time.time последнего продвижения цели
+            public float LastTouchAt;           // последний опрос живым эскортом (чистка)
+        }
+
+        private static readonly Dictionary<Unit, EscortTrail> EscortTrails =
+            new Dictionary<Unit, EscortTrail>();
+        private static readonly List<Vector3> TrailBuf = new List<Vector3>();
+
+        /// <summary>Сэмплировать след цели (идемпотентно: несколько эскортов одной
+        /// цели пишут один след). Первый опрос регистрирует цель без точки — якорь
+        /// до первого сдвига цели берётся кольцом.</summary>
+        private static void SampleEscortTrail(Unit target)
+        {
+            if (!EscortTrails.TryGetValue(target, out EscortTrail trail))
+            {
+                trail = new EscortTrail
+                {
+                    LastSample = target.transform.position.ToGlobalPosition(),
+                    LastTouchAt = Time.time
+                };
+                EscortTrails[target] = trail;
+                return;
+            }
+            trail.LastTouchAt = Time.time;
+            Vector3 tp = target.transform.position;
+            Vector3 last = trail.LastSample.ToLocalPosition();
+            float step = Settings.EscortTrailSampleM;
+            if (new Vector2(tp.x - last.x, tp.z - last.z).sqrMagnitude < step * step)
+                return;
+            trail.Points.Add(new Vector3(tp.x, 0f, tp.z).ToGlobalPosition());
+            trail.LastSample = tp.ToGlobalPosition();
+            trail.LastMoveAt = Time.time;
+            // Длина следа ограничена: старая голова срезается (хвост актуальнее).
+            float budget = Settings.EscortTrailLengthM;
+            float acc = 0f;
+            int keepFrom = 0;
+            for (int i = trail.Points.Count - 1; i > 0; i--)
+            {
+                Vector3 a = trail.Points[i].ToLocalPosition();
+                Vector3 b = trail.Points[i - 1].ToLocalPosition();
+                acc += new Vector2(a.x - b.x, a.z - b.z).magnitude;
+                if (acc > budget)
+                {
+                    keepFrom = i;
+                    break;
+                }
+            }
+            if (keepFrom > 0)
+                trail.Points.RemoveRange(0, keepFrom);
+        }
+
+        /// <summary>Чистка следов: цель погибла/пропала или её давно никто не
+        /// сопровождает (LastTouchAt).</summary>
+        private static void PruneEscortTrails()
+        {
+            List<Unit> dead = null;
+            foreach (KeyValuePair<Unit, EscortTrail> kv in EscortTrails)
+                if (kv.Key == null || kv.Key.disabled || Time.time - kv.Value.LastTouchAt > 15f)
+                    (dead ??= new List<Unit>()).Add(kv.Key);
+            if (dead == null)
+                return;
+            foreach (Unit key in dead)
+                EscortTrails.Remove(key);
+        }
+
+        /// <summary>Тик сопровождения: цель жива — следовать/стоять-и-стрелять.
+        /// Стоп-энд-файр — только ДОГНАВ цель (не отстаём из-за боя на полкарты);
+        /// корабли не останавливаются (дерутся на ходу). true = цель погибла —
+        /// цепочка завершена (удаление отложено вызывающим тиком).</summary>
+        private static bool TickEscort(Unit unit, Chain ch, float now)
+        {
+            if (ch.EscortTarget == null || ch.EscortTarget.disabled)
+                return true;
+            if (now < ch.NextScanAt)
+                return false;
+            ch.NextScanAt = now + ScanIntervalSec;
+            SampleEscortTrail(ch.EscortTarget); // идемпотентно: одна цель — один след
+            Vector3 tp = ch.EscortTarget.transform.position;
+            Vector3 up = unit.transform.position;
+            float dist = new Vector2(up.x - tp.x, up.z - tp.z).magnitude - ch.EscortTarget.maxRadius;
+            bool near = dist <= Settings.EscortStandoffM * 2.5f; // догнал: защищаем, но не отстаём
+            Unit enemy = near && !(unit is Ship) ? NearestEngageableEnemy(unit) : null;
+            if (enemy != null)
+            {
+                if (!ch.Holding)
+                {
+                    ch.Holding = true;
+                    StopUnit(unit);
+                }
+                return false; // стоят и стреляют; флот прошёл мимо — дерётся на ходу
+            }
+            ch.Holding = false;
+            IssueFollow(unit, ch, force: false);
+            return false;
+        }
+
         public static void Clear(Unit unit)
         {
             Version++;
@@ -205,6 +557,7 @@ namespace SupremeNuclear
         {
             Version++;
             Chains.Clear();
+            EscortTrails.Clear();
         }
 
         public static void Tick()
@@ -231,7 +584,13 @@ namespace SupremeNuclear
                         (done ??= new List<Unit>()).Add(unit);
                     continue;
                 }
-                if (ch.Kind == GroundOrderKind.AttackMove)
+                if (ch.Kind == GroundOrderKind.Escort)
+                {
+                    if (TickEscort(unit, ch, now))
+                        (done ??= new List<Unit>()).Add(unit);
+                    continue;
+                }
+                if (ch.Kind == GroundOrderKind.AttackMove || ch.Kind == GroundOrderKind.Patrol)
                 {
                     TickStopAndFire(unit, ch, now);
                     if (ch.Holding)
@@ -247,6 +606,8 @@ namespace SupremeNuclear
                     continue;
 
                 ch.Index++;
+                if (ch.Kind == GroundOrderKind.Patrol && ch.Index >= ch.Points.Count)
+                    ch.Index = 0; // цикл: последняя точка замыкается на первую
                 if (ch.Index < ch.Points.Count)
                     unit.GetComponent<UnitCommand>()?.SetDestination(ch.Points[ch.Index], playerCommand: true);
                 // цепочка пройдена: очередь ОСТАЁТСЯ (для отрисовки), тик её больше не трогает
@@ -362,6 +723,18 @@ namespace SupremeNuclear
                     Version++;
                     return false;
                 }
+                // Атака из сопровождения (EnqueueAttack поверх эскорта): цель серии
+                // погибла — сопровождение ЖИВОЙ цели продолжается.
+                if (ch.ResumeKind == GroundOrderKind.Escort &&
+                    ch.EscortTarget != null && !ch.EscortTarget.disabled)
+                {
+                    ch.Kind = GroundOrderKind.Escort;
+                    ch.Target = null;
+                    ch.Holding = false;
+                    IssueFollow(unit, ch, force: true);
+                    Version++;
+                    return false;
+                }
                 return true; // цель мертва, продолжений нет — цепочка завершена
             }
             if (now < ch.NextScanAt)
@@ -474,29 +847,41 @@ namespace SupremeNuclear
             return best;
         }
 
-        /// <summary>Удалить точку цепочки (Ctrl+Shift+ПКМ). Если удалена текущая —
-        /// юнит сразу получает следующую; хвост позади текущей сдвигается. Позиции
-        /// целей серии после удалённой точки сдвигаются вместе с очередью. Точки
-        /// атаки (кресты на целях) здесь не живут — только реальные движения.</summary>
-        public static void RemovePoint(Unit unit, int index)
+        /// <summary>Ядро удаления точки (общее для одиночного и группового удаления):
+        /// снос точки, сдвиг позиций серий целей (TargetAfter), корректировка
+        /// курсора — при удалении точки ДО текущей он сдвигается, при удалении
+        /// текущей остаётся, указывая на следующую. Чистая — тестируется.</summary>
+        public static void RemoveAtCore(Chain ch, int index)
         {
-            Version++;
-            if (!Chains.TryGetValue(unit, out Chain ch) || index < 0 || index >= ch.Points.Count)
+            if (index < 0 || index >= ch.Points.Count)
                 return;
-            int cur = ch.Index;
             ch.Points.RemoveAt(index);
             ch.PointGroups.RemoveAt(index);
             for (int t = 0; t < ch.TargetAfter.Count; t++)
                 if (ch.TargetAfter[t] > index)
                     ch.TargetAfter[t]--;
-            if (index < cur)
-                ch.Index = cur - 1;
-            else if (index == cur)
+            if (index < ch.Index)
+                ch.Index--;
+        }
+
+        /// <summary>Удалить точку цепочки (Ctrl+Shift+ПКМ). Единые с групповым
+        /// удалением правила: опустевшая цепочка без целей сносится сразу,
+        /// выжившая — перевыдаёт текущую точку (идемпотентно, нативный дедуп).
+        /// Позиции целей серии после удалённой точки сдвигаются вместе с
+        /// очередью. Точки атаки (кресты на целях) здесь не живут.</summary>
+        public static void RemovePoint(Unit unit, int index)
+        {
+            Version++;
+            if (!Chains.TryGetValue(unit, out Chain ch))
+                return;
+            RemoveAtCore(ch, index);
+            if (ch.Points.Count == 0 && ch.TargetQueue.Count == 0)
             {
-                ch.Index = cur;
-                if (ch.Kind != GroundOrderKind.Attack && cur < ch.Points.Count)
-                    unit.GetComponent<UnitCommand>()?.SetDestination(ch.Points[cur], playerCommand: true);
+                Chains.Remove(unit);
+                return;
             }
+            if (ch.Index < ch.Points.Count && ch.Kind != GroundOrderKind.Attack)
+                unit.GetComponent<UnitCommand>()?.SetDestination(ch.Points[ch.Index], playerCommand: true);
         }
 
         /// <summary>Перетаскивание точки наземной цепочки (атакуемую цель не двигаем;
@@ -560,6 +945,8 @@ namespace SupremeNuclear
                 return;
             foreach (KeyValuePair<Unit, Chain> kv in Chains)
             {
+                if (kv.Key == null || kv.Key.disabled)
+                    continue;
                 Chain ch = kv.Value;
                 for (int i = ch.Index; i < ch.PointGroups.Count; i++)
                     if (ch.PointGroups[i] == groupId)
@@ -583,15 +970,7 @@ namespace SupremeNuclear
                 return;
             for (int i = ch.PointGroups.Count - 1; i >= 0; i--)
                 if (ch.PointGroups[i] == groupId)
-                {
-                    ch.Points.RemoveAt(i);
-                    ch.PointGroups.RemoveAt(i);
-                    for (int t = 0; t < ch.TargetAfter.Count; t++)
-                        if (ch.TargetAfter[t] > i)
-                            ch.TargetAfter[t]--;
-                    if (ch.Index > i)
-                        ch.Index--;
-                }
+                    RemoveAtCore(ch, i);
             if (ch.Points.Count == 0 && ch.TargetQueue.Count == 0)
             {
                 Chains.Remove(unit);
@@ -620,8 +999,10 @@ namespace SupremeNuclear
         /// false — нечего распределять.</summary>
         public static bool DisperseKeep(Unit unit, int groupId)
         {
-            if (!Chains.TryGetValue(unit, out Chain ch) || ch.Kind == GroundOrderKind.Attack)
-                return false;
+            if (!Chains.TryGetValue(unit, out Chain ch) ||
+                ch.Kind == GroundOrderKind.Attack || ch.Kind == GroundOrderKind.Patrol ||
+                ch.Kind == GroundOrderKind.Escort)
+                return false; // погоня, цикл патруля и сопровождение не раскладываются в прямой вектор
             int keep = DispersePick(ch, groupId);
             if (keep < 0)
                 keep = ch.Points.Count - 1; // своей группы нет — прямой вектор к последней точке
@@ -651,10 +1032,10 @@ namespace SupremeNuclear
             foreach (Unit unit in Chains.Keys)
                 if (unit == null || unit.disabled)
                     (dead ??= new List<Unit>()).Add(unit);
-            if (dead == null)
-                return;
-            foreach (Unit unit in dead)
-                Clear(unit);
+            if (dead != null)
+                foreach (Unit unit in dead)
+                    Clear(unit);
+            PruneEscortTrails();
         }
     }
 }

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using NuclearOption.Networking;
 using UnityEngine;
 
 namespace SupremeNuclear
@@ -68,6 +69,7 @@ namespace SupremeNuclear
             RouteRibbonMesh.Tick();
             RouteRibbonMesh.Render();
             BuildGhosts.Render();
+            TaxiSurface.Render(); // полосы дорисованных рулёжек (Update до рендера — №16)
 
             if (RtsInput.KeyDown(Settings.ToggleCommanderKey))
             {
@@ -105,7 +107,7 @@ namespace SupremeNuclear
                 {
                     OrderTemplates.PendingTemplate = default;
                     BuildTasks.MarkRmbEaten();
-                    CommanderHud.Notice("Шаблон отменён");
+                    CommanderHud.Notice(Loc.Tr("Шаблон отменён"));
                 }
                 else if (RtsInput.LeftDown && !RtsInput.PointerOverUi && !RouteEditor.Consumed)
                 {
@@ -135,7 +137,7 @@ namespace SupremeNuclear
                     BuildTasks.Pending = null;
                     BuildTasks.PlacingActive = false;
                     BuildTasks.MarkRmbEaten();
-                    CommanderHud.Notice("Установка отменена");
+                    CommanderHud.Notice(Loc.Tr("Установка отменена"));
                 }
                 else if (RtsInput.LeftDown && !RtsInput.PointerOverUi && !RouteEditor.Consumed)
                 {
@@ -178,7 +180,9 @@ namespace SupremeNuclear
                     Vector3 site = BuildTasks.PlacingSite.ToLocalPosition();
                     GameApi.TryGetLocalHQ(out FactionHQ hq);
                     // Без Shift — НОВАЯ очередь: прежние очереди выделенных инженеров
-                    // ломаются (как обычный приказ). Shift — дописать (серия SupCom).
+                    // ломаются (как обычный приказ). Площадку строят ВСЕ выделенные —
+                    // пачкой (SupCom: группа едет вместе, серию строит по очереди).
+                    // Shift — дописать в существующие очереди (серия).
                     if (!RtsInput.Shift)
                         foreach (Unit unit in Selection.Selected)
                             if (GameApi.IsEngineer(unit))
@@ -186,6 +190,114 @@ namespace SupremeNuclear
                     BuildTasks.TryPlace(site, Selection.Selected, hq, BuildTasks.PendingYawDeg);
                     if (!RtsInput.Shift)
                         BuildTasks.Pending = null;
+                    BuildTasks.MarkConsumed();
+                }
+            }
+
+            // Режим установки ВПП: ЛКМ — первый торец, ПРОТЯНУТЬ — второй (длина/курс
+            // курсором, клампится в [RunwayMinM, RunwayMaxM]), отпускание — площадка.
+            if (BuildTasks.PendingRunway)
+            {
+                if (RtsInput.KeyDown(KeyCode.Escape))
+                {
+                    BuildTasks.PendingRunway = false;
+                    BuildTasks.PlacingActive = false;
+                }
+                else if (RtsInput.RightDown && !RtsInput.PointerOverUi)
+                {
+                    BuildTasks.PendingRunway = false;
+                    BuildTasks.PlacingActive = false;
+                    BuildTasks.MarkRmbEaten();
+                    CommanderHud.Notice(Loc.Tr("Установка отменена"));
+                }
+                else if (RtsInput.LeftDown && !RtsInput.PointerOverUi && !RouteEditor.Consumed)
+                {
+                    if (GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 rwyStart))
+                    {
+                        BuildTasks.PlacingActive = true;
+                        BuildTasks.PlacingSite = rwyStart.ToGlobalPosition();
+                        BuildTasks.PlacingRunwayEnd = BuildTasks.PlacingSite;
+                    }
+                    BuildTasks.MarkConsumed();
+                }
+                else if (BuildTasks.PlacingActive && RtsInput.LeftHeld)
+                {
+                    if (!RtsInput.PointerOverUi &&
+                        GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 rwyEnd))
+                        BuildTasks.PlacingRunwayEnd = rwyEnd.ToGlobalPosition();
+                    BuildTasks.MarkConsumed();
+                }
+                else if (BuildTasks.PlacingActive && RtsInput.LeftUp)
+                {
+                    BuildTasks.PlacingActive = false;
+                    GameApi.TryGetLocalHQ(out FactionHQ hq);
+                    if (!RtsInput.Shift)
+                        foreach (Unit unit in Selection.Selected)
+                            if (GameApi.IsEngineer(unit))
+                                BuildTasks.ClearFor(unit);
+                    BuildTasks.TryPlaceRunway(
+                        BuildTasks.PlacingSite.ToLocalPosition(),
+                        BuildTasks.PlacingRunwayEnd.ToLocalPosition(),
+                        Selection.Selected, hq);
+                    if (!RtsInput.Shift)
+                        BuildTasks.PendingRunway = false;
+                    BuildTasks.MarkConsumed();
+                }
+            }
+
+            // Режим установки ВЕРФИ (v0.92): как здание — клик по воде фиксирует
+            // центр, удержание ЛКМ крутит корпус, отпускание ставит площадку
+            // (валидация глубины — в TryPlaceDock).
+            if (BuildTasks.PendingDock)
+            {
+                if (RtsInput.KeyDown(KeyCode.Escape))
+                {
+                    BuildTasks.PendingDock = false;
+                    BuildTasks.PlacingActive = false;
+                }
+                else if (RtsInput.RightDown && !RtsInput.PointerOverUi)
+                {
+                    BuildTasks.PendingDock = false;
+                    BuildTasks.PlacingActive = false;
+                    BuildTasks.MarkRmbEaten();
+                    CommanderHud.Notice(Loc.Tr("Установка отменена"));
+                }
+                else if (RtsInput.LeftDown && !RtsInput.PointerOverUi && !RouteEditor.Consumed)
+                {
+                    if (GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 dockSite))
+                    {
+                        BuildTasks.PlacingActive = true;
+                        BuildTasks.PlacingSite = dockSite.ToGlobalPosition();
+                        BuildTasks.PendingYawDeg = 0f;
+                    }
+                    BuildTasks.MarkConsumed();
+                }
+                else if (BuildTasks.PlacingActive && RtsInput.LeftHeld)
+                {
+                    if (!RtsInput.PointerOverUi &&
+                        GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 dg))
+                    {
+                        Vector3 anchor = BuildTasks.PlacingSite.ToLocalPosition();
+                        Vector2 delta = new Vector2(dg.x - anchor.x, dg.z - anchor.z);
+                        if (delta.sqrMagnitude > 4f)
+                            BuildTasks.PendingYawDeg =
+                                Mathf.Atan2(delta.x, delta.y) * Mathf.Rad2Deg;
+                    }
+                    BuildTasks.MarkConsumed();
+                }
+                else if (BuildTasks.PlacingActive && RtsInput.LeftUp)
+                {
+                    BuildTasks.PlacingActive = false;
+                    Vector3 dockSite = BuildTasks.PlacingSite.ToLocalPosition();
+                    GameApi.TryGetLocalHQ(out FactionHQ hq);
+                    if (!RtsInput.Shift)
+                        foreach (Unit unit in Selection.Selected)
+                            if (GameApi.IsEngineer(unit))
+                                BuildTasks.ClearFor(unit);
+                    BuildTasks.TryPlaceDock(dockSite, Selection.Selected, hq,
+                        BuildTasks.PendingYawDeg);
+                    if (!RtsInput.Shift)
+                        BuildTasks.PendingDock = false;
                     BuildTasks.MarkConsumed();
                 }
             }
@@ -212,6 +324,7 @@ namespace SupremeNuclear
                 else if (RtsInput.KeyDown(KeyCode.Alpha3)) SetProfile(2);
                 else if (RtsInput.KeyDown(KeyCode.Alpha4)) SetProfile(3);
                 else if (RtsInput.KeyDown(KeyCode.D)) CycleDefense();
+                else if (RtsInput.KeyDown(KeyCode.T)) CycleTerrainFollow();
             }
             else if (shiftHeld)
             {
@@ -225,6 +338,20 @@ namespace SupremeNuclear
             if (RtsInput.Ctrl && RtsInput.KeyDown(KeyCode.K))
                 SelfDestructSelection();
 
+            // Ctrl+M — отладочные деньги (плейтесты стройки/производства без гринда).
+            // Хост-only (инвариант №2), сумма — настройка Debug.Funds.
+            if (RtsInput.Ctrl && RtsInput.KeyDown(KeyCode.M) &&
+                NetworkManagerNuclearOption.i != null &&
+                NetworkManagerNuclearOption.i.Server != null &&
+                NetworkManagerNuclearOption.i.Server.Active)
+            {
+                if (GameApi.TryGetLocalHQ(out FactionHQ debugHq))
+                {
+                    debugHq.AddFunds(Settings.DebugFunds);
+                    CommanderHud.Notice($"+{Settings.DebugFunds:F0} — отладка");
+                }
+            }
+
             if (RtsInput.KeyDown(KeyCode.H) && Selection.Selected.Count > 0)
             {
                 int on = 0;
@@ -232,8 +359,8 @@ namespace SupremeNuclear
                     if (StanceService.Toggle(unit))
                         on++;
                 CommanderHud.Notice(on > 0
-                    ? $"Огонь удерживают: {on}"
-                    : "Огонь разрешён");
+                    ? Loc.F("Огонь удерживают: {0}", on)
+                    : Loc.Tr("Огонь разрешён"));
             }
 
             if (Selection.Selected.Count > 0)
@@ -253,13 +380,13 @@ namespace SupremeNuclear
                 else if (RtsInput.KeyDown(KeyCode.S))
                     MoveOrders.CancelAll(Selection.Selected); // мгновенная отмена
                 if (RtsInput.KeyDown(KeyCode.G))
-                    MoveOrders.IssueReturnToBase(Selection.Selected); // борта — домой, мгновенно
+                    MoveOrders.IssueReturnToBase(Selection.Selected); // борта — домой (Shift — RTB в очередь)
                 if (RtsInput.KeyDown(KeyCode.X))
                 {
                     int popped = DefenseService.PopNow(Selection.Selected);
                     CommanderHud.Notice(popped > 0
-                        ? $"Ловушки: бортов — {popped}"
-                        : "В выделении нет бортов с контрмерами");
+                        ? Loc.F("Ловушки: бортов — {0}", popped)
+                        : Loc.Tr("В выделении нет бортов с контрмерами"));
                 }
                 if (RtsInput.KeyDown(KeyCode.Escape))
                     OrderModes.Pending = OrderMode.Move;
@@ -276,8 +403,10 @@ namespace SupremeNuclear
             foreach (Unit unit in Selection.Selected)
                 if (unit is Aircraft && AircraftOrders.ApplyModesToCurrent(unit))
                     applied++;
-            CommanderHud.Notice($"Профиль высоты: {p.Name} ({p.AltitudeAgl:F0} м{(p.FollowTerrain ? ", огибание" : "")})" +
-                                (applied > 0 ? $" — участок сменили {applied}" : ""));
+            CommanderHud.Notice(Loc.F("Профиль высоты: {0} ({1} м{2}){3}", Loc.Tr(p.Name),
+                p.AltitudeAgl.ToString("F0"),
+                p.FollowTerrain ? Loc.Tr(", огибание") : "",
+                applied > 0 ? Loc.F(" — участок сменили {0}", applied) : ""));
         }
 
         /// <summary>Скоростной режим (Shift+1..3, кнопки): Полный/Крейсер/Эконом.
@@ -285,16 +414,51 @@ namespace SupremeNuclear
         private void SetSpeed(int index)
         {
             var modes = new[] { SpeedMode.Full, SpeedMode.Cruise, SpeedMode.Economy };
-            var names = new[] { "Полный", "Крейсер", "Эконом" };
+            var names = new[] { Loc.Tr("Полный"), Loc.Tr("Крейсер"), Loc.Tr("Эконом") };
             AircraftOrders.SpeedIndex = modes[Mathf.Clamp(index, 0, modes.Length - 1)];
             int applied = 0;
             foreach (Unit unit in Selection.Selected)
                 if (unit is Aircraft && AircraftOrders.ApplyModesToCurrent(unit))
                     applied++;
-            CommanderHud.Notice($"Скорость: {names[index]}" +
-                                (applied > 0 ? $" — участок сменили {applied}" : "") +
-                                " (самолёты)");
+            CommanderHud.Notice(Loc.F("Скорость: {0}{1} {2}", names[Mathf.Clamp(index, 0, names.Length - 1)],
+                applied > 0 ? Loc.F(" — участок сменили {0}", applied) : "",
+                Loc.Tr("(самолёты)")));
         }
+
+        /// <summary>Тоггл «вдоль рельефа» (Alt+T, кнопки): авто (дефолт профиля
+        /// высоты: Сверхнизко/Низко огибают, Средне/Высоко — нет) → огибать →
+        /// напрямую. Штамп на новые участки + применение к головному сегменту
+        /// выделенных бортов. Вертолётам руление огибает рельеф всегда (v0.93.0) —
+        /// тоггл реально действует только на самолёты.</summary>
+        private void SetTerrainFollow(TerrainHugMode mode)
+        {
+            AircraftOrders.TerrainHug = mode;
+            int applied = 0;
+            foreach (Unit unit in Selection.Selected)
+                if (unit is Aircraft && AircraftOrders.ApplyModesToCurrent(unit))
+                    applied++;
+            string name = mode == TerrainHugMode.Always ? Loc.Tr("Рельеф: огибать")
+                : mode == TerrainHugMode.Never ? Loc.Tr("Рельеф: напрямую")
+                : Loc.Tr("Рельеф: авто");
+            CommanderHud.Notice(name +
+                                (applied > 0 ? Loc.F(" — участок сменили {0}", applied) : "") +
+                                " " + Loc.Tr("(самолёты)"));
+        }
+
+        /// <summary>Alt+T — цикл: авто → огибать → напрямую → авто.</summary>
+        private void CycleTerrainFollow()
+        {
+            TerrainHugMode next = AircraftOrders.TerrainHug == TerrainHugMode.Profile
+                ? TerrainHugMode.Always
+                : AircraftOrders.TerrainHug == TerrainHugMode.Always
+                    ? TerrainHugMode.Never
+                    : TerrainHugMode.Profile;
+            SetTerrainFollow(next);
+        }
+
+        /// <summary>Кнопки панели: 0 — авто, 1 — огибать, 2 — напрямую.</summary>
+        public void SetTerrainFollowUi(int index) =>
+            SetTerrainFollow((TerrainHugMode)Mathf.Clamp(index, 0, 2));
 
         /// <summary>Цикл режима авто-защиты выделенных бортов (Alt+D, кнопки).</summary>
         private void CycleDefense()
@@ -315,15 +479,15 @@ namespace SupremeNuclear
                 }
             }
             if (any)
-                CommanderHud.Notice("Защита: " + DefenseName(first));
+                CommanderHud.Notice(Loc.F("Защита: {0}", DefenseName(first)));
         }
 
         internal static string DefenseName(DefenseMode mode) =>
             mode switch
             {
-                DefenseMode.Auto => "Авто (уклонение + РЭБ/ловушки)",
-                DefenseMode.Flares => "Ловушки (маршрут держим)",
-                _ => "Выкл"
+                DefenseMode.Auto => Loc.Tr("Авто (уклонение + РЭБ/ловушки)"),
+                DefenseMode.Flares => Loc.Tr("Ловушки (маршрут держим)"),
+                _ => Loc.Tr("Выкл")
             };
 
         /// <summary>Кнопки панели: профиль высоты / скорость / защита по индексу.</summary>
@@ -339,12 +503,12 @@ namespace SupremeNuclear
                     n++;
             if (n == 0)
             {
-                CommanderHud.Notice("Защита: в выделении нет бортов");
+                CommanderHud.Notice(Loc.Tr("Защита: в выделении нет бортов"));
                 return;
             }
             foreach (Unit unit in Selection.Selected)
                 DefenseService.Set(unit, mode);
-            CommanderHud.Notice("Защита: " + DefenseName(mode));
+            CommanderHud.Notice(Loc.F("Защита: {0}", DefenseName(mode)));
         }
 
         /// <summary>Группы управления: Ctrl+1..9 — назначить, 1..9 — вызвать (без
@@ -366,7 +530,7 @@ namespace SupremeNuclear
                     if (Selection.Selected.Count > 0)
                     {
                         SelectionService.AssignGroup(i, Selection.Selected);
-                        CommanderHud.Notice($"Группа {i}: назначено {Selection.Selected.Count}");
+                        CommanderHud.Notice(Loc.F("Группа {0}: назначено {1}", i, Selection.Selected.Count));
                     }
                     continue;
                 }
@@ -388,7 +552,7 @@ namespace SupremeNuclear
             bool host = net != null && net.Server != null && net.Server.Active;
             if (!host)
             {
-                CommanderHud.Notice("Уничтожение — только на хосте");
+                CommanderHud.Notice(Loc.Tr("Уничтожение — только на хосте"));
                 return;
             }
 
@@ -439,11 +603,11 @@ namespace SupremeNuclear
             }
 
             if (killed == 0 && sites == 0)
-                CommanderHud.Notice("Ctrl+K: нечего уничтожать (своё выделение/недострой)");
+                CommanderHud.Notice(Loc.Tr("Ctrl+K: нечего уничтожать (своё выделение/недострой)"));
             else
             {
-                CommanderHud.Notice("Уничтожено: " + killed +
-                    (sites > 0 ? " + площадка" : ""));
+                CommanderHud.Notice(Loc.F("Уничтожено: {0}{1}", killed,
+                    sites > 0 ? Loc.Tr(" + площадка") : ""));
                 Log.Info("Ctrl+K: уничтожено юнитов/зданий " + killed + ", площадок " + sites);
             }
         }
@@ -453,13 +617,13 @@ namespace SupremeNuclear
             CameraStateManager cam = GameApi.CamManager;
             if (cam == null || cam.mainCamera == null)
             {
-                CommanderHud.Notice("Supreme Nuclear: камера ещё не готова");
+                CommanderHud.Notice(Loc.Tr("Supreme Nuclear: камера ещё не готова"));
                 return;
             }
             if (cam.currentState == cam.cockpitState || cam.currentState == cam.controlledState ||
                 cam.currentState == cam.TVState || cam.currentState == cam.chaseState)
             {
-                CommanderHud.Notice("Supreme Nuclear: сначала выйди из кабины/съёмки, затем включай режим командира");
+                CommanderHud.Notice(Loc.Tr("Supreme Nuclear: сначала выйди из кабины/съёмки, затем включай режим командира"));
                 return;
             }
 

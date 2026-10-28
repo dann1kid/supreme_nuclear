@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using BepInEx.Configuration;
 using UnityEngine;
 
@@ -9,6 +10,9 @@ namespace SupremeNuclear
 
         public static KeyCode ToggleCommanderKey = KeyCode.F10;
 
+        // Язык интерфейса мода: auto (язык системы), ru, en или имя файла в Locales/
+        public static string Language = "auto";
+
         // Камера
         public static KeyCode RotateModifierKey = KeyCode.Space; // осмотр: зажать и двигать мышь; отпустить — вернуть взгляд
         public static float ZoomPerNotch = 2.5f;          // доля изменения дистанции за щелчок колеса (шаг ограничен 0.3)
@@ -16,15 +20,13 @@ namespace SupremeNuclear
         public static float MinHeight = 10f;            // над рельефом/морем
         public static float MaxHeight = 30000f;         // минимум потолка; реальный потолок = вся карта в кадре
         public static float MaxAltitudeCeiling = 85000f; // жёсткий потолок: выше 90 км игра не может сдвигать origin (мировые пределы), начинается дрожь
-        public static float RotateDegPerPixel = 0.25f;
+        public static float RotateDegPerPixel = 0.45f; // скорость осмотра на Space, град/пиксель
         public static float PitchMin = 20f;           // ниже — почти в горизонт; доступно при осмотре на Space
         public static float PitchMax = 75f;
-        public static float TopDownStartDistance = 2500f; // дальше — плавно к виду сверху
-        public static float TopDownFullDistance = 6000f;
+        public static float TopDownFullDistance = 6000f;  // дальше этой дистанции — полный вид сверху
         public static float TopDownPitch = 87f;
-        public static float CloseTiltPitch = 60f;          // автодоворот вниз при взгляде у самой земли, град
-        public static float CloseTiltStartDistance = 350f; // ближе — камера доворачивается вниз
-        public static float CloseTiltEndDistance = 120f;   // дистанция полного доворота вниз, м
+        public static float CloseTiltPitch = 60f;          // наклон у поверхности (низ кривой зума), град
+        public static float CloseTiltStartDistance = 350f; // ближе — наклон равен CloseTiltPitch (пологий низ кривой)
         public static float AutoTiltSmoothing = 5f;        // скорость входа/выхода из осмотра на Space (1/с)
         public static float MoveSmoothing = 15f;
         public static float RotSmoothing = 18f;
@@ -42,7 +44,7 @@ namespace SupremeNuclear
         public static float StaleContactSec = 30f;      // сколько секунд показывать врага без контакта
         public static float SelectionRingMinPx = 12f;   // минимальный радиус кольца выделения, px
         public static float RouteRibbonWidthM = 40f;
-        public static bool RouteUseMesh = false;    // экспериментальный меш-рендер лент (фолбек — IMGUI)
+        public static bool RouteUseMesh = false;    // экспериментальный меш-рендер лент (фолбэк — IMGUI)
         public static bool RouteDebugQuad = false;  // отладочная рамка 2 км над центром карты
         public static float RouteSampleStepM = 200f;        // шаг сэмплирования рельефа вдоль пути, м
         public static float RouteCornerRadiusM = 120f;      // радиус скругления углов ленты у вейпоинта, м
@@ -59,7 +61,14 @@ namespace SupremeNuclear
         // Приказы
         public static float FormationSpacing = 30f;
         public static float EnemyPickRadiusPx = 24f;   // радиус «притягивания» цели ПКМ (ракеты — ×2.5), px
+        public static float WaypointPickPx = 24f;      // пик-радиус вейпоинта (захват драга/удаление/конвертация/подсветка), px
+        public static bool GroundDirectRouting = true;  // наземка своих едет напрямую, не заезжая на шоссе (кроме прямой через воду — там нативные мосты)
+        public static float GroundDirectWaterStepM = 150f; // шаг проверки прямой трассы наземки на воду, м
         public static float AircraftOrderAltitude = 800f; // высота полёта к точке, м над рельефом
+        public static float EscortStandoffM = 60f;   // сопровождение: дистанция следования от цели (плюс габариты), м
+        public static float EscortAirDistM = 900f;   // сопровождение: смещение авиаэскорта от цели (сектор веера), м
+        public static float EscortTrailSampleM = 25f;   // сопровождение: шаг следа цели (breadcrumbs сплайна), м
+        public static float EscortTrailLengthM = 600f;  // сопровождение: длина следа цели (сплайн-якорь колонны), м
 
         // Режимы полёта: профили высоты (штампуются на участок маршрута) и скорость
         public static float AircraftAltVeryLowAgl = 75f;  // «Сверхнизко»: огибание рельефа, м над рельефом
@@ -89,10 +98,27 @@ namespace SupremeNuclear
         public static float BuildSiteRadiusM = 140f;      // радиус площадки: инженер в нём — строит
         public static float BuildSiteSpacingM = 60f;     // мин. дистанция между площадками (анти-стены)
         public static float HangarAttachRadiusM = 600f;  // дальность пристраивания ангара к своему аэродрому, м
+        public static float RunwayCost = 1500f;          // цена постройки ВПП (новый аэродром)
+        public static float RunwayWidthM = 45f;          // ширина построенной ВПП, м
+        public static float RunwayMinM = 900f;           // мин. длина ВПП, м
+        public static float RunwayMaxM = 4000f;          // макс. длина ВПП, м
         public static bool Build3dGhosts = true;         // 3D-призраки зданий (фолбэк — маркеры)
+        public static float BuildTerrainTiltMaxDeg = 15f; // макс. наклон депо под рельеф, град (0 — плоско)
+        public static float BuildApproachMarginM = 15f;  // запас кольца остановки инженера от габарита здания, м
+        public static float BuildPatrolAssistRadiusM = 500f; // радиус авто-достройки недостроев инженерами в патруле, м (0 — выкл)
+
+        // Флот: верфь-платформа и плавучий инженер (v0.92)
+        public static float DockCost = 800f;             // цена верфи (платформа + депо-корпус)
+        public static float DockMinDepthM = 5f;          // мин. глубина под платформой, м
+        public static float DockPlatformMarginM = 24f;   // запас платформы вокруг габарита корпуса, м
+        public static float DockSpawnSearchM = 400f;     // радиус поиска воды для спуска корабля, м
+        public static float NavalProductionSecondsPerItem = 45f; // производство корабля, с
+        public static float EngineerWaterSpeed = 6f;     // скорость инженера по воде, м/с
+        public static float EngineerFloatHeightM = 0.6f; // клиренс корпуса инженера над водой, м
 
         // Отладка
         public static bool ShowDebugOverlay = false;
+        public static float DebugFunds = 10000f;      // Ctrl+M: сколько денег добавить (плейтесты)
 
         // UI
         public static float UiScale = 1f;            // масштаб всех uGUI-панелей (1 = как при 1080p)
@@ -112,6 +138,7 @@ namespace SupremeNuclear
         public static bool RangeRingBuild = true;    // стройка (охра): инженерный радиус площадки
         public static bool RangeRingWeapons = false; // режим «Оружие»: кольца по классам вместо доменных
         public static int RangeRingMaxUnits = 40;    // потолок юнитов на класс колец (перф отрисовки)
+        public static int RangeRingExactDist = 4000; // ближе этой дистанции к камере (м) кольца — точные высоты по мешу
 
         // Звук
         public static bool CommanderNoDoppler = true; // гасить эффект Доплера в режиме командира
@@ -143,163 +170,223 @@ namespace SupremeNuclear
             _rangeWeapons.Value = on;
         }
 
+        /// <summary>Раннее чтение языка — ДО основного Bind и ДО загрузки таблиц локалей
+        /// в Awake: описания остальных настроек локализуются через Loc.Tr.</summary>
+        public static string BindLanguage(ConfigFile config)
+        {
+            var options = new List<string> { "auto", "ru", "en" };
+            foreach (string locale in Loc.Available())
+                if (!options.Contains(locale))
+                    options.Add(locale);
+            Language = config.Bind("General", "Language", "auto",
+                new ConfigDescription("Language · Язык интерфейса мода. auto — язык системы " +
+                    "(русский → ru, прочие → en); принудительно: ru, en или имя файла из " +
+                    "BepInEx/plugins/SupremeNuclear/Locales/. Применяется при запуске",
+                    new AcceptableValueList<string>(options.ToArray()))).Value;
+            return Language;
+        }
+
         public static void Bind(ConfigFile config)
         {
             _configFile = config;
-            ModEnabled = config.Bind("General", "Enabled", true, "Включить мод").Value;
+            ModEnabled = config.Bind("General", "Enabled", true, Loc.Tr("Включить мод")).Value;
             ToggleCommanderKey = config.Bind("General", "ToggleCommanderKey", KeyCode.F10,
-                "Клавиша входа/выхода из режима командира").Value;
+                Loc.Tr("Клавиша входа/выхода из режима командира")).Value;
 
             RotateModifierKey = config.Bind("Camera", "RotateModifierKey", KeyCode.Space,
-                "Клавиша осмотра: зажать и двигать мышь — вид вокруг точки; отпустить — камера возвращается").Value;
-            ZoomPerNotch = config.Bind("Camera", "ZoomPerNotch", 2.5f, "Сила зума за щелчок колеса (доля расстояния)").Value;
-            MinDistance = config.Bind("Camera", "MinDistance", 25f, "Минимальная дистанция камеры до точки фокуса, м").Value;
-            MinHeight = config.Bind("Camera", "MinHeight", 10f, "Минимальная высота камеры над рельефом, м").Value;
+                Loc.Tr("Клавиша осмотра: зажать и двигать мышь — вид вокруг точки; отпустить — камера возвращается")).Value;
+            ZoomPerNotch = config.Bind("Camera", "ZoomPerNotch", 2.5f, Loc.Tr("Сила зума за щелчок колеса (доля расстояния)")).Value;
+            MinDistance = config.Bind("Camera", "MinDistance", 25f, Loc.Tr("Минимальная дистанция камеры до точки фокуса, м")).Value;
+            MinHeight = config.Bind("Camera", "MinHeight", 10f, Loc.Tr("Минимальная высота камеры над рельефом, м")).Value;
             MaxHeight = config.Bind("Camera", "MaxHeight", 30000f,
-                "Гарантированный потолок высоты, м (реальный = не меньше, чем вся карта в кадре)").Value;
+                Loc.Tr("Гарантированный потолок высоты, м (реальный = не меньше, чем вся карта в кадре)")).Value;
             MaxAltitudeCeiling = config.Bind("Camera", "MaxAltitudeCeiling", 85000f,
-                "Жёсткий потолок высоты, м — выше ~90 км игра не может сдвигать origin мировых объектов").Value;
-            RotateDegPerPixel = config.Bind("Camera", "RotateDegPerPixel", 0.25f, "Скорость вращения (град/пиксель мыши)").Value;
-            PitchMin = config.Bind("Camera", "PitchMinAngle", 20f, "Минимальный наклон камеры вниз, град").Value;
+                Loc.Tr("Жёсткий потолок высоты, м — выше ~90 км игра не может сдвигать origin мировых объектов")).Value;
+            RotateDegPerPixel = config.Bind("Camera", "RotateDegPerPixel", 0.45f, Loc.Tr("Скорость вращения (град/пиксель мыши)")).Value;
+            PitchMin = config.Bind("Camera", "PitchMinAngle", 20f, Loc.Tr("Минимальный наклон камеры вниз, град (осмотр на Space)")).Value;
             PitchMax = config.Bind("Camera", "PitchMax", 75f).Value;
-            TopDownStartDistance = config.Bind("Camera", "TopDownStartDistance", 2500f,
-                "Дистанция, с которой угол начинает стремиться к виду сверху, м").Value;
             TopDownFullDistance = config.Bind("Camera", "TopDownFullDistance", 6000f,
-                "Дистанция полного вида сверху, м").Value;
+                Loc.Tr("Дистанция полного вида сверху (верх кривой наклона), м")).Value;
             TopDownPitch = config.Bind("Camera", "TopDownPitch", 87f).Value;
             CloseTiltPitch = config.Bind("Camera", "CloseTiltPitch", 60f,
-                "Автодоворот камеры вниз при взгляде у самой земли, град").Value;
+                Loc.Tr("Наклон у поверхности — низ кривой наклона, град (горизонта не видно)")).Value;
             CloseTiltStartDistance = config.Bind("Camera", "CloseTiltStartDistance", 350f,
-                "Дистанция, ближе которой камера доворачивается вниз, м").Value;
-            CloseTiltEndDistance = config.Bind("Camera", "CloseTiltEndDistance", 120f,
-                "Дистанция полного доворота вниз у земли, м (меньше CloseTiltStartDistance)").Value;
+                Loc.Tr("Дистанция, ниже которой наклон равен CloseTiltPitch, м")).Value;
             AutoTiltSmoothing = config.Bind("Camera", "AutoTiltSmoothing", 5f,
-                "Скорость возврата к авто-углу после осмотра на Space (1/с)").Value;
+                Loc.Tr("Скорость входа/выхода из осмотра на Space (1/с)")).Value;
             MoveSmoothing = config.Bind("Camera", "MoveSmoothing", 15f).Value;
             RotSmoothing = config.Bind("Camera", "RotSmoothing", 18f).Value;
-            MapMargin = config.Bind("Camera", "MapMargin2", 1000f, "Запуск фокуса за край карты, м").Value;
+            MapMargin = config.Bind("Camera", "MapMargin2", 1000f, Loc.Tr("Запуск фокуса за край карты, м")).Value;
             CloudHideAltitude = config.Bind("Camera", "CloudHideAltitude", 15000f,
-                "Высота, выше которой облака скрываются (вид из космоса), м").Value;
-            EdgeScroll = config.Bind("Camera", "EdgePanEnabled", true, "Панорамирование при курсоре у края экрана").Value;
-            EdgePixels = config.Bind("Camera", "EdgePixels", 24f, "Ширина зоны края экрана, px").Value;
+                Loc.Tr("Высота, выше которой облака скрываются (вид из космоса), м")).Value;
+            EdgeScroll = config.Bind("Camera", "EdgePanEnabled", true, Loc.Tr("Панорамирование при курсоре у края экрана")).Value;
+            EdgePixels = config.Bind("Camera", "EdgePixels", 24f, Loc.Tr("Ширина зоны края экрана, px")).Value;
             EdgeSpeed = config.Bind("Camera", "EdgeSpeed", 1.2f,
-                "Скорость у края: сколько высот вида в секунду").Value;
+                Loc.Tr("Скорость у края: сколько высот вида в секунду")).Value;
 
-            IconsAlwaysOn = config.Bind("Icons", "IconsAlwaysOn", true, "Никогда не скрывать иконки (эксперимент)").Value;
+            IconsAlwaysOn = config.Bind("Icons", "IconsAlwaysOn", true, Loc.Tr("Никогда не скрывать иконки (эксперимент)")).Value;
             IconMinPx = config.Bind("Icons", "IconMinApparentPx", 6f,
-                "Видимый размер юнита (px), мельче которого рисуется 2D-иконка вместо 3D-модели").Value;
-            IconSizePx = config.Bind("Icons", "IconSizePx", 18f, "Базовый размер иконки при 1440p, px").Value;
+                Loc.Tr("Видимый размер юнита (px), мельче которого рисуется 2D-иконка вместо 3D-модели")).Value;
+            IconSizePx = config.Bind("Icons", "IconSizePx", 18f, Loc.Tr("Базовый размер иконки при 1440p, px")).Value;
             IconMaxUnits = config.Bind("Icons", "IconMaxUnits", 500).Value;
-            RouteDebugQuad = config.Bind("Routes", "RouteDebugQuad", false, "Отладочная рамка 2 км над центром карты").Value;
-            RouteUseMesh = config.Bind("Routes", "RouteUseMesh", false, "Рисовать ленты мировым мешом (эксперимент)").Value;
-            RouteRibbonWidthM = config.Bind("Routes", "RouteLegWidthM", 40f, "Ширина ленты маршрута на земле, м").Value;
-            RouteSampleStepM = config.Bind("Routes", "RouteSampleStepM", 200f, "Шаг сэмплирования рельефа вдоль маршрута, м").Value;
-            RouteCornerRadiusM = config.Bind("Routes", "RouteCornerRadiusM", 120f, "Радиус скругления углов ленты маршрута у вейпоинта, м").Value;
+            RouteDebugQuad = config.Bind("Routes", "RouteDebugQuad", false, Loc.Tr("Отладочная рамка 2 км над центром карты")).Value;
+            RouteUseMesh = config.Bind("Routes", "RouteUseMesh", false, Loc.Tr("Рисовать ленты мировым мешом (эксперимент)")).Value;
+            RouteRibbonWidthM = config.Bind("Routes", "RouteLegWidthM", 40f, Loc.Tr("Ширина ленты маршрута на земле, м")).Value;
+            RouteSampleStepM = config.Bind("Routes", "RouteSampleStepM", 200f, Loc.Tr("Шаг сэмплирования рельефа вдоль маршрута, м")).Value;
+            RouteCornerRadiusM = config.Bind("Routes", "RouteCornerRadiusM", 120f, Loc.Tr("Радиус скругления углов ленты маршрута у вейпоинта, м")).Value;
             StaleContactSec = config.Bind("Icons", "StaleContactSec", 30f,
-                "Сколько секунд показывать вражеский контакт без обновления разведки, с").Value;
+                Loc.Tr("Сколько секунд показывать вражеский контакт без обновления разведки, с")).Value;
 
-            EconomyEnabled = config.Bind("Economy", "Enabled", true, "Включить экономику v1 (месторождения + экстракторы)").Value;
+            EconomyEnabled = config.Bind("Economy", "Enabled", true, Loc.Tr("Включить экономику v1 (месторождения + экстракторы)")).Value;
             EconomyProfile = config.Bind("Economy", "Profile", "default",
-                "Имя JSON-профиля в BepInEx/plugins/SupremeNuclear/Economy/").Value;
+                Loc.Tr("Имя JSON-профиля в BepInEx/plugins/SupremeNuclear/Economy/")).Value;
 
             BoxDragThresholdPx = config.Bind("Selection", "BoxDragThresholdPx", 8f).Value;
             DoubleClickSec = config.Bind("Selection", "DoubleClickSec", 0.35f).Value;
             MaxSelected = config.Bind("Selection", "MaxSelected", 500).Value;
 
-            FormationSpacing = config.Bind("Orders", "FormationSpacing", 30f, "Шаг решётки приказов, м").Value;
+            FormationSpacing = config.Bind("Orders", "FormationSpacing", 30f, Loc.Tr("Шаг решётки приказов, м")).Value;
+            WaypointPickPx = config.Bind("Orders", "WaypointPickPx", 24f,
+                Loc.Tr("Радиус захвата вейпоинта мышью (драг/удаление/конвертация/подсветка), px")).Value;
             EnemyPickRadiusPx = config.Bind("Orders", "EnemyPickRadiusPx", 24f,
-                "Радиус захвата цели ПКМ по курсору, px (для ракет — в 2.5 раза шире)").Value;
+                Loc.Tr("Радиус захвата цели ПКМ по курсору, px (для ракет — в 2.5 раза шире)")).Value;
+            GroundDirectRouting = config.Bind("Orders", "GroundDirectRouting", true,
+                Loc.Tr("Наземная техника своих едет к цели напрямую, не заезжая на шоссе ради коротких перегонов; прямая через воду — по-нативному, через мосты")).Value;
+            GroundDirectWaterStepM = config.Bind("Orders", "GroundDirectWaterStepM", 150f,
+                new ConfigDescription(Loc.Tr("Шаг проверки прямой трассы наземки на воду, м (потолок сэмплов на приказ — 24)"),
+                    new AcceptableValueRange<float>(50f, 500f))).Value;
             AircraftOrderAltitude = config.Bind("Orders", "AircraftOrderAltitude", 800f,
-                "Высота полёта к точке назначения («Средне»), м над рельефом").Value;
+                Loc.Tr("Высота полёта к точке назначения («Средне»), м над рельефом")).Value;
+            EscortStandoffM = config.Bind("Orders", "EscortStandoffM", 60f,
+                Loc.Tr("Сопровождение: дистанция следования от цели (плюс габариты юнитов), м")).Value;
+            EscortAirDistM = config.Bind("Orders", "EscortAirDistM", 900f,
+                Loc.Tr("Сопровождение: смещение авиации от цели (сектор веера группы), м")).Value;
+            EscortTrailSampleM = config.Bind("Orders", "EscortTrailSampleM", 25f,
+                Loc.Tr("Сопровождение: шаг следа цели (точки сплайна движения колонны), м")).Value;
+            EscortTrailLengthM = config.Bind("Orders", "EscortTrailLengthM", 600f,
+                Loc.Tr("Сопровождение: длина следа цели для сплайна движения колонны, м")).Value;
             AircraftAltVeryLowAgl = config.Bind("Orders", "AircraftAltVeryLowAgl", 75f,
-                "Профиль «Сверхнизко» (огибание рельефа), м над рельефом").Value;
+                Loc.Tr("Профиль «Сверхнизко» (огибание рельефа), м над рельефом")).Value;
             AircraftAltLowAgl = config.Bind("Orders", "AircraftAltLowAgl", 150f,
-                "Профиль «Низко» (огибание рельефа), м над рельефом").Value;
+                Loc.Tr("Профиль «Низко» (огибание рельефа), м над рельефом")).Value;
             AircraftAltHighAgl = config.Bind("Orders", "AircraftAltHighAgl", 2500f,
-                "Профиль «Высоко», м над рельефом").Value;
+                Loc.Tr("Профиль «Высоко», м над рельефом")).Value;
             AircraftEconomyThrottle = config.Bind("Orders", "AircraftEconomyThrottle", 0.55f,
-                new ConfigDescription("Скоростной режим «Эконом»: доля максимального газа (только самолёты)",
+                new ConfigDescription(Loc.Tr("Скоростной режим «Эконом»: доля максимального газа (только самолёты)"),
                     new AcceptableValueRange<float>(0.2f, 0.95f))).Value;
             DefenseFlareIntervalSec = config.Bind("Orders", "DefenseFlareIntervalSec", 2f,
-                new ConfigDescription("Режим защиты «Ловушки»: интервал авто-сброса при ракетном предупреждении, с",
+                new ConfigDescription(Loc.Tr("Режим защиты «Ловушки»: интервал авто-сброса при ракетном предупреждении, с"),
                     new AcceptableValueRange<float>(0.5f, 10f))).Value;
             SalvoMaxRoundsPerTarget = config.Bind("Orders", "SalvoMaxRoundsPerTarget", 4,
-                new ConfigDescription("Потолок ракет на одну цель в одном залпе (сверх — не поднимается)",
+                new ConfigDescription(Loc.Tr("Потолок ракет на одну цель в одном залпе (сверх — не поднимается)"),
                     new AcceptableValueRange<int>(1, 16))).Value;
 
             AttackEngageFactor = config.Bind("Orders", "AttackEngageFactor", 1.25f,
-                "«Цель в зоне боя» = дальность вооружения × этот фактор: ближе — бой отдаётся нативному AI").Value;
+                Loc.Tr("«Цель в зоне боя» = дальность вооружения × этот фактор: ближе — бой отдаётся нативному AI")).Value;
             AttackMoveConeDeg = config.Bind("Orders", "AttackMoveConeDeg", 75f,
-                "Конус атаки-движения авиации: цели вне конуса вектора приказа не преследуются, град").Value;
+                Loc.Tr("Конус атаки-движения авиации: цели вне конуса вектора приказа не преследуются, град")).Value;
             RtbFuelLevel = config.Bind("Orders", "RtbFuelLevel", 0.25f,
-                new ConfigDescription("Доля топлива, ниже которой боевой вылет возвращается на базу (нативный порог посадки — 0.2)",
+                new ConfigDescription(Loc.Tr("Доля топлива, ниже которой боевой вылет возвращается на базу (нативный порог посадки — 0.2)"),
                     new AcceptableValueRange<float>(0.05f, 0.9f))).Value;
             LandingHandoffM = config.Bind("Orders", "LandingHandoffM", 4000f,
-                "Дистанция до аэродрома, на которой борт передаётся нативной автопосадке, м").Value;
+                Loc.Tr("Дистанция до аэродрома, на которой борт передаётся нативной автопосадке, м")).Value;
             AirbaseServiceRadiusM = config.Bind("Orders", "AirbaseServiceRadiusM", 800f,
-                "Радиус у аэродрома, в котором идёт перевооружение/заправка на земле, м").Value;
+                Loc.Tr("Радиус у аэродрома, в котором идёт перевооружение/заправка на земле, м")).Value;
             AirbaseServiceSeconds = config.Bind("Orders", "AirbaseServiceSeconds", 20f,
-                "Время перевооружения/заправки борта на земле, с").Value;
+                Loc.Tr("Время перевооружения/заправки борта на земле, с")).Value;
             AirbaseRearmCost = config.Bind("Orders", "AirbaseRearmCost", 150f,
-                "Цена обслуживания вылета (перевооружение + заправка; интерим до логистики)").Value;
+                Loc.Tr("Цена обслуживания вылета (перевооружение + заправка; интерим до логистики)")).Value;
 
             BuildDefaultCost = config.Bind("Build", "DefaultCost", 250f,
-                "Цена постройки, если у здания в каталоге не задана value").Value;
+                Loc.Tr("Цена постройки, если у здания в каталоге не задана value")).Value;
             ProductionSecondsPerItem = config.Bind("Build", "ProductionSecondsPerItem", 12f,
-                "Производство одной единицы на фабрике (депо), с").Value;
+                Loc.Tr("Производство одной единицы на фабрике (депо), с")).Value;
             BuildSecondsPerBuilder = config.Bind("Build", "SecondsPerBuilder", 20f,
-                "Время постройки здания одним инженером, с (добавление инженеров ускоряет)").Value;
+                Loc.Tr("Время постройки здания одним инженером, с (добавление инженеров ускоряет)")).Value;
             BuildSiteSpacingM = config.Bind("Build", "SiteSpacingM", 60f,
-                "Минимальная дистанция между площадками построек, м (со снап-раздвигом)").Value;
+                Loc.Tr("Минимальная дистанция между площадками построек, м (со снап-раздвигом)")).Value;
             HangarAttachRadiusM = config.Bind("Build", "HangarAttachRadiusM", 600f,
-                "Ангар пристраивается к своему аэродрому не дальше этого радиуса, м").Value;
+                Loc.Tr("Ангар пристраивается к своему аэродрому не дальше этого радиуса, м")).Value;
+            RunwayCost = config.Bind("Build", "RunwayCost", 1500f,
+                Loc.Tr("Цена постройки ВПП (создаёт новый аэродром-мультифабрику)")).Value;
+            RunwayWidthM = config.Bind("Build", "RunwayWidthM", 45f,
+                Loc.Tr("Ширина построенной ВПП, м")).Value;
+            RunwayMinM = config.Bind("Build", "RunwayMinM", 900f,
+                Loc.Tr("Минимальная длина ВПП, м (короче — тяжёлым бортам не хватит разбега)")).Value;
+            RunwayMaxM = config.Bind("Build", "RunwayMaxM", 4000f,
+                Loc.Tr("Максимальная длина ВПП, м")).Value;
             Build3dGhosts = config.Bind("Build", "Ghost3D", true,
-                "Призраки строящихся зданий — 3D-модели с голубым материалом (выкл — маркеры)").Value;
+                Loc.Tr("Призраки строящихся зданий — 3D-модели с голубым материалом (выкл — маркеры)")).Value;
+            BuildTerrainTiltMaxDeg = config.Bind("Build", "TerrainTiltMaxDeg", 15f,
+                Loc.Tr("Максимальный наклон депо под рельеф, градусы (0 — всегда плоско)")).Value;
             BuildSiteRadiusM = config.Bind("Build", "SiteRadiusM", 140f,
-                "Радиус площадки стройки: инженер внутри — идёт оплата, м").Value;
+                Loc.Tr("Радиус площадки стройки: инженер внутри — идёт оплата, м")).Value;
+            BuildApproachMarginM = config.Bind("Build", "ApproachMarginM", 15f,
+                Loc.Tr("Запас остановки инженера от габарита здания (кольцо подхода), м")).Value;
+            BuildPatrolAssistRadiusM = config.Bind("Build", "PatrolAssistRadiusM", 500f,
+                Loc.Tr("Радиус авто-достройки недостроев инженерами в патруле, м (0 — выкл)")).Value;
+            DockCost = config.Bind("Naval", "DockCost", 800f,
+                Loc.Tr("Цена верфи (платформа на воде, SupCom-паттерн)")).Value;
+            DockMinDepthM = config.Bind("Naval", "DockMinDepthM", 5f,
+                Loc.Tr("Минимальная глубина воды под платформой верфи, м")).Value;
+            DockPlatformMarginM = config.Bind("Naval", "DockPlatformMarginM", 24f,
+                Loc.Tr("Запас платформы верфи вокруг корпуса, м")).Value;
+            DockSpawnSearchM = config.Bind("Naval", "DockSpawnSearchM", 400f,
+                Loc.Tr("Радиус поиска свободной воды для спуска корабля, м")).Value;
+            NavalProductionSecondsPerItem = config.Bind("Naval", "ProductionSecondsPerItem", 45f,
+                Loc.Tr("Производство одного корабля на верфи, с")).Value;
+            EngineerWaterSpeed = config.Bind("Naval", "EngineerWaterSpeed", 6f,
+                Loc.Tr("Скорость инженера по воде (плавучесть), м/с")).Value;
+            EngineerFloatHeightM = config.Bind("Naval", "EngineerFloatHeightM", 0.6f,
+                Loc.Tr("Клиренс корпуса инженера над водой, м (слишком низко — игра топит технику)")).Value;
 
             ShowDebugOverlay = config.Bind("Debug", "ShowDebugOverlay", false).Value;
+            DebugFunds = config.Bind("Debug", "Funds", 10000f,
+                "Сколько денег добавляет Ctrl+M в режиме командира (плейтесты, хост)").Value;
 
             UiScale = config.Bind("UI", "UiScale", 1f,
-                new ConfigDescription("Масштаб всех uGUI-панелей (1 = как при 1080p); применяется при перезапуске",
+                new ConfigDescription(Loc.Tr("Масштаб всех uGUI-панелей (1 = как при 1080p); применяется при перезапуске"),
                     new AcceptableValueRange<float>(0.75f, 2f))).Value;
-            MinimapEnabled = config.Bind("UI", "MinimapEnabled", true, "Плавающая миникарта").Value;
+            MinimapEnabled = config.Bind("UI", "MinimapEnabled", true, Loc.Tr("Плавающая миникарта")).Value;
             MinimapX = config.Bind("UI", "MinimapX", -1f,
-                "Позиция окна миникарты X (внутренние px, левый нижний угол; -1 = право-верх по умолчанию)").Value;
-            MinimapY = config.Bind("UI", "MinimapY", -1f, "Позиция окна миникарты Y (-1 = по умолчанию)").Value;
+                Loc.Tr("Позиция окна миникарты X (внутренние px, левый нижний угол; -1 = право-верх по умолчанию)")).Value;
+            MinimapY = config.Bind("UI", "MinimapY", -1f, Loc.Tr("Позиция окна миникарты Y (-1 = по умолчанию)")).Value;
             MinimapSize = config.Bind("UI", "MinimapSize", 380f,
-                new ConfigDescription("Размер окна миникарты, px", new AcceptableValueRange<float>(240f, 900f))).Value;
-            MinimapVisible = config.Bind("UI", "MinimapVisible", true, "Окно миникарты открыто").Value;
+                new ConfigDescription(Loc.Tr("Размер окна миникарты, px"), new AcceptableValueRange<float>(240f, 900f))).Value;
+            MinimapVisible = config.Bind("UI", "MinimapVisible", true, Loc.Tr("Окно миникарты открыто")).Value;
             MinimapZoomMax = config.Bind("UI", "MinimapZoomMax", 16f,
-                new ConfigDescription("Максимальный зум миникарты колесом (×)",
+                new ConfigDescription(Loc.Tr("Максимальный зум миникарты колесом (×)"),
                     new AcceptableValueRange<float>(1f, 64f))).Value;
             MinimapRelief = config.Bind("UI", "MinimapRelief", false,
-                "Фон миникарты: рельеф (высоты + горизонтали) вместо снимка карты").Value;
+                Loc.Tr("Фон миникарты: рельеф (высоты + горизонтали) вместо снимка карты")).Value;
             UiTooltips = config.Bind("UI", "UiTooltips", true,
-                "Инфоокно юнита при наведении на плитки каталога/очередей").Value;
+                Loc.Tr("Инфоокно юнита при наведении на плитки каталога/очередей")).Value;
 
             // Кольца дальности: записи удерживаем, чтобы чипы UI меняли и значение
             // конфига (SaveConfig пишет именно Value записи, не статическую копию).
             _rangeAttack = config.Bind("RangeRings", "Attack", true,
-                "Красные кольца атаки по наземным/надводным целям (макс. дальность разрешённых гейтом станций)");
+                Loc.Tr("Красные кольца атаки по наземным/надводным целям (макс. дальность разрешённых гейтом станций)"));
             _rangeAir = config.Bind("RangeRings", "Air", true,
-                "Синие кольца атаки по воздушным целям (SupCom: синий = ПВО/воздух)");
+                Loc.Tr("Синие кольца атаки по воздушным целям (SupCom: синий = ПВО/воздух)"));
             _rangeVision = config.Bind("RangeRings", "Vision", true,
-                "Белые кольца разведки выделенных юнитов (радар/визуальный детектор)");
+                Loc.Tr("Белые кольца разведки выделенных юнитов (радар/визуальный детектор)"));
             _rangeBuild = config.Bind("RangeRings", "Build", true,
-                "Охристые кольца стройки инженеров в выделении (радиус площадки)");
+                Loc.Tr("Охристые кольца стройки инженеров в выделении (радиус площадки)"));
             _rangeWeapons = config.Bind("RangeRings", "Weapons", false,
-                "Режим «Оружие»: кольца по классам вооружения (пушки/ракеты ВВ/ракеты АС/бомбы) вместо доменных колец атаки — видно, чем осталось бить при отключении классов гейтами");
+                Loc.Tr("Режим «Оружие»: кольца по классам вооружения (пушки/ракеты ВВ/ракеты АС/бомбы) вместо доменных колец атаки — видно, чем осталось бить при отключении классов гейтами"));
             RangeRingAttack = _rangeAttack.Value;
             RangeRingAir = _rangeAir.Value;
             RangeRingVision = _rangeVision.Value;
             RangeRingBuild = _rangeBuild.Value;
             RangeRingWeapons = _rangeWeapons.Value;
             RangeRingMaxUnits = config.Bind("RangeRings", "MaxUnits", 40,
-                new ConfigDescription("Потолок юнитов на класс колец дальности (перф отрисовки)",
+                new ConfigDescription(Loc.Tr("Потолок юнитов на класс колец дальности (перф отрисовки)"),
                     new AcceptableValueRange<int>(4, 200))).Value;
+            RangeRingExactDist = config.Bind("RangeRings", "ExactTerrainDist", 4000,
+                new ConfigDescription(Loc.Tr("Дистанция до камеры (м), ближе которой кольца следуют мешу поверхности точными рейкастами; дальше — сглаженный кэш высот (0 — всегда кэш)"),
+                    new AcceptableValueRange<int>(0, 20000))).Value;
             CommanderNoDoppler = config.Bind("Audio", "CommanderNoDoppler", true,
-                "Гасить эффект Доплера в режиме командира: камера носится по карте на огромной скорости, и звук без этого летит «пилой»; вне режима звук не трогается").Value;
+                Loc.Tr("Гасить эффект Доплера в режиме командира: камера носится по карте на огромной скорости, и звук без этого летит «пилой»; вне режима звук не трогается")).Value;
         }
 
         /// <summary>Немедленно сохранить конфиг (позиции окон и т.п.).</summary>

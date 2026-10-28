@@ -32,6 +32,70 @@ namespace SupremeNuclear.Tests
                 runs[0].key == "SAM" && runs[1].key == "JCK" && runs[2].key == "SAM");
             Check("Runs: пустой список", Util.Runs(new string[0], (a, b) => a == b).Count == 0);
 
+            // ---------- Util.SegmentSteps: разбивка прямой трассы наземки (проверка на воду) ----------
+            Check("SegmentSteps: нулевая/короткая дистанция — 1 шаг (сама цель)",
+                Util.SegmentSteps(0f, 150f, 24) == 1 && Util.SegmentSteps(5f, 150f, 24) == 1 &&
+                Util.SegmentSteps(150f, 150f, 24) == 1);
+            Check("SegmentSteps: шаг ~150 м",
+                Util.SegmentSteps(151f, 150f, 24) == 2 && Util.SegmentSteps(3600f, 150f, 24) == 24);
+            Check("SegmentSteps: потолок сэмплов на длинной трассе",
+                Util.SegmentSteps(12000f, 150f, 24) == 24);
+            Check("SegmentSteps: нулевой шаг не делит на ноль",
+                Util.SegmentSteps(100f, 0f, 24) == 24);
+
+            // ---------- Util.DistSqToSegmentXZ: метрика «точка у полосы» (выбор аэродрома) ----------
+            Check("DistSqToSegmentXZ: точка на отрезке — ноль, перпендикуляр — квадрат",
+                Util.DistSqToSegmentXZ(new UnityEngine.Vector2(0.5f, 0f), UnityEngine.Vector2.zero, UnityEngine.Vector2.right) < 1e-6f &&
+                UnityEngine.Mathf.Abs(Util.DistSqToSegmentXZ(new UnityEngine.Vector2(0.5f, 3f), UnityEngine.Vector2.zero, UnityEngine.Vector2.right) - 9f) < 1e-4f);
+            Check("DistSqToSegmentXZ: за концами — до ближайшего конца",
+                UnityEngine.Mathf.Abs(Util.DistSqToSegmentXZ(new UnityEngine.Vector2(-3f, 4f), UnityEngine.Vector2.zero, UnityEngine.Vector2.right) - 25f) < 1e-4f &&
+                UnityEngine.Mathf.Abs(Util.DistSqToSegmentXZ(new UnityEngine.Vector2(5f, 0f), UnityEngine.Vector2.zero, UnityEngine.Vector2.right) - 16f) < 1e-4f);
+            Check("DistSqToSegmentXZ: вырожденный отрезок — точка",
+                UnityEngine.Mathf.Abs(Util.DistSqToSegmentXZ(new UnityEngine.Vector2(3f, 4f), UnityEngine.Vector2.zero, UnityEngine.Vector2.zero) - 25f) < 1e-4f);
+
+            // ---------- Util.RingPoints: кольцевой поиск воды для спуска корабля ----------
+            var ring = Util.RingPoints(60f, 30f, 16, 400f);
+            Check("RingPoints: размер = кольца × направления, ближние раньше",
+                ring.Count == 12 * 16 && ring[0].magnitude >= 59.9f && ring[0].magnitude <= 60.1f);
+            Check("RingPoints: радиусы не убывают по ходу списка",
+                ring.TrueForAll(p => p.magnitude <= 401f) &&
+                ring[ring.Count - 1].magnitude > ring[0].magnitude);
+            Check("RingPoints: вырожденные параметры — пустой список без исключений",
+                Util.RingPoints(0f, 30f, 16, 400f).Count == 0 &&
+                Util.RingPoints(60f, 30f, 3, 400f).Count == 0 &&
+                Util.RingPoints(60f, 30f, 16, 50f).Count == 0);
+
+            // ---------- Util.BuildApproachRingM: кольцо остановки строителей (v0.95) ----------
+            Check("Кольцо подхода: габарит + запас",
+                Util.BuildApproachRingM(50f, 15f, 25f, 119f) > 64.9f &&
+                Util.BuildApproachRingM(50f, 15f, 25f, 119f) < 65.1f);
+            Check("Кольцо подхода: мелкая постройка — минимум",
+                Util.BuildApproachRingM(5f, 15f, 25f, 119f) == 25f);
+            Check("Кольцо подхода: крупное здание — потолок радиуса оплаты",
+                Util.BuildApproachRingM(300f, 15f, 25f, 119f) == 119f);
+
+            // ---------- Util.FootprintTilt: наклон депо под рельеф ----------
+            Util.FootprintTilt(10f, 10f, 10f, 10f, 40f, 24f, 15f, out float tPitch, out float tRoll);
+            Check("FootprintTilt: ровная площадка — нулевые углы",
+                tPitch == 0f && tRoll == 0f);
+            // Склон вверх к носу (перед выше, 10 м на 40 м длины ≈ 14°): нос должен
+            // ПОДНЯТЬСЯ — pitch отрицательный (знак Quaternion.Euler: pitch>0 — нос вниз).
+            Util.FootprintTilt(15f, 5f, 10f, 10f, 40f, 24f, 15f, out tPitch, out tRoll);
+            Check("FootprintTilt: перед выше — нос вверх (pitch<0), крен нулевой",
+                tPitch < -13.9f && tPitch > -14.1f && tRoll == 0f);
+            // Правый борт выше (6 м на 24 м ширины ≈ 14°) — правый борт вверх: roll>0.
+            Util.FootprintTilt(10f, 10f, 13f, 7f, 40f, 24f, 15f, out tPitch, out tRoll);
+            Check("FootprintTilt: правый борт выше — roll>0",
+                tRoll > 13.9f && tRoll < 14.1f && tPitch == 0f);
+            // Обрыв (100 м на 40 м, борта 50/0) — кламп на максимум, не в экстремальный угол.
+            Util.FootprintTilt(100f, 0f, 50f, 0f, 40f, 24f, 15f, out tPitch, out tRoll);
+            Check("FootprintTilt: кламп максимального наклона",
+                tPitch == -15f && tRoll == 15f);
+            // maxDeg=0 — наклон выключен (всегда плоско).
+            Util.FootprintTilt(100f, 0f, 50f, 0f, 40f, 24f, 0f, out tPitch, out tRoll);
+            Check("FootprintTilt: maxDeg=0 — плоско",
+                tPitch == 0f && tRoll == 0f);
+
             // ---------- AircraftOrders: группы приказа у точек плана ----------
             var airSeg = new AircraftOrders.OrderSegment { Mode = AirOrderMode.Patrol };
             airSeg.Points.Add(new UnityEngine.Vector3(0f, 800f, 0f).ToGlobalPosition());
@@ -58,6 +122,89 @@ namespace SupremeNuclear.Tests
             airPlan2[0].PointGroups.Add(5);
             Check("Авиагруппы: опустевший сегмент удаляется",
                 AircraftOrders.RemovePointsWithGroup(airPlan2, 5) == 1 && airPlan2.Count == 0);
+
+            // Паритет группового удаления с одиночным (NormalizeAfterRemoval общий):
+            var airSalvo = new AircraftOrders.OrderSegment { Mode = AirOrderMode.Salvo };
+            airSalvo.Points.Add(new UnityEngine.Vector3(0f, 0f, 0f).ToGlobalPosition());
+            airSalvo.PointGroups.Add(5);
+            airSalvo.SalvoTargets = new List<Unit> { null }; // залп-цели есть
+            var airSalvoPlan = new List<AircraftOrders.OrderSegment> { airSalvo };
+            Check("Авиагруппы: опустевший сегмент с залп-целями переживает удаление (паритет)",
+                AircraftOrders.RemovePointsWithGroup(airSalvoPlan, 5) == 1 && airSalvoPlan.Count == 1);
+            var airAtk = new AircraftOrders.OrderSegment { Mode = AirOrderMode.Attack, Index = 2 };
+            var airTr = new AircraftOrders.OrderSegment { Mode = AirOrderMode.Transit, Index = 2 };
+            foreach (AircraftOrders.OrderSegment s in new[] { airAtk, airTr })
+                foreach (int g in new[] { 5, 0, 5 })
+                {
+                    s.Points.Add(new UnityEngine.Vector3(g, 0f, 0f).ToGlobalPosition());
+                    s.PointGroups.Add(g);
+                }
+            var airAtkPlan = new List<AircraftOrders.OrderSegment> { airAtk };
+            var airTrPlan = new List<AircraftOrders.OrderSegment> { airTr };
+            AircraftOrders.RemovePointsWithGroup(airAtkPlan, 5);
+            AircraftOrders.RemovePointsWithGroup(airTrPlan, 5);
+            Check("Авиагруппы: курсор Attack не клампится (паритет), транзит — клампится",
+                airAtk.Index == 1 && airAtk.Points.Count == 1 &&
+                airTr.Index == 0 && airTr.Points.Count == 1);
+
+            // ---------- AircraftOrders.IsServicePoint: служебные точки (сканер и маркеры) ----------
+            var svcPatrol = new AircraftOrders.OrderSegment { Mode = AirOrderMode.Patrol };
+            svcPatrol.Points.Add(new UnityEngine.Vector3(0f, 0f, 0f).ToGlobalPosition());
+            svcPatrol.Points.Add(new UnityEngine.Vector3(100f, 0f, 0f).ToGlobalPosition());
+            svcPatrol.PointGroups.Add(0); // стартовая — служебная
+            svcPatrol.PointGroups.Add(7); // точка приказа — обычный вейпоинт
+            Check("Служебные точки: взлёт патруля — служебная, точка приказа — нет",
+                AircraftOrders.IsServicePoint(svcPatrol, 0) &&
+                !AircraftOrders.IsServicePoint(svcPatrol, 1));
+            var svcStop = new AircraftOrders.OrderSegment { Mode = AirOrderMode.Transit, ServiceStart = true };
+            svcStop.Points.Add(new UnityEngine.Vector3(0f, 0f, 0f).ToGlobalPosition());
+            svcStop.PointGroups.Add(0);
+            var svcMove = new AircraftOrders.OrderSegment { Mode = AirOrderMode.Transit };
+            svcMove.Points.Add(new UnityEngine.Vector3(0f, 0f, 0f).ToGlobalPosition());
+            svcMove.PointGroups.Add(0);
+            var svcMoveG = new AircraftOrders.OrderSegment { Mode = AirOrderMode.Transit };
+            svcMoveG.Points.Add(new UnityEngine.Vector3(0f, 0f, 0f).ToGlobalPosition());
+            svcMoveG.PointGroups.Add(3);
+            Check("Служебные точки: стоп-старт отмены (флаг) — служебная; одиночная нога движения — обычный вейпоинт (v0.90)",
+                AircraftOrders.IsServicePoint(svcStop, 0) &&
+                !AircraftOrders.IsServicePoint(svcMove, 0) &&
+                !AircraftOrders.IsServicePoint(svcMoveG, 0));
+            var svcAtk = new AircraftOrders.OrderSegment { Mode = AirOrderMode.Attack };
+            svcAtk.Points.Add(new UnityEngine.Vector3(0f, 0f, 0f).ToGlobalPosition());
+            svcAtk.PointGroups.Add(0);
+            var svcRtb = new AircraftOrders.OrderSegment { Mode = AirOrderMode.Rtb };
+            svcRtb.Points.Add(new UnityEngine.Vector3(0f, 0f, 0f).ToGlobalPosition());
+            svcRtb.PointGroups.Add(0);
+            Check("Служебные точки: якоря атаки/RTB — служебные (крест/лента, не редактируются)",
+                AircraftOrders.IsServicePoint(svcAtk, 0) && AircraftOrders.IsServicePoint(svcRtb, 0));
+
+            // ---------- AircraftOrders: радиус зачёта вейпоинта и курсор патруля ----------
+            Check("Радиус зачёта: реактивному 250 м/с — потолок 900 м (прежнее поведение)",
+                AircraftOrders.WaypointReachRadius(250f) == 900f &&
+                AircraftOrders.WaypointReachRadius(600f) == 900f);
+            Check("Радиус зачёта: вертолёту 60 м/с — 240 м; висящему — пол 120 м",
+                AircraftOrders.WaypointReachRadius(60f) == 240f &&
+                AircraftOrders.WaypointReachRadius(0f) == 120f);
+            var pd = new float[] { 100f, 700f, 3000f, 5000f };
+            Check("Курсор патруля: текущая в радиусе, следующая вне — шаг вперёд",
+                AircraftOrders.NextPatrolIndex(pd, 4, 0, 240f) == 1);
+            Check("Курсор патруля: текущая вне радиуса — курсор стоит",
+                AircraftOrders.NextPatrolIndex(pd, 4, 1, 240f) == 1);
+            var pdClose = new float[] { 100f, 200f, 3000f, 5000f };
+            Check("Курсор патруля: близкая пара зачитывается за один проход",
+                AircraftOrders.NextPatrolIndex(pdClose, 4, 0, 240f) == 2);
+            var pdWrap = new float[] { 100f, 5000f, 200f };
+            Check("Курсор патруля: переход по кругу (последняя → нулевая → дальше)",
+                AircraftOrders.NextPatrolIndex(pdWrap, 3, 2, 240f) == 1);
+            var pdHang = new float[] { 100f, 150f, 120f, 140f };
+            int hangNext = AircraftOrders.NextPatrolIndex(pdHang, 4, 2, 240f);
+            Check("Курсор патруля: весь цикл в радиусе — цель самая дальняя точка, не зависание на стартовой",
+                hangNext == 1 && hangNext != 2,
+                "next=" + hangNext);
+            Check("Курсор патруля: цикл из одной точки и вырожденные параметры",
+                AircraftOrders.NextPatrolIndex(new float[] { 100f }, 1, 0, 240f) == 0 &&
+                AircraftOrders.NextPatrolIndex(pd, 0, 3, 240f) == 3 &&
+                AircraftOrders.NextPatrolIndex(pd, 4, -1, 240f) == -1);
 
             // ---------- Util.RoundChainCorners: скругление углов лент ----------
             var rcSmooth = new List<UnityEngine.Vector3>();
@@ -269,6 +416,15 @@ namespace SupremeNuclear.Tests
             Check("Тротл: Эконом = настройка",
                 Math.Abs(AircraftOrders.ThrottleOf(0.85f, SpeedMode.Economy) - Settings.AircraftEconomyThrottle) < 1e-4f);
 
+            // ---------- AircraftOrders.EffectiveFollowTerrain: тоггл «вдоль рельефа» ----------
+            Check("Рельеф: авто = дефолт профиля",
+                AircraftOrders.EffectiveFollowTerrain(true, TerrainHugMode.Profile) &&
+                !AircraftOrders.EffectiveFollowTerrain(false, TerrainHugMode.Profile));
+            Check("Рельеф: принудительно огибать — true даже у «Средне/Высоко»",
+                AircraftOrders.EffectiveFollowTerrain(false, TerrainHugMode.Always));
+            Check("Рельеф: принудительно напрямую — false даже у «Сверхнизко/Низко»",
+                !AircraftOrders.EffectiveFollowTerrain(true, TerrainHugMode.Never));
+
             // ---------- Util.TrimSalvo: потолок ракет на цель в залпе ----------
             var salvo = new List<string> { "A", "A", "B", "A", "C", "C" };
             int trimmed = Util.TrimSalvo(salvo, 2);
@@ -321,6 +477,35 @@ namespace SupremeNuclear.Tests
                 Util.RuPlural(14, "тип", "типа", "типов") == "типов" &&
                 Util.RuPlural(21, "тип", "типа", "типов") == "тип" &&
                 Util.RuPlural(112, "тип", "типа", "типов") == "типов");
+
+            // ---------- Loc: локализация (gettext: ключ = русская исходная строка) ----------
+            Loc.Install("ru", "{\"носитель\": \"carrier\"}", null);
+            Check("Loc: ru — тождество даже при наличии en-таблицы (фолбэк не включается)",
+                Loc.Tr("патруль") == "патруль" && Loc.Tr("носитель") == "носитель" &&
+                Loc.Language == "ru");
+            Check("Loc: ru — плюрализация исходным русским правилом",
+                Loc.Plural(2, "носитель", "носителя", "носителей") == "носителя" &&
+                Loc.Plural(11, "тип", "типа", "типов") == "типов");
+            Loc.Install("en",
+                "{\"движение\": \"Move\", \"носов|носка|носков\": \"pair|pairs\", " +
+                "\"готово: {0}\": \"done: {0}\", \"_plural\": \"en\"}", null);
+            Check("Loc: en — перевод по таблице, пропуски — исходником",
+                Loc.Tr("движение") == "Move" && Loc.Tr("нет перевода") == "нет перевода" &&
+                Loc.Language == "en");
+            Check("Loc: en — две формы (one/other)",
+                Loc.Plural(1, "носов", "носка", "носков") == "pair" &&
+                Loc.Plural(3, "носов", "носка", "носков") == "pairs");
+            Check("Loc: форматная строка переводится целиком",
+                Loc.F("готово: {0}", 5) == "done: 5");
+            Loc.Install("fr",
+                "{\"движение\": \"mouvement\"}",
+                "{\"движение\": \"mouvement\", \"залп\": \"salve\", \"_plural\": \"en\"}");
+            Check("Loc: третья локаль — своя таблица, фолбэк en, глубже — исходник",
+                Loc.Tr("движение") == "mouvement" && Loc.Tr("залп") == "salve" &&
+                Loc.Tr("стоп") == "стоп");
+            Loc.Install("ru", null, null);
+            Check("Loc: сброс в ru — состояние тестов не течёт",
+                Loc.Tr("движение") == "движение" && Loc.Language == "ru");
 
             // ---------- FitLine: однострочная подгонка под ширину панели ----------
             Check("FitLine: короткая строка без изменений",
@@ -438,20 +623,54 @@ namespace SupremeNuclear.Tests
                     Name = "Mk-82", Ammo = 0, Full = 6, Carriers = 1, Domains = WeaponDomain.Surface
                 }).EndsWith("· пусто"));
 
-            // ---------- Util.ComposePitch: угол камеры + автодовороты ----------
-            Check("Угол: без автодоворотов — пользовательский напрямую",
-                Util.ComposePitch(40f, 87f, 65f, 0f, 0f) == 40f);
-            Check("Угол: полный доворот к виду сверху",
-                Util.ComposePitch(40f, 87f, 65f, 1f, 0f) == 87f);
-            Check("Угол: полный доворот вниз у земли",
-                Util.ComposePitch(40f, 87f, 65f, 0f, 1f) == 65f);
-            Check("Угол: полосы не пересекаются — close перебивает top (у земли top=0)",
-                Util.ComposePitch(40f, 87f, 65f, 0f, 0.5f) == 52.5f);
-            Check("Угол: ручное вращение (оба фактора 0) даёт и «в горизонт» ниже авто-профиля",
-                Util.ComposePitch(20f, 87f, 65f, 0f, 0f) == 20f);
-            Check("Угол: монотонность по фактору вида сверху",
-                Util.ComposePitch(40f, 87f, 65f, 0.25f, 0f) > 40f &&
-                Util.ComposePitch(40f, 87f, 65f, 0.5f, 0f) > Util.ComposePitch(40f, 87f, 65f, 0.25f, 0f));
+            // ---------- Hover-карточка определения (форматтеры SupCom-инфо) ----------
+            Check("Карточка: класс · цена · время производства",
+                Catalog.FormatTipClass("истребитель", 150f, 12f, false) == "истребитель · 150 · ~12 с");
+            Check("Карточка: стройка помечена, время инженера",
+                Catalog.FormatTipClass("здание", 300f, 20f, true) == "здание · 300 · стройка ~20 с");
+            Check("Карточка: без времени — только класс и цена",
+                Catalog.FormatTipClass("танк", 45f, 0f, false) == "танк · 45");
+            Check("Карточка: ТТХ факт-на-строку (скорость/обзор/броня·экипаж·масса)",
+                string.Join("|", Catalog.TipStatRows(8000f, 250f, 2f, 1f, 9500f)) ==
+                "скорость 250 м/с|обзор 8 км|броня 2 · экипаж 1 · масса ≈9.5 т",
+                string.Join("|", Catalog.TipStatRows(8000f, 250f, 2f, 1f, 9500f)));
+            Check("Карточка: обзор до километра — в метрах",
+                Catalog.TipStatRows(800f, 0f, 0f, 0f, 0f).Count == 1 &&
+                Catalog.TipStatRows(800f, 0f, 0f, 0f, 0f)[0] == "обзор 800 м");
+            Check("Карточка: десятые км — инвариантная точка (детерминизм)",
+                Catalog.TipStatRows(9500f, 0f, 0f, 0f, 0f)[0] == "обзор 9.5 км",
+                Catalog.TipStatRows(9500f, 0f, 0f, 0f, 0f)[0]);
+            Check("Карточка: нули — пустой список",
+                Catalog.TipStatRows(0f, 0f, 0f, 0f, 0f).Count == 0);
+            Check("Карточка: строка оружия — тег + ×боезапас (нагрузка всегда полная)",
+                Catalog.FormatTipWeaponRow(new WeaponTally
+                {
+                    Name = "AIM-120C", Ammo = 4, Full = 4, Carriers = 1, Domains = WeaponDomain.Air
+                }) == "АА  AIM-120C ×4",
+                Catalog.FormatTipWeaponRow(new WeaponTally
+                {
+                    Name = "AIM-120C", Ammo = 4, Full = 4, Carriers = 1, Domains = WeaponDomain.Air
+                }));
+            Check("Карточка: РЭБ-тег у постановщика помех",
+                Catalog.FormatTipWeaponRow(new WeaponTally
+                {
+                    Name = "AN/ALQ-131", Ammo = 1, Full = 1, Carriers = 1, Domains = WeaponDomain.Jammer
+                }) == "РЕБ AN/ALQ-131 ×1");
+
+            // ---------- Util.ZoomCurvePitch: кривая наклона стратегической камеры ----------
+            Check("Кривая: у поверхности — низ кривой (круто в землю)",
+                Util.ZoomCurvePitch(100f, 60f, 87f, 350f, 6000f) == 60f &&
+                Util.ZoomCurvePitch(350f, 60f, 87f, 350f, 6000f) == 60f);
+            Check("Кривая: из космоса — полный вид сверху",
+                Util.ZoomCurvePitch(6000f, 60f, 87f, 350f, 6000f) == 87f &&
+                Util.ZoomCurvePitch(50000f, 60f, 87f, 350f, 6000f) == 87f);
+            Check("Кривая: монотонность по дистанции",
+                Util.ZoomCurvePitch(500f, 60f, 87f, 350f, 6000f) < Util.ZoomCurvePitch(1500f, 60f, 87f, 350f, 6000f) &&
+                Util.ZoomCurvePitch(1500f, 60f, 87f, 350f, 6000f) < Util.ZoomCurvePitch(4000f, 60f, 87f, 350f, 6000f));
+            Check("Кривая: пологий низ — у поверхности наклон «чуть меняет» (< 2° на двойной дистанции)",
+                Util.ZoomCurvePitch(700f, 60f, 87f, 350f, 6000f) - 60f < 2f);
+            Check("Кривая: S-форма — первая четверть положе линейной (пологий разгон от земли)",
+                Util.ZoomCurvePitch(1762.5f, 60f, 87f, 350f, 6000f) < 66.75f);
 
             // ---------- Util.AssignBalanced: раздача «веера» по целям ----------
             var fanUnits = new List<UnityEngine.Vector3>
@@ -533,6 +752,28 @@ namespace SupremeNuclear.Tests
             Check("Смешанная очередь: удаления точек клампят позицию к длине очереди",
                 GroundOrders.TargetDue(2, 9, 2));
 
+            // ---------- GroundOrders.RemoveAtCore: ядро удаления точки ----------
+            // (общее для одиночного Ctrl+Shift+ПКМ и группового удаления по groupId)
+            var rmChain = new GroundOrders.Chain();
+            foreach (int g in new[] { 1, 7, 2, 7 })
+            {
+                rmChain.Points.Add(new UnityEngine.Vector3(g * 10f, 0f, 0f).ToGlobalPosition());
+                rmChain.PointGroups.Add(g);
+            }
+            rmChain.TargetAfter.Add(1); // позиция серии первой цели
+            rmChain.TargetAfter.Add(3); // и второй
+            rmChain.Index = 2;
+            GroundOrders.RemoveAtCore(rmChain, 0); // удаление ДО текущей
+            Check("Ядро удаления: точка до текущей — курсор и позиции целей сдвигаются",
+                rmChain.Points.Count == 3 && rmChain.Index == 1 &&
+                rmChain.TargetAfter[0] == 0 && rmChain.TargetAfter[1] == 2);
+            GroundOrders.RemoveAtCore(rmChain, 1); // удаление самой текущей
+            Check("Ядро удаления: текущая точка — курсор остаётся (указывает на следующую)",
+                rmChain.Points.Count == 2 && rmChain.Index == 1 && rmChain.PointGroups[1] == 7);
+            GroundOrders.RemoveAtCore(rmChain, 9);
+            Check("Ядро удаления: невалидный индекс — no-op",
+                rmChain.Points.Count == 2 && rmChain.Index == 1);
+
             // ---------- GroundOrders.FanBearingOffset: секторы полукруга атаки ----------
             Check("Полукруг: симметричный веер, центр без смещения",
                 UnityEngine.Mathf.Abs(GroundOrders.FanBearingOffset(0, 3, 30f, 480f) +
@@ -595,6 +836,114 @@ namespace SupremeNuclear.Tests
                     n == 1 && ax0 == 0f && ax1 == 10f && ay1 == 15f,
                     "n=" + n + " A=" + ax0 + "," + ay0 + "-" + ax1 + "," + ay1);
             }
+
+            // ---------- RangeRings: сетка высот рельефа (ключ ячейки, билинейная) ----------
+            {
+                long a = RangeRings.CellKey(25f, 25f);   // ячейка (0,0): 0..40 по обеим осям
+                long b = RangeRings.CellKey(39f, 1f);    // та же ячейка
+                long c = RangeRings.CellKey(41f, 25f);   // соседняя по x
+                long d = RangeRings.CellKey(25f, -5f);   // соседняя по z (отрицательная)
+                long e = RangeRings.CellKey(-5f, -5f);   // отрицательная по обеим
+                Check("Высоты: ключ ячейки одинаков внутри, различен между (вкл. отрицательные)",
+                    a == b && a != c && a != d && c != d && d != e && e != a, "");
+                Check("Высоты: билинейная — углы дают свои высоты, центр — среднее",
+                    UnityEngine.Mathf.Abs(RangeRings.Bilinear(0f, 0f, 0f, 0f, 0.7f, 0.3f)) < 1e-6f &&
+                    UnityEngine.Mathf.Abs(RangeRings.Bilinear(0f, 40f, 0f, 40f, 1f, 0.5f) - 40f) < 1e-6f &&
+                    UnityEngine.Mathf.Abs(RangeRings.Bilinear(0f, 0f, 20f, 40f, 0.5f, 0.5f) - 15f) < 1e-6f,
+                    "");
+            }
+
+            // ---------- Util.OneEuro: адаптивный фильтр курсора пининга ----------
+            var euro = new Util.OneEuro();
+            float edt = 1f / 60f;
+            Check("OneEuro: первый вызов проходит без сглаживания",
+                euro.Filter(new UnityEngine.Vector2(5f, 7f), edt) == new UnityEngine.Vector2(5f, 7f));
+
+            // Дрожь сенсора в покое: курсор мечется 0↔1 px — выход почти неподвижен
+            // (меряем установившийся размах после прогрева, не выход на середину).
+            var euroNoise = new Util.OneEuro();
+            for (int i = 0; i < 240; i++)
+                euroNoise.Filter(new UnityEngine.Vector2(i % 2, 0f), edt);
+            float outMin = 1f, outMax = 0f;
+            for (int i = 0; i < 60; i++)
+            {
+                float x = euroNoise.Filter(new UnityEngine.Vector2(i % 2, 0f), edt).x;
+                outMin = UnityEngine.Mathf.Min(outMin, x);
+                outMax = UnityEngine.Mathf.Max(outMax, x);
+            }
+            Check("OneEuro: дрожь ±1 px в покое гасится (размах выхода < 0.3 px)",
+                outMax - outMin < 0.3f, $"размах {(outMax - outMin):F2}");
+
+            // Равномерное движение 600 px/s: фильтр ведёт курсор с малым лагом.
+            var euro2 = new Util.OneEuro();
+            float lag = 0f;
+            for (int i = 1; i <= 90; i++)
+            {
+                float target = 600f * edt * i;
+                lag = UnityEngine.Mathf.Max(lag, target - euro2.Filter(new UnityEngine.Vector2(target, 0f), edt).x);
+            }
+            Check("OneEuro: равномерное движение — установившийся лаг < 30 px", lag < 30f, $"лаг {lag:F1}");
+
+            // Скачок 0→200 px: сходится за ~0.2 с.
+            var euro3 = new Util.OneEuro();
+            euro3.Filter(UnityEngine.Vector2.zero, edt);
+            for (int i = 0; i < 11; i++)
+                euro3.Filter(new UnityEngine.Vector2(200f, 0f), edt);
+            Check("OneEuro: скачок 200 px — за 12 кадров больше 150", euro3.Value.x > 150f, $"x {euro3.Value.x:F0}");
+
+            // dt <= 0: значение не меняется (старое, не NaN).
+            Check("OneEuro: dt=0 держит прошлое значение",
+                euro3.Filter(new UnityEngine.Vector2(999f, 0f), 0f).x == euro3.Value.x);
+
+            // ---------- Util.CatmullRom / TrailPointAt: сплайн следа сопровождения ----------
+            var pA = new UnityEngine.Vector3(0f, 0f, 0f);
+            var pB = new UnityEngine.Vector3(10f, 0f, 0f);
+            var pC = new UnityEngine.Vector3(20f, 0f, 0f);
+            var pD = new UnityEngine.Vector3(30f, 0f, 0f);
+            Check("CatmullRom: t=0 — p1, t=1 — p2 (с клампом p3)",
+                (Util.CatmullRom(pA, pB, pC, pC, 0f) - pB).magnitude < 1e-4f &&
+                (Util.CatmullRom(pA, pB, pC, pC, 1f) - pC).magnitude < 1e-4f);
+            var mid = Util.CatmullRom(pA, pB, pC, pD, 0.5f);
+            Check("CatmullRom: равномерные коллинеарные точки — середина на прямой (x=15)",
+                UnityEngine.Mathf.Abs(mid.x - 15f) < 1e-3f && UnityEngine.Mathf.Abs(mid.z) < 1e-3f);
+
+            // Прямой след вдоль +X (heading = atan2(1,0) = π/2): точки через 25 м,
+            // tail — живая позиция цели ещё на 25 дальше.
+            var trail = new List<UnityEngine.Vector3>
+            {
+                new UnityEngine.Vector3(0f, 0f, 0f),
+                new UnityEngine.Vector3(25f, 0f, 0f),
+                new UnityEngine.Vector3(50f, 0f, 0f),
+                new UnityEngine.Vector3(75f, 0f, 0f)
+            };
+            var tailPos = new UnityEngine.Vector3(100f, 0f, 0f);
+            bool okTrail = Util.TrailPointAt(trail, tailPos, 30f, out var at30, out float head30);
+            Check("TrailPointAt: прямой след — точка в 30 м позади tail (x≈70)",
+                okTrail && UnityEngine.Mathf.Abs(at30.x - 70f) < 1e-3f && UnityEngine.Mathf.Abs(at30.z) < 1e-3f,
+                $"x {at30.x:F2}");
+            Check("TrailPointAt: курс следа вдоль +X — heading = π/2",
+                UnityEngine.Mathf.Abs(UnityEngine.Mathf.DeltaAngle(
+                    head30 * UnityEngine.Mathf.Rad2Deg, 90f)) < 0.5f,
+                $"{head30:F3}");
+            Check("TrailPointAt: arcBehind=0 — сама цель (tail)",
+                Util.TrailPointAt(trail, tailPos, 0f, out var at0, out _) &&
+                (at0 - tailPos).magnitude < 0.1f);
+            Check("TrailPointAt: дуга больше следа — false (деградация в кольцо)",
+                !Util.TrailPointAt(trail, tailPos, 200f, out _, out _));
+            Check("TrailPointAt: пустой след — false",
+                !Util.TrailPointAt(new List<UnityEngine.Vector3>(), tailPos, 10f, out _, out _));
+            // Поворот следа: 75 м вдоль +X, дальше цель ушла на +Z — якорь ДО
+            // поворота остаётся на прямой части (x≈35 при 40 м дуги), якорь ЗА
+            // поворотом сходит на вертикальную ногу (сплайн срезает угол изнутри).
+            var turn = new UnityEngine.Vector3(75f, 0f, 0f);
+            Check("TrailPointAt: до поворота — точка на прямой части следа",
+                Util.TrailPointAt(trail, turn, 40f, out var atTurn, out _) &&
+                UnityEngine.Mathf.Abs(atTurn.x - 35f) < 1e-3f && UnityEngine.Mathf.Abs(atTurn.z) < 1e-3f);
+            var tailTurn = new UnityEngine.Vector3(75f, 0f, 40f);
+            Check("TrailPointAt: за поворотом — сходит на новую ногу (z растёт, x у угла)",
+                Util.TrailPointAt(trail, tailTurn, 10f, out var atAfter, out _) &&
+                atAfter.z > 10f && atAfter.z < 40f && UnityEngine.Mathf.Abs(atAfter.x - 75f) < 1f,
+                $"({atAfter.x:F1}, {atAfter.z:F1})");
 
             Console.WriteLine(_failed == 0 ? "ВСЕ ТЕСТЫ ПРОЙДЕНЫ" : "ПРОВАЛОВ: " + _failed);
             return _failed == 0 ? 0 : 1;

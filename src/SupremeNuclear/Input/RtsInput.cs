@@ -12,6 +12,15 @@ namespace SupremeNuclear
         public static bool PointerOverUi =>
             EventSystem.current != null && EventSystem.current.IsPointerOverGameObject();
 
+        /// <summary>Колесо съедено UI в этом кадре (SupcomUi: цикл лодаута над
+        /// плиткой каталога) — зум камеры подавляет себя (Update UI идёт ДО
+        /// LateUpdate камеры, флаг одноразовый, сбрасывается каждым кадром UI).</summary>
+        public static bool WheelConsumedByUi;
+
+        /// <summary>СКМ съедена UI в этом кадре (открытие редактора лодаута над
+        /// плиткой каталога) — камера не начинает панорамирование/тап-центрирование.</summary>
+        public static bool MiddleConsumedByUi;
+
         public static Vector3 MousePos => Input.mousePosition;
 
         public static float Wheel => Input.GetAxis("Mouse ScrollWheel");

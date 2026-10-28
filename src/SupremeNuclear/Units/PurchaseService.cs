@@ -33,19 +33,28 @@ namespace SupremeNuclear
                 return;
             if (!GameApi.TryGetLocalHQ(out FactionHQ local) || airbase.CurrentHQ != local)
             {
-                CommanderHud.Notice("Аэродром не наш — выкат невозможен");
+                CommanderHud.Notice(Loc.Tr("Аэродром не наш — выкат невозможен"));
                 return;
             }
             if (!airbase.CanSpawnAircraft(definition))
             {
-                CommanderHud.Notice("Ангары заняты — выкат невозможен");
+                CommanderHud.Notice(Loc.Tr("Ангары заняты — выкат невозможен"));
                 return;
             }
             if (!AirbaseReserve.TryTake(airbase, definition))
                 return;
+            // Липкий выбор лодаута игрока (колесо по каталогу); нелегальный на этом
+            // аэродроме пресет — «Стандарт» (тот же путь, что у позиций очереди).
+            Loadout lo = ProductionTasks.SelectedLoadout(definition, out float fuel);
+            if (!ProductionTasks.LoadoutAllowed(definition, lo, local))
+            {
+                lo = null;
+                fuel = 1f;
+            }
             int livery = definition.aircraftParameters.GetRandomLiveryForFaction(local.faction);
-            airbase.TrySpawnAircraft(null, definition, new LiveryKey(livery), new Loadout(), 1f);
-            CommanderHud.Notice($"{definition.unitName}: выкат из резерва");
+            airbase.TrySpawnAircraft(null, definition, new LiveryKey(livery),
+                lo != null ? lo : new Loadout(), fuel);
+            CommanderHud.Notice(Loc.F("{0}: выкат из резерва", definition.unitName));
         }
     }
 }

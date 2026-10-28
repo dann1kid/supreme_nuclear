@@ -103,7 +103,7 @@ namespace SupremeNuclear
                 positions.Add(entry.pos);
             List<Vector2> offsets = ComputeOffsets(positions);
 
-            var template = new Template { name = "Шаблон " + (_all.Count + 1) };
+            var template = new Template { name = Loc.F("Шаблон {0}", _all.Count + 1) };
             string bestKey = set[0].key;
             float bestValue = float.MinValue;
             for (int i = 0; i < set.Count; i++)
@@ -155,13 +155,15 @@ namespace SupremeNuclear
                     skipped++;
                     continue;
                 }
+                // Весь набор дописывается в очередь КАЖДОГО инженера пачки (SupCom):
+                // группа едет вместе и строит здания шаблона по очереди.
                 if (BuildTasks.Place(def, site, PendingTemplate.engineers, hq))
                     placed++;
                 else
                     skipped++;
             }
-            CommanderHud.Notice(PendingTemplate.template.name + ": площадок " + placed +
-                                (skipped > 0 ? ", пропущено " + skipped : ""));
+            CommanderHud.Notice(Loc.F("{0}: площадок {1}{2}", PendingTemplate.template.name, placed,
+                skipped > 0 ? Loc.F(", пропущено {0}", skipped) : ""));
             Log.Info("Templates: размещён '" + PendingTemplate.template.name + "' — " + placed +
                      " поставлено, " + skipped + " пропущено");
             return placed;
@@ -170,7 +172,7 @@ namespace SupremeNuclear
         public static Template Capture(object factory)
         {
             EnsureLoaded();
-            var template = new Template { name = "Шаблон " + (_all.Count + 1) };
+            var template = new Template { name = Loc.F("Шаблон {0}", _all.Count + 1) };
             foreach (ProductionTasks.QueueItem item in ProductionTasks.All)
             {
                 if (item.Factory != factory || item.UnitDef == null)
@@ -245,7 +247,10 @@ namespace SupremeNuclear
                     if (def is VehicleDefinition vd && factory is VehicleDepot depot)
                         ProductionTasks.EnqueueGround(depot, vd);
                     else if (def is AircraftDefinition ad && factory is Airbase airbase)
-                        ProductionTasks.EnqueueAir(airbase, ad);
+                    {
+                        if (!ProductionTasks.EnqueueAirDistributed(airbase, ad))
+                            break;
+                    }
                     else
                         break; // тип фабрики не подходит под позицию
                     enqueued++;

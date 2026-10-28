@@ -113,12 +113,53 @@ namespace SupremeNuclear
             return false;
         }
 
+        // Кэш высот на КАДР: отрисовка маршрутов спрашивает GroundY сотнями вызовов
+        // за кадр (координаты вейпоинтов повторяются между проходами наземки/авиации
+        // и событиями OnGUI), а это физлуч с 9 км — при большом числе вейпоинтов кадр
+        // проседал. Рельеф внутри кадра не меняется; ключ — ячейка 0.125 м.
+        private static readonly Dictionary<long, float> _groundYCache = new Dictionary<long, float>();
+        private static int _groundYFrame = -1;
+
         public static float GroundY(float x, float z)
         {
+            int frame = Time.frameCount;
+            if (_groundYFrame != frame)
+            {
+                _groundYFrame = frame;
+                _groundYCache.Clear();
+            }
+            long key = ((long)Mathf.RoundToInt(x * 8f) << 32) | (uint)Mathf.RoundToInt(z * 8f);
+            if (_groundYCache.TryGetValue(key, out float cached))
+                return cached;
             var origin = new Vector3(x, 9000f, z);
-            if (Physics.Linecast(origin, new Vector3(x, -9000f, z), out var hit, PhysicsLayers.StaticsMask))
-                return hit.point.y;
-            return Datum.LocalSeaY;
+            float y = Physics.Linecast(origin, new Vector3(x, -9000f, z), out var hit,
+                PhysicsLayers.StaticsMask)
+                ? hit.point.y
+                : Datum.LocalSeaY;
+            _groundYCache[key] = y;
+            return y;
+        }
+
+        private static readonly RaycastHit[] _groundNoUnitHits = new RaycastHit[32];
+
+        /// <summary>Высота земли БЕЗ юнитов: коллайдеры зданий тоже ловят
+        /// StaticsMask-луч GroundY (крыша ангара становилась «рельефом» — плита
+        /// выезда ложилась на крышу). Берём верхний хит, не принадлежащий юниту.</summary>
+        public static float GroundYNoUnits(float x, float z)
+        {
+            var ray = new Ray(new Vector3(x, 9000f, z), Vector3.down);
+            int n = Physics.RaycastNonAlloc(ray, _groundNoUnitHits, 18000f,
+                PhysicsLayers.StaticsMask);
+            float best = float.MinValue;
+            for (int i = 0; i < n; i++)
+            {
+                Collider c = _groundNoUnitHits[i].collider;
+                if (c == null || c.GetComponentInParent<Unit>() != null)
+                    continue;
+                if (_groundNoUnitHits[i].point.y > best)
+                    best = _groundNoUnitHits[i].point.y;
+            }
+            return best > float.MinValue ? best : GroundY(x, z);
         }
 
         public static float CameraFloorY(Vector3 pos) =>
@@ -323,9 +364,15 @@ namespace SupremeNuclear
         }
 
         /// <summary>Инженер v1 — грузовик или игровой аналог инженера по имени
-        /// (Jackknife): строит здания (DESIGN §2.3; модовые определения юнитов — позже).</summary>
+        /// (Jackknife): строит здания (DESIGN §2.3; модовые определения юнитов — позже).
+        /// Морской инженер (v0.96): десантный катер LC — единственный нативный
+        /// ховер-амфибия (AirCushion), сам ходит к водным площадкам по seaLanes,
+        /// без костылей плавучести; строит верфи и будущие морские постройки.</summary>
         public static bool IsEngineer(Unit unit)
         {
+            if (unit is Ship && unit.definition is ShipDefinition sea &&
+                sea.shipType == ShipType.LC)
+                return true;
             if (!(unit is GroundVehicle) || !(unit.definition is VehicleDefinition vd))
                 return false;
             if (vd.vehicleType == VehicleType.TRUCK)
@@ -333,6 +380,13 @@ namespace SupremeNuclear
             string name = vd.unitName ?? vd.jsonKey ?? "";
             return name.ToLowerInvariant().Contains("jack");
         }
+
+        /// <summary>Вертолётное семейство (вертолёты/тильтвинги): свой автопилот
+        /// (AutopilotHelo/AutopilotTiltwing) — высота всегда AGL с огибанием
+        /// рельефа, скоростные режимы неприменимы (DESIGN §2.11a). Используется
+        /// контекстностью командной панели и рулением.</summary>
+        public static bool IsHeloFamily(Aircraft a) =>
+            a != null && (a.autopilot is AutopilotHelo || a.autopilot is AutopilotTiltwing);
         // Связь аэродром→его здание-юнит: нужна для развед-гейта ромбов/миникарты
         // (сам Airbase не Unit, трекается именно здание). Скан редкий, кэш 2 с.
         private static readonly Dictionary<Airbase, Building> _airbaseBuildings =

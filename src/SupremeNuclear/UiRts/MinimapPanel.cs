@@ -201,7 +201,7 @@ namespace SupremeNuclear
                     Mathf.Max(12f, canvasRect.height - size - 12f));
             }
 
-            _window = FloatingWindow.Create(canvas.transform, font, "Карта", pos, new Vector2(size, size), SaveState);
+            _window = FloatingWindow.Create(canvas.transform, font, Loc.Tr("Карта"), pos, new Vector2(size, size), SaveState);
             // Позиция (сохранённая или дефолт) могла считаться по другому размеру канваса
             // (физические пиксели до CanvasScaler) — сразу держим окно целиком на канвасе.
             _window.ClampToParent();
@@ -254,7 +254,7 @@ namespace SupremeNuclear
             var lbl = lblGo.AddComponent<Text>();
             if (font != null)
                 lbl.font = font;
-            lbl.text = "Рельеф: …";
+            lbl.text = Loc.Tr("Рельеф: …");
             lbl.fontSize = 13;
             lbl.color = UiKit.TextDim;
             lbl.alignment = TextAnchor.MiddleCenter;
@@ -264,7 +264,7 @@ namespace SupremeNuclear
             // Кольца дальности выделенных юнитов (SupCom): четыре чипа в НИЖНЕЙ
             // строке полоски, каждый на четверть ширины (влезают при любом размере
             // окна); цвет чипа = цвет колец (легенда). Клик — вкл/выкл класс.
-            string[] rangeNames = { "Назем", "Воздух", "Разведка", "Стройка" };
+            string[] rangeNames = { Loc.Tr("Назем"), Loc.Tr("Воздух"), Loc.Tr("Разведка"), Loc.Tr("Стройка") };
             for (int ri = 0; ri < rangeNames.Length; ri++)
             {
                 int kind = ri;
@@ -321,7 +321,7 @@ namespace SupremeNuclear
             var wLbl = wlblGo.AddComponent<Text>();
             if (font != null)
                 wLbl.font = font;
-            wLbl.text = "Оружие";
+            wLbl.text = Loc.Tr("Оружие");
             wLbl.fontSize = 12;
             wLbl.alignment = TextAnchor.MiddleCenter;
             wLbl.raycastTarget = false;
@@ -926,11 +926,11 @@ namespace SupremeNuclear
             if (_reliefLabel == null)
                 return;
             if (!Settings.MinimapRelief)
-                _reliefLabel.text = "Рельеф: выкл";
+                _reliefLabel.text = Loc.Tr("Рельеф: выкл");
             else if (_reliefTexture == null)
-                _reliefLabel.text = "Рельеф: карта " + (_reliefSampled * 100 / (ReliefN * ReliefN)) + "%";
+                _reliefLabel.text = Loc.F("Рельеф: карта {0}%", _reliefSampled * 100 / (ReliefN * ReliefN));
             else
-                _reliefLabel.text = "Рельеф: вкл";
+                _reliefLabel.text = Loc.Tr("Рельеф: вкл");
         }
 
         private void OnMapClick(bool rightButton, Vector2 local)
@@ -941,6 +941,10 @@ namespace SupremeNuclear
             Vector3 world = LocalToWorld(local);
             if (rightButton)
             {
+                // Ctrl+Shift+ПКМ — только удаление вейпоинтов (мировой экран);
+                // миникарта вейпоинты не сканирует — клик гасим, приказов не выдаём.
+                if (RtsInput.Ctrl && RtsInput.Shift)
+                    return;
                 controller.MoveOrders.IssueAtWorld(world);
             }
             else

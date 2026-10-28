@@ -38,7 +38,7 @@ namespace SupremeNuclear
                 return true;
             if (!AircraftOrders.TryGetDestination(aircraft, aircraft.transform.position,
                     out GlobalPosition destination, out AirOrderMode mode, out bool followTerrain,
-                    out Unit attackTarget, out _, out SpeedMode speed))
+                    out Unit attackTarget, out float altitudeAgl, out SpeedMode speed))
                 return true; // приказа нет — штатное поведение
 
             // Пока план жив — таймер «без цели» не тикает (иначе AI уйдёт на возврат
@@ -64,6 +64,15 @@ namespace SupremeNuclear
             {
                 return true; // attack-move: рядом враг, руление у боевого AI, после боя продолжим план
             }
+            else if (mode == AirOrderMode.Escort &&
+                     AircraftOrders.EnemyNearby(aircraft, aircraft.NetworkHQ,
+                         AircraftOrders.EngageRadius(aircraft)))
+            {
+                // Сопровождение: враг В ДАЛЬНОСТИ ВООРУЖЕНИЯ — нативный бой (борта не
+                // уводит за собой через полкарты, только то, что достаёт отсюда);
+                // после боя следование продолжится этим же префиксом.
+                return true;
+            }
 
             // Залп (Salvo): нативный бой НЕ включаем — рулит мод, пуски делает SalvoService.
             // Режим «Ловушки»: маршрут держим, контрмеры сбрасываем по интервалу.
@@ -75,6 +84,10 @@ namespace SupremeNuclear
 
             if (aircraft.autopilot != null)
             {
+                // Высота: огибающие профили (Сверхнизко/Низко) — AGL, игровой
+                // TerrainWaypoint кладёт altitudeHold НАД рельефом впереди (мировая
+                // Y точки годилась только на плоской карте); «Средне/Высоко» —
+                // мировая Y точки, как раньше.
                 aircraft.autopilot.AutoAim(
                     destination,
                     aimVelocity: true,
@@ -83,7 +96,7 @@ namespace SupremeNuclear
                     effort: 0.75f,
                     bankAllowed: 120f,
                     followTerrain: followTerrain,
-                    altitudeHold: destination.ToLocalPosition().y,
+                    altitudeHold: followTerrain ? altitudeAgl : destination.ToLocalPosition().y,
                     targetVelocity: Vector3.zero);
             }
             return false;

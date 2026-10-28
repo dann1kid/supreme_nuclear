@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using NuclearOption.SavedMission;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
@@ -35,8 +36,10 @@ namespace SupremeNuclear
         private Text _incomeText;
         private Text _extractorsText;
 
-        // Панель свойств выделения (левая колонка над ростером).
+        // Панель свойств выделения (левая колонка над ростером). При наведении
+        // на плитку закупки переключается на карточку определения (SupCom).
         private RectTransform _infoPanel;
+        private Text _infoZoneHdr;   // «ВЫДЕЛЕНИЕ» / «ЗАКУПКА» (ховер плитки каталога)
         private Text _infoTitle;
         private Text _infoClass;
         private RectTransform _infoHpFill;
@@ -63,6 +66,9 @@ namespace SupremeNuclear
         private Text _ordersHdr;
         /// <summary>Сетка команд (верх двигается под подсказку/заголовок).</summary>
         private RectTransform _cmdGrid;
+        /// <summary>Индексы ракетных станций чипов залпа (параллельно кнопкам st_*,
+        /// v0.92: чипы только ракетным станциям — бомбовым/пушечным залп нечем).</summary>
+        private readonly List<int> _chipStations = new();
         /// <summary>Число рядов/наличие гейтов последней сборки кнопок — для раскладки.</summary>
         private int _cmdRows;
         private bool _cmdGates;
@@ -95,7 +101,9 @@ namespace SupremeNuclear
         private Button _cycleBtn;
         private Button _tplBtn;              // снять очередь фабрики в персистентный шаблон
         private VehicleDepot _ctxDepot;      // фабрика, к которой относятся Пауза/Цикл
+        private Building _ctxDock;           // ...верфь (флот, v0.92)
         private Airbase _ctxAirbase;         // ...или аэродром
+        private Hangar _ctxHangar;           // ...или одиночный ангар (индивидуальная фабрия)
         private RectTransform _tierRoot;     // полоса выбора пула (тиры каталога)
         private readonly (Button btn, Image img, int tier)[] _tierButtons =
             new (Button, Image, int)[4];     // Все / T1 / T2 / T3
@@ -109,18 +117,51 @@ namespace SupremeNuclear
         private float _nextRefresh;
         private bool _loggedActiveOnce;
 
-        // Hover-инфоокно плиток (каталог/очереди/ростер): карточка определения юнита
-        // у курсора. Плитки регистрируются в Tile, опрос — UpdateTileHover
-        // (без uGUI-событий: игровой input-модуль их не доставляет, правило №18).
-        private RectTransform _tipRoot;
-        private Text _tipTitle;
-        private Text _tipClass;
-        private Text _tipDesc;
-        private UnitDefinition _tipDef;       // что показано (кэш текста)
-        private UnitDefinition _hoverDef;     // что под курсором сейчас
-        private float _hoverSince;
-        private readonly List<(RectTransform tile, RectTransform viewport, UnitDefinition def)> _tipTiles = new();
-        private const float TipDelaySec = 0.35f; // задержка появления, с
+        // Наведение на плитку закупки (каталог/очередь/ростер): опрос плиток под
+        // курсором — UpdateTileHover (без uGUI-событий: игровой input-модуль их
+        // не доставляет, правило №18). Панель свойств выделения (лево-низ)
+        // переключается на карточку ОПРЕДЕЛЕНИЯ МГНОВЕННО (v0.87.0 по плейтесту:
+        // задержка 0.35 с рвала решение; панельная схема не мигает при проводе
+        // курсора) — как в SupCom: имя,
+        // класс/цена/время и ТТХ в самой панели, описание — в отдельном окне
+        // «ОПИСАНИЕ» под ней. Плитки регистрируются в Tile.
+        private UnitDefinition _hoverShow;     // что показано панелью (null = выделение)
+        private readonly List<(RectTransform tile, RectTransform viewport, UnitDefinition def, bool wheel)> _tipTiles = new();
+        private const int DefMaxWeaponRows = 8;  // строки вооружения в панели, дальше «+ ещё N»
+        private const int DefMaxDescLines = 10;  // строки описания в окне «ОПИСАНИЕ»
+        private const float DescTextWidth = 398f; // внутренняя ширина текста описания
+        private const float DescLineH = 15f;     // строка переноса описания 12pt
+
+        /// <summary>Окно «ОПИСАНИЕ» (второе окно карточки закупки, SupCom-раскладка):
+        /// между панелью свойств и командной картой; виден только при наведении.</summary>
+        private RectTransform _descPanel;
+        private Text _descText;
+        private float _descHeight;             // высота под контент (ApplyCommandLayout)
+
+        /// <summary>Окно «ОСНАЩЕНИЕ» — редактор лодаута (СКМ по плитке каталога
+        /// авиации): пресеты/топливо/станции с циклом, правки = пресет «Свой».
+        /// Контент перестраивается целиком (клики/колесо — через LoadoutsVersion).</summary>
+        private FloatingWindow _loWin;
+        private AircraftDefinition _loDef;
+        private int _loVersion = -1;
+
+        /// <summary>Кэш рассчитанной карточки по определению (определения immutable,
+        /// обход префаба — один раз; ключ включает индекс лодаута — колесо пересчитывает
+        /// вооружение; словарь instance — переживает сцены честно).</summary>
+        private readonly Dictionary<(UnitDefinition def, int loadout), TipContent> _tipContent = new();
+
+        /// <summary>Рассчитанный контент карточки определения (SupCom-инфо):
+        /// строки для панели свойств и окна описания — считается один раз.</summary>
+        private sealed class TipContent
+        {
+            public string Title;
+            public string ClassLine;   // класс/роль · цена · время
+            public string LoadoutLine; // «лодаут: …» — только у авиации с выбором
+            public readonly List<string> StatRows = new(); // ТТХ: факт-на-строку, без обрезок
+            public readonly List<string> Weapons = new();
+            public string Desc;        // подрезанная под DefMaxDescLines
+            public int DescLines;
+        }
 
         /// <summary>Лимиты однострочных полей инфопанели (ширина ~410 px): заголовок —
         /// шрифт 16, строки — 12; длиннее — «…» (Util.FitLine). Перенос запрещён
@@ -145,6 +186,7 @@ namespace SupremeNuclear
             BuildSafe("canvas", BuildCanvas);
             BuildSafe("topbar", BuildTopBar);
             BuildSafe("info", BuildSelectionInfo);
+            BuildSafe("defdesc", BuildDefDesc);
             BuildSafe("commandcard", BuildCommandCard);
             BuildSafe("tabs", BuildTabPanel);
             Log.Info("SupcomUi: построен, canvas=" + (_canvas != null));
@@ -182,12 +224,16 @@ namespace SupremeNuclear
 
         private void UpdateSafe()
         {
+            RtsInput.WheelConsumedByUi = false;   // одноразовые флаги кадра (камера)
+            RtsInput.MiddleConsumedByUi = false;
             EnsureUi(); // канвас мог быть уничтожен сменой сцены — пересобираем лениво
             if (_canvas == null)
                 return;
 
             // Нижние панели — КОНТЕКТ выделения: без выделения всё низ экрана свободен
-            // (экономика сверху остаётся всегда). Осмотр чужой цели — тоже контекст.
+            // (экономика сверху остаётся всегда). Осмотр чужой цели/ракеты — контекст
+            // ТОЛЬКО карточки свойств (разведкарточка): приказы чужим не выдаются,
+            // командная карта и лента каталога при чистом осмотре не открываются.
             var ctxController = CommanderModeController.Instance;
             bool contextVisible = ctxController != null && ctxController.IsActive &&
                 (ctxController.Selection.Selected.Count > 0 ||
@@ -196,19 +242,30 @@ namespace SupremeNuclear
                  BuildTasks.Pending != null ||
                  OrderTemplates.PendingTemplate.template != null ||
                  BuildTasks.SelectedTask != null);
+            bool inspectOnly = contextVisible &&
+                ctxController.Selection.Selected.Count == 0 &&
+                ctxController.Selection.SelectedAirbase == null &&
+                ctxController.Selection.Inspected != null &&
+                BuildTasks.Pending == null &&
+                OrderTemplates.PendingTemplate.template == null &&
+                BuildTasks.SelectedTask == null;
+            bool commandsVisible = contextVisible && !inspectOnly;
             if (_infoPanel != null && _infoPanel.gameObject.activeSelf != contextVisible)
                 _infoPanel.gameObject.SetActive(contextVisible);
-            if (_commandPanel != null && _commandPanel.gameObject.activeSelf != contextVisible)
-                _commandPanel.gameObject.SetActive(contextVisible);
-            if (_tabPanel != null && _tabPanel.gameObject.activeSelf != contextVisible)
-                _tabPanel.gameObject.SetActive(contextVisible);
+            if (_commandPanel != null && _commandPanel.gameObject.activeSelf != commandsVisible)
+            {
+                _commandPanel.gameObject.SetActive(commandsVisible);
+                ApplyCommandLayout(); // стек левой колонки опирается на карточку приказов
+            }
+            if (_tabPanel != null && _tabPanel.gameObject.activeSelf != commandsVisible)
+                _tabPanel.gameObject.SetActive(commandsVisible);
 
-            // Каждый кадр (не по таймеру): тултип бегает за мышью и появляется
-            // без задержки опроса; сами панели обновляются реже ниже.
+            // Каждый кадр (не по таймеру): наведение на плитку закупки без задержки
+            // опроса; сами панели обновляются реже ниже (смена ховера форсит рефреш).
             if (ctxController != null && ctxController.IsActive)
                 UpdateTileHover();
             else
-                HideTip();
+                ResetHover();
 
             if (Time.unscaledTime < _nextRefresh)
                 return;
@@ -237,17 +294,16 @@ namespace SupremeNuclear
             _incomeText = null;
             _extractorsText = null;
             _modeHint = null;
-            _tipRoot = null;
-            _tipTitle = null;
-            _tipClass = null;
-            _tipDesc = null;
-            _tipDef = null;
-            _hoverDef = null;
+            _infoZoneHdr = null;
+            _descPanel = null;
+            _descText = null;
+            _hoverShow = null;
             _tipTiles.Clear();
 
             BuildSafe("canvas", BuildCanvas);
             BuildSafe("topbar", BuildTopBar);
             BuildSafe("info", BuildSelectionInfo);
+            BuildSafe("defdesc", BuildDefDesc);
             BuildSafe("commandcard", BuildCommandCard);
             BuildSafe("tabs", BuildTabPanel);
             Log.Info("SupcomUi: (re)built, canvas=" + (_canvas != null));
@@ -350,14 +406,14 @@ namespace SupremeNuclear
             rtF.offsetMin = new Vector2(14f, 0f);
             rtF.offsetMax = Vector2.zero;
 
-            _incomeText = Label(bar, "income", "+0/мин", 17, TextMain, TextAnchor.MiddleLeft);
+            _incomeText = Label(bar, "income", Loc.Tr("+0/мин"), 17, TextMain, TextAnchor.MiddleLeft);
             var rtI = (RectTransform)_incomeText.transform;
             rtI.anchorMin = new Vector2(0.45f, 0.5f);
             rtI.anchorMax = new Vector2(1f, 1f);
             rtI.offsetMin = new Vector2(6f, 0f);
             rtI.offsetMax = new Vector2(-10f, 0f);
 
-            _extractorsText = Label(bar, "extractors", "экстракторы 0/0", 15, TextDim, TextAnchor.MiddleLeft);
+            _extractorsText = Label(bar, "extractors", Loc.Tr("экстракторы 0/0"), 15, TextDim, TextAnchor.MiddleLeft);
             var rtE = (RectTransform)_extractorsText.transform;
             rtE.anchorMin = new Vector2(0.45f, 0f);
             rtE.anchorMax = new Vector2(1f, 0.5f);
@@ -384,8 +440,9 @@ namespace SupremeNuclear
                 new Vector2(12f, 130f), new Vector2(430f, 232f), PanelBg);
             _infoPanel = panel;
 
-            var hdr = Label(panel, "hdr", "ВЫДЕЛЕНИЕ", 10, TextDim, TextAnchor.UpperLeft, true);
+            var hdr = Label(panel, "hdr", Loc.Tr("ВЫДЕЛЕНИЕ"), 10, TextDim, TextAnchor.UpperLeft, true);
             Row((RectTransform)hdr.transform, 2f, 14f);
+            _infoZoneHdr = hdr;
             _infoTitle = Label(panel, "title", "", 16, TextMain, TextAnchor.UpperLeft, true);
             Row((RectTransform)_infoTitle.transform, 15f, 31f);
             _infoClass = Label(panel, "class", "", 12, TextDim, TextAnchor.UpperLeft, true);
@@ -424,13 +481,43 @@ namespace SupremeNuclear
                 Row((RectTransform)_infoOrder[i].transform, 114f + 16f * i, 130f + 16f * i);
             }
 
-            _infoWeaponsHeader = Label(panel, "whdr", "Вооружение", 12, TextDim, TextAnchor.UpperLeft, true);
+            _infoWeaponsHeader = Label(panel, "whdr", Loc.Tr("Вооружение"), 12, TextDim, TextAnchor.UpperLeft, true);
             Row((RectTransform)_infoWeaponsHeader.transform, 166f, 180f);
             for (int i = 0; i < _infoWeapons.Length; i++)
             {
                 _infoWeapons[i] = Label(panel, "w" + i, "", 12, TextMain, TextAnchor.UpperLeft, true);
                 Row((RectTransform)_infoWeapons[i].transform, 180f + 16f * i, 196f + 16f * i);
             }
+        }
+
+        /// <summary>Окно «ОПИСАНИЕ» — второе окно карточки закупки (SupCom-раскладка):
+        /// многострочный перенос текста определения; виден только при наведении на
+        /// плитку закупки, высота под контент, позицию в стеке левой колонки
+        /// задаёт ApplyCommandLayout (командная карта → ОПИСАНИЕ → ВЫДЕЛЕНИЕ).</summary>
+        private void BuildDefDesc()
+        {
+            var panel = Panel("DefDesc", _canvas.transform,
+                new Vector2(0f, 0f), new Vector2(0f, 0f),
+                new Vector2(12f, 140f), new Vector2(430f, 240f), PanelBg);
+            _descPanel = panel;
+
+            var hdr = Label(panel, "hdr", Loc.Tr("ОПИСАНИЕ"), 10, TextDim, TextAnchor.UpperLeft, true);
+            Row((RectTransform)hdr.transform, 2f, 16f);
+
+            // Единственный многострочный текст левой колонки: перенос по ширине,
+            // по вертикали обрезается (длина уже подрезана расчётом строк).
+            _descText = Label(panel, "desc", "", 12, TextDim, TextAnchor.UpperLeft);
+            var rt = (RectTransform)_descText.transform;
+            rt.anchorMin = new Vector2(0f, 1f);
+            rt.anchorMax = new Vector2(1f, 1f);
+            rt.pivot = new Vector2(0.5f, 1f);
+            rt.offsetMin = new Vector2(12f, -200f);
+            rt.offsetMax = new Vector2(-8f, -18f);
+            _descText.horizontalOverflow = HorizontalWrapMode.Wrap;
+            _descText.verticalOverflow = VerticalWrapMode.Truncate;
+            _descText.raycastTarget = false;
+
+            panel.gameObject.SetActive(false);
         }
 
         /// <summary>Поточная раскладка тела инфопанели: АКТИВНЫЕ непустые строки
@@ -480,7 +567,7 @@ namespace SupremeNuclear
 
             // Заголовок секции приказов: помечает ЧТО за зона; когда подсказка
             // активного режима скрыта — поднимается к верхнему краю (без дыры).
-            _ordersHdr = Label(panel, "ordershdr", "ПРИКАЗЫ", 10, TextDim, TextAnchor.UpperLeft, true);
+            _ordersHdr = Label(panel, "ordershdr", Loc.Tr("ПРИКАЗЫ"), 10, TextDim, TextAnchor.UpperLeft, true);
             var rtO = (RectTransform)_ordersHdr.transform;
             rtO.anchorMin = new Vector2(0f, 1f);
             rtO.anchorMax = new Vector2(1f, 1f);
@@ -489,7 +576,7 @@ namespace SupremeNuclear
 
             // Заголовок секции гейтов — виден только с полосой (управляет активностью
             // BuildCommandButtons).
-            _gateHdr = Label(panel, "gatehdr", "РАЗРЕШЁННОЕ ВООРУЖЕНИЕ", 10, TextDim,
+            _gateHdr = Label(panel, "gatehdr", Loc.Tr("РАЗРЕШЁННОЕ ВООРУЖЕНИЕ"), 10, TextDim,
                 TextAnchor.UpperLeft, true);
             var rtG = (RectTransform)_gateHdr.transform;
             rtG.anchorMin = new Vector2(0f, 0f);
@@ -561,7 +648,7 @@ namespace SupremeNuclear
             vlayout.childForceExpandHeight = false;
             vlayout.childAlignment = TextAnchor.UpperCenter;
 
-            string[] glyphs = { "$", "#", "^", "Ш" };
+            string[] glyphs = { "$", "#", "^", Loc.Tr("Ш") };
             for (int i = 0; i < _tabButtons.Length; i++)
             {
                 int index = i;
@@ -595,7 +682,7 @@ step = "tiers";
             tlayout.childForceExpandWidth = false;
             tlayout.childForceExpandHeight = false;
             tlayout.childAlignment = TextAnchor.MiddleLeft;
-            string[] tiers = { "Все", "I", "II", "III" };
+            string[] tiers = { Loc.Tr("Все"), "I", "II", "III" };
             for (int i = 0; i < _tierButtons.Length; i++)
             {
                 int tier = i;
@@ -646,19 +733,19 @@ step = "arrows";
             ctxLayout.childControlHeight = false;
             ctxLayout.childForceExpandWidth = false;
             ctxLayout.childForceExpandHeight = false;
-            _pauseBtn = Button_(ctxGo.transform, "pause", "Пауза", () =>
+            _pauseBtn = Button_(ctxGo.transform, "pause", Loc.Tr("Пауза"), () =>
             {
                 if (CtxFactory() != null) ProductionTasks.TogglePause(CtxFactory());
             }, 10);
             ((RectTransform)_pauseBtn.transform).sizeDelta = new Vector2(60f, 26f);
             _pauseBtn.gameObject.AddComponent<LayoutElement>().minHeight = 26f;
-            _cycleBtn = Button_(ctxGo.transform, "cycle", "Цикл", () =>
+            _cycleBtn = Button_(ctxGo.transform, "cycle", Loc.Tr("Цикл"), () =>
             {
                 if (CtxFactory() != null) ProductionTasks.ToggleCycle(CtxFactory());
             }, 10);
             ((RectTransform)_cycleBtn.transform).sizeDelta = new Vector2(60f, 26f);
             _cycleBtn.gameObject.AddComponent<LayoutElement>().minHeight = 26f;
-            _tplBtn = Button_(ctxGo.transform, "tpl", "Шаблон+", () =>
+            _tplBtn = Button_(ctxGo.transform, "tpl", Loc.Tr("Шаблон+"), () =>
             {
                 var controller = CommanderModeController.Instance;
                 // На вкладке «Ш» приоритет — набор выделенных зданий, затем очереди.
@@ -688,8 +775,8 @@ step = "arrows";
                     tpl = set.Count > 0 ? OrderTemplates.CaptureBuildings(set) : null;
                 }
                 CommanderHud.Notice(tpl != null
-                    ? $"Шаблон сохранён: {tpl.name}"
-                    : "Нечего сохранять (набор/очередь пусты)");
+                    ? Loc.F("Шаблон сохранён: {0}", tpl.name)
+                    : Loc.Tr("Нечего сохранять (набор/очередь пусты)"));
             }, 10);
             ((RectTransform)_tplBtn.transform).sizeDelta = new Vector2(60f, 26f);
             _tplBtn.gameObject.AddComponent<LayoutElement>().minHeight = 26f;
@@ -702,8 +789,12 @@ step = "arrows";
             }
         }
 
-        /// <summary>Фабрика контекстных кнопок: депо или аэродром текущего выделения.</summary>
-        private object CtxFactory() => _ctxDepot != null ? (object)_ctxDepot : (object)_ctxAirbase;
+        /// <summary>Фабрика контекстных кнопок: верфь/депо/ангар/аэродром выделения.</summary>
+        private object CtxFactory() =>
+            _ctxDock != null ? (object)_ctxDock :
+            _ctxDepot != null ? (object)_ctxDepot :
+            _ctxHangar != null ? (object)_ctxHangar :
+            (object)_ctxAirbase;
 
         private void SwitchTier(int tier)
         {
@@ -760,10 +851,10 @@ step = "arrows";
                 return;
             _fundsText.text = $"{hq.factionFunds:F0}";
             float rate = EconomyService.Running ? EconomyService.IncomePerMinute(hq) : 0f;
-            _incomeText.text = $"+{rate:F0}/мин";
+            _incomeText.text = Loc.F("+{0}/мин", rate.ToString("F0"));
             _incomeText.color = rate > 0f ? TextMain : WarnRed;
             if (EconomyService.Running)
-                _extractorsText.text = $"экстракторы {EconomyService.OwnedExtractors(hq)}/{EconomyService.TotalExtractors} · T1-3";
+                _extractorsText.text = Loc.F("экстракторы {0}/{1} · T1-3", EconomyService.OwnedExtractors(hq), EconomyService.TotalExtractors);
         }
 
         /// <summary>Вкладка «Список»: плитки выделения по типам (15 в ряд, 3 ряда),
@@ -816,7 +907,7 @@ step = "arrows";
                 });
             }
 
-            _contextTitle.text = "Выбрано: " + selected.Count;
+            _contextTitle.text = Loc.F("Выбрано: {0}", selected.Count);
             _strip2.gameObject.SetActive(false); // строка заказа — с фабриками (этап B)
         }
 
@@ -837,6 +928,29 @@ step = "arrows";
                 return;
             var selected = controller.Selection.Selected;
 
+            // По умолчанию — режим выделения (ветки ниже переопределяют строки):
+            // заголовок зоны, видимость полосы HP (карточка закупки их прячет) и
+            // цвет строки состояния (строка лодаута подсвечивается акцентом).
+            if (_infoZoneHdr != null)
+                _infoZoneHdr.text = Loc.Tr("ВЫДЕЛЕНИЕ");
+            if (_infoHpFill != null && _infoHpFill.parent != null)
+                _infoHpFill.parent.gameObject.SetActive(true);
+            if (_infoHpTxt != null)
+                _infoHpTxt.gameObject.SetActive(true);
+            if (_infoState != null)
+                _infoState.color = TextDim;
+            if (_infoWeaponsHeader != null)
+                _infoWeaponsHeader.text = Loc.Tr("Вооружение");
+            UpdateDefDesc(null);
+
+            // Наведение на плитку закупки (SupCom): панель показывает карточку
+            // ОПРЕДЕЛЕНИЯ — приоритетнее выделения, пока курсор на плитке.
+            if (_hoverShow != null)
+            {
+                RefreshDefInfo(_hoverShow);
+                return;
+            }
+
             // Выделенный НЕДОСТРОЙ: как объект в SupCom — имя, прогресс, строители.
             if (selected.Count == 0 && BuildTasks.SelectedTask != null)
             {
@@ -844,14 +958,14 @@ step = "arrows";
                 if (t.Definition == null)
                     return;
                 _infoTitle.text = Util.FitLine(t.Definition.unitName, FitTitleChars);
-                _infoClass.text = Util.FitLine("недострой · " + t.Paid.ToString("F0") + "/" +
-                                  t.Cost.ToString("F0") + " · строителей " + t.Builders.Count, FitBodyChars);
+                _infoClass.text = Util.FitLine(Loc.F("недострой · {0}/{1} · строителей {2}",
+                t.Paid.ToString("F0"), t.Cost.ToString("F0"), t.Builders.Count), FitBodyChars);
                 UiKit.SetProgress(_infoHpFill, t.Progress01);
                 _infoHpTxt.text = t.Progress01.ToString("P0");
                 _infoFuelTrack.gameObject.SetActive(false);
                 _infoFuelTxt.gameObject.SetActive(false);
-                _infoMove.text = t.ZoneBlocked ? "зона не расчищена" : "идёт стройка";
-                _infoState.text = "ПКМ инженерами — достройка";
+                _infoMove.text = t.ZoneBlocked ? Loc.Tr("зона не расчищена") : Loc.Tr("идёт стройка");
+                _infoState.text = Loc.Tr("ПКМ инженерами — достройка");
                 _infoOrder[0].text = "";
                 _infoOrder[1].text = "";
                 _infoOrder[2].text = "";
@@ -901,6 +1015,86 @@ step = "arrows";
             FlowInfoBody(isAir);
         }
 
+        /// <summary>Карточка определения при наведении на плитку закупки (SupCom):
+        /// шапка — имя, класс/роль · цена · время; строка ТТХ; строка лодаута
+        /// (авиация с пресетами — выбор колесом, недоступный на текущем аэродроме
+        /// подписан, заказ уйдёт «Стандартом»); вооружение выбранного лодаута;
+        /// описание — в окне «ОПИСАНИЕ» под панелью. Контент определения посчитан
+        /// один раз на пару (определение, лодаут) и лежит в кэше.</summary>
+        private void RefreshDefInfo(UnitDefinition def)
+        {
+            var adef = def as AircraftDefinition;
+            int loadIdx = adef != null ? ProductionTasks.LoadoutIndexOf(adef) : 0;
+            TipContent c = GetTipContent(def, loadIdx);
+            if (_infoZoneHdr != null)
+                _infoZoneHdr.text = Loc.Tr("ЗАКУПКА");
+            _infoTitle.text = c.Title;
+            _infoClass.text = Util.FitLine(c.ClassLine, 60);
+            _infoHpFill.parent.gameObject.SetActive(false);
+            _infoHpTxt.gameObject.SetActive(false);
+            _infoFuelTrack.gameObject.SetActive(false);
+            _infoFuelTxt.gameObject.SetActive(false);
+            // ТТХ — факт-на-строку (движение/строки заказов панели переиспользуются
+            // под строки карточки; пустые гасятся поточной раскладкой).
+            _infoMove.text = StatRowOf(c, 0);
+            _infoOrder[0].text = StatRowOf(c, 1);
+            _infoOrder[1].text = StatRowOf(c, 2);
+            _infoOrder[2].text = "";
+            string loLine = c.LoadoutLine;
+            if (!string.IsNullOrEmpty(loLine) && adef != null && loadIdx > 0)
+            {
+                Loadout sel = ProductionTasks.SelectedLoadout(adef, out _);
+                if (sel != null && GameManager.GetLocalHQ(out FactionHQ hq) &&
+                    !ProductionTasks.LoadoutAllowed(adef, sel, hq))
+                    loLine += Loc.Tr(" · недоступен");
+            }
+            _infoState.text = Util.FitLine(loLine, 60);
+            // Строка лодаута — АКЦЕНТ: что выбирается колесом видно сразу,
+            // без чтения серых строк (подсветка выбора, плейтест v0.89).
+            if (_infoState != null)
+                _infoState.color = string.IsNullOrEmpty(c.LoadoutLine) ? TextDim : Accent;
+            for (int i = 0; i < _infoOrder.Length; i++)
+                _infoOrder[i].text = "";
+            _infoWeaponsHeader.gameObject.SetActive(c.Weapons.Count > 0);
+            _infoWeaponsHeader.text = loadIdx > 0 ? Loc.Tr("Вооружение лодаута") : Loc.Tr("Вооружение");
+            for (int i = 0; i < _infoWeapons.Length; i++)
+            {
+                bool show = i < c.Weapons.Count;
+                _infoWeapons[i].gameObject.SetActive(show);
+                if (show)
+                    _infoWeapons[i].text = Util.FitLine(c.Weapons[i], 60);
+            }
+            UpdateDefDesc(c);
+            FlowInfoBody(false);
+        }
+
+        /// <summary>Строка ТТХ карточки по номеру (пустая — за пределами фактов).</summary>
+        private static string StatRowOf(TipContent c, int i) =>
+            i < c.StatRows.Count ? c.StatRows[i] : "";
+
+        /// <summary>Окно «ОПИСАНИЕ» под панелью свойств: c=null/без описания —
+        /// скрыть. Высота окна под контент; позиции стека левой колонки
+        /// пересчитываются сразу (ApplyCommandLayout).</summary>
+        private void UpdateDefDesc(TipContent c)
+        {
+            if (_descPanel == null)
+                return;
+            bool show = c != null && c.DescLines > 0;
+            if (_descPanel.gameObject.activeSelf != show)
+                _descPanel.gameObject.SetActive(show);
+            if (!show)
+            {
+                _descHeight = 0f;
+                ApplyCommandLayout();
+                return;
+            }
+            _descText.text = c.Desc;
+            _descHeight = 18f + c.DescLines * DescLineH + 6f;
+            var rt = (RectTransform)_descText.transform;
+            rt.offsetMin = new Vector2(12f, -(18f + c.DescLines * DescLineH));
+            ApplyCommandLayout();
+        }
+
         private void RefreshSingleUnit(Unit u)
         {
             string defName = u.definition != null ? u.definition.unitName : "";
@@ -911,32 +1105,32 @@ step = "arrows";
 
             float hp = GameApi.HpFraction(u);
             UiKit.SetProgress(_infoHpFill, hp);
-            _infoHpTxt.text = hp >= 0.995f ? "HP цел" : $"HP {hp:P0}";
+            _infoHpTxt.text = hp >= 0.995f ? Loc.Tr("HP цел") : Loc.F("HP {0}", hp.ToString("P0"));
 
             float speedKmh = Mathf.Abs(u.speed) * 3.6f;
             if (u is Aircraft a)
             {
                 float fuel = a.GetFuelLevel();
                 UiKit.SetProgress(_infoFuelFill, fuel);
-                _infoFuelTxt.text = $"топливо {fuel:P0}";
-                _infoMove.text = Util.FitLine($"{speedKmh:F0} км/ч · {a.radarAlt:F0} м", FitBodyChars);
+                _infoFuelTxt.text = Loc.F("топливо {0}", fuel.ToString("P0"));
+                _infoMove.text = Util.FitLine(Loc.F("{0} км/ч · {1} м", speedKmh.ToString("F0"), a.radarAlt.ToString("F0")), FitBodyChars);
                 _infoState.text = Util.FitLine(a.pilots != null && a.pilots.Length > 0 && a.pilots[0] != null
                     ? Catalog.RuPilotState(a.pilots[0].GetCurrentState())
-                    : "нет пилота", FitBodyChars);
+                    : Loc.Tr("нет пилота"), FitBodyChars);
             }
             else
             {
-                _infoMove.text = $"{speedKmh:F0} км/ч";
+                _infoMove.text = Loc.F("{0} км/ч", speedKmh.ToString("F0"));
                 _infoState.text = Util.FitLine(
                     u is Ship s && s.TryGetComponent(out ShipAI sai)
                         ? Catalog.RuShipState(sai.state.ToString())
                         : "", FitBodyChars);
             }
 
-            _infoOrder[0].text = Util.FitLine("Приказ: " + PlanSummary(u), FitBodyChars);
+            _infoOrder[0].text = Util.FitLine(Loc.F("Приказ: {0}", PlanSummary(u)), FitBodyChars);
             _infoOrder[1].text = "";
             _infoOrder[2].text = "";
-            _infoWeaponsHeader.text = "Вооружение";
+            _infoWeaponsHeader.text = Loc.Tr("Вооружение");
 
             int w = 0;
             if (u.weaponStations != null)
@@ -949,7 +1143,7 @@ step = "arrows";
                     string name = !string.IsNullOrEmpty(ws.WeaponInfo.shortName)
                         ? ws.WeaponInfo.shortName
                         : ws.WeaponInfo.weaponName;
-                    string status = ws.Reloading ? " · перезарядка" : (ws.Ready() ? "" : " · пусто");
+                    string status = ws.Reloading ? Loc.Tr(" · перезарядка") : (ws.Ready() ? "" : Loc.Tr(" · пусто"));
                     _infoWeapons[w++].text = Util.FitLine(
                         $"{name}: {ws.Ammo}/{ws.FullAmmo}{status}", FitBodyChars);
                 }
@@ -989,7 +1183,7 @@ step = "arrows";
 
         private void RefreshMultiUnit(List<Unit> selected)
         {
-            _infoTitle.text = $"Выбрано: {selected.Count}";
+            _infoTitle.text = Loc.F("Выбрано: {0}", selected.Count);
             int air = 0, ground = 0, naval = 0;
             float hpSum = 0f, ammoSum = 0f;
             int ammoN = 0, n = 0;
@@ -1008,13 +1202,13 @@ step = "arrows";
                     ammoN++;
                 }
             }
-            _infoClass.text = $"авиация {air} · наземка {ground} · флот {naval}";
+            _infoClass.text = Loc.F("авиация {0} · наземка {1} · флот {2}", air, ground, naval);
             float hp = n > 0 ? hpSum / n : 1f;
             UiKit.SetProgress(_infoHpFill, hp);
-            _infoHpTxt.text = hp >= 0.995f ? "HP целы" : $"HP {hp:P0}";
+            _infoHpTxt.text = hp >= 0.995f ? Loc.Tr("HP целы") : Loc.F("HP {0}", hp.ToString("P0"));
             // GetAmmoLevel — доли, но у энергостанций Full<Ammo (заряд-единицы) —
             // среднее может быть >1; клэмп, чтобы не показывать «6 666%».
-            _infoMove.text = ammoN > 0 ? $"боезапас {Mathf.Clamp01(ammoSum / ammoN):P0}" : "";
+            _infoMove.text = ammoN > 0 ? Loc.F("боезапас {0}", Mathf.Clamp01(ammoSum / ammoN).ToString("P0")) : "";
             _infoState.text = "";
             _infoOrder[0].text = "";
             _infoOrder[1].text = "";
@@ -1022,7 +1216,7 @@ step = "arrows";
 
             // Сводка вооружения: чем группа может работать по целям (домен-тег) и
             // сколько зарядов осталось; пустые типы видны сразу — сигнал на перезарядку.
-            _infoWeaponsHeader.text = "Вооружение группы";
+            _infoWeaponsHeader.text = Loc.Tr("Вооружение группы");
             var rows = _groupWeapons.Rows;
             bool overflow = rows.Count > _infoWeapons.Length;
             int shown = overflow ? _infoWeapons.Length - 1 : rows.Count;
@@ -1030,8 +1224,8 @@ step = "arrows";
                 _infoWeapons[i].text = Util.FitLine(Catalog.FormatWeaponRow(rows[i]), FitBodyChars);
             if (overflow)
                 _infoWeapons[_infoWeapons.Length - 1].text =
-                    "+ ещё " + (rows.Count - shown) + " " +
-                    Util.RuPlural(rows.Count - shown, "тип", "типа", "типов");
+                    Loc.F("+ ещё {0} {1}", rows.Count - shown,
+                        Loc.Plural(rows.Count - shown, "тип", "типа", "типов"));
         }
 
         // ---------- панель осмотра (чужие цели и ракеты, ЛКМ) ----------
@@ -1072,24 +1266,24 @@ step = "arrows";
             _infoTitle.text = Util.FitLine(
                 !string.IsNullOrEmpty(u.unitName) ? u.unitName : defName, FitTitleChars);
             _infoClass.text = Util.FitLine(
-                (defName.Length > 0 ? defName + " · " : "") + ClassOf(u) + " · чужой контакт",
+                (defName.Length > 0 ? defName + " · " : "") + ClassOf(u) + Loc.Tr(" · чужой контакт"),
                 FitBodyChars);
 
             if (live)
             {
                 float hp = GameApi.HpFraction(u);
                 UiKit.SetProgress(_infoHpFill, hp);
-                _infoHpTxt.text = hp >= 0.995f ? "HP цел" : $"HP {hp:P0}";
+                _infoHpTxt.text = hp >= 0.995f ? Loc.Tr("HP цел") : Loc.F("HP {0}", hp.ToString("P0"));
                 float speedKmh = Mathf.Abs(u.speed) * 3.6f;
                 _infoMove.text = Util.FitLine(u is Aircraft
-                    ? $"{speedKmh:F0} км/ч · {u.radarAlt:F0} м"
-                    : $"{speedKmh:F0} км/ч", FitBodyChars);
-                _infoState.text = "под наблюдением";
+                    ? Loc.F("{0} км/ч · {1} м", speedKmh.ToString("F0"), u.radarAlt.ToString("F0"))
+                    : Loc.F("{0} км/ч", speedKmh.ToString("F0")), FitBodyChars);
+                _infoState.text = Loc.Tr("под наблюдением");
             }
             else
             {
                 _infoMove.text = "";
-                _infoState.text = Util.FitLine($"контакт {age:F0} с назад", FitBodyChars);
+                _infoState.text = Util.FitLine(Loc.F("контакт {0} с назад", age.ToString("F0")), FitBodyChars);
             }
             _infoOrder[0].text = "";
             _infoOrder[1].text = "";
@@ -1125,28 +1319,28 @@ step = "arrows";
             if (string.IsNullOrEmpty(name) && m.definition != null)
                 name = m.definition.unitName;
             _infoTitle.text = Util.FitLine(
-                string.IsNullOrEmpty(name) ? (powered ? "ракета" : "бомба") : name, FitTitleChars);
-            _infoClass.text = (powered ? "ракета" : "бомба") + (ours ? " · наша" : " · чужая");
+                string.IsNullOrEmpty(name) ? (powered ? Loc.Tr("ракета") : Loc.Tr("бомба")) : name, FitTitleChars);
+            _infoClass.text = (powered ? Loc.Tr("ракета") : Loc.Tr("бомба")) + (ours ? Loc.Tr(" · наша") : Loc.Tr(" · чужая"));
 
             float speedKmh = Mathf.Abs(m.speed) * 3.6f;
-            _infoMove.text = Util.FitLine($"{speedKmh:F0} км/ч · {m.transform.position.GlobalY():F0} м",
-                FitBodyChars);
+            _infoMove.text = Util.FitLine(Loc.F("{0} км/ч · {1} м", speedKmh.ToString("F0"),
+                m.transform.position.GlobalY().ToString("F0")), FitBodyChars);
             _infoState.text = powered
-                ? (m.EngineOn() ? "двигатель: работает" : "двигатель: выгорел")
-                : "свободное падение";
+                ? (m.EngineOn() ? Loc.Tr("двигатель: работает") : Loc.Tr("двигатель: выгорел"))
+                : Loc.Tr("свободное падение");
 
             // ГСН/БЧ — параметры определения (не секрет); цель — только своя (RWR).
             int w = 0;
             string seeker = m.GetSeekerType();
             if (!string.IsNullOrEmpty(seeker))
-                _infoOrder[w++].text = Util.FitLine("ГСН: " + seeker, FitBodyChars);
+                _infoOrder[w++].text = Util.FitLine(Loc.F("ГСН: {0}", seeker), FitBodyChars);
             float yieldKg = m.GetYield();
             if (yieldKg > 0f)
-                _infoOrder[w++].text = Util.FitLine("БЧ: " + FormatYield(yieldKg), FitBodyChars);
+                _infoOrder[w++].text = Util.FitLine(Loc.F("БЧ: {0}", FormatYield(yieldKg)), FitBodyChars);
             if (UnitRegistry.TryGetUnit(m.targetID, out Unit tgt) && tgt != null &&
                 tgt.NetworkHQ != null && tgt.NetworkHQ == hq)
-                _infoOrder[w++].text = Util.FitLine("ЦЕЛЬ: " +
-                    (tgt.definition != null ? tgt.definition.unitName : tgt.name), FitBodyChars);
+                _infoOrder[w++].text = Util.FitLine(Loc.F("ЦЕЛЬ: {0}",
+                    tgt.definition != null ? tgt.definition.unitName : tgt.name), FitBodyChars);
             for (; w < _infoOrder.Length; w++)
                 _infoOrder[w].text = "";
         }
@@ -1154,14 +1348,14 @@ step = "arrows";
         /// <summary>Масса БЧ в читаемом виде: до тонны — кг, дальше — килотонны.</summary>
         private static string FormatYield(float kg) =>
             kg >= 1e6f
-                ? (kg / 1e6f).ToString("F1") + " кт"
-                : kg.ToString("F0") + " кг";
+                ? Loc.F("{0} кт", (kg / 1e6f).ToString("F1"))
+                : Loc.F("{0} кг", kg.ToString("F0"));
 
         private static string ClassOf(Unit u)
         {
-            if (u is Aircraft) return "авиация";
-            if (u is Ship) return "флот";
-            if (u is Building) return "здание";
+            if (u is Aircraft) return Loc.Tr("авиация");
+            if (u is Ship) return Loc.Tr("флот");
+            if (u is Building) return Loc.Tr("здание");
             if (u.definition is VehicleDefinition vd) return vd.vehicleType.ToString();
             return "";
         }
@@ -1172,7 +1366,7 @@ step = "arrows";
             if (u is Aircraft && AircraftOrders.TryGetPlan(u, out IReadOnlyList<AircraftOrders.OrderSegment> plan))
             {
                 if (plan.Count == 0)
-                    return "нет";
+                    return Loc.Tr("нет");
                 var sb = new System.Text.StringBuilder();
                 for (int i = 0; i < plan.Count && i < 3; i++)
                 {
@@ -1181,12 +1375,13 @@ step = "arrows";
                     AircraftOrders.OrderSegment seg = plan[i];
                     sb.Append(seg.Mode switch
                     {
-                        AirOrderMode.Patrol => "Патруль",
-                        AirOrderMode.AttackMove => "Атака-движ.",
-                        AirOrderMode.Attack => "Атака",
-                        AirOrderMode.Salvo => "Залп",
-                        AirOrderMode.Rtb => "На базу",
-                        _ => "Транзит"
+                        AirOrderMode.Patrol => Loc.Tr("Патруль"),
+                        AirOrderMode.AttackMove => Loc.Tr("Атака-движ."),
+                        AirOrderMode.Attack => Loc.Tr("Атака"),
+                        AirOrderMode.Salvo => Loc.Tr("Залп"),
+                        AirOrderMode.Escort => Loc.Tr("Сопровождение"),
+                        AirOrderMode.Rtb => Loc.Tr("На базу"),
+                        _ => Loc.Tr("Транзит")
                     });
                     if (seg.Mode != AirOrderMode.Attack && seg.Points.Count > 1)
                         sb.Append(" ×").Append(seg.Points.Count);
@@ -1194,17 +1389,27 @@ step = "arrows";
                 return sb.ToString();
             }
             if (GroundOrders.KindOf(u) == GroundOrderKind.Attack)
-                return "атака цели";
+                return Loc.Tr("атака цели");
+            if (GroundOrders.KindOf(u) == GroundOrderKind.Escort)
+            {
+                Unit escortTarget = GroundOrders.EscortTargetOf(u);
+                return Loc.F("сопровождение: {0}",
+                    escortTarget != null && escortTarget.definition != null
+                        ? escortTarget.definition.unitName
+                        : "?");
+            }
             if (GroundOrders.TryGetQueue(u, out IReadOnlyList<GlobalPosition> queue, out int idx))
             {
                 int left = Mathf.Max(0, queue.Count - idx);
                 var targets = GroundOrders.TargetQueueOf(u);
-                string tail = targets != null ? $", атак: {targets.Count} в очереди" : "";
+                string tail = targets != null ? Loc.F(", атак: {0} в очереди", targets.Count) : "";
+                if (GroundOrders.KindOf(u) == GroundOrderKind.Patrol)
+                    return Loc.F("патруль, {0} тчк (цикл){1}", left, tail);
                 if (GroundOrders.KindOf(u) == GroundOrderKind.AttackMove)
-                    return $"атака-движ., осталось {left} тчк{tail}";
-                return $"цепочка, осталось {left} тчк{tail}";
+                    return Loc.F("атака-движ., осталось {0} тчк{1}", left, tail);
+                return Loc.F("цепочка, осталось {0} тчк{1}", left, tail);
             }
-            return "нет";
+            return Loc.Tr("нет");
         }
 
         /// <summary>Ключ контекста командной карты: состав выделения по типам войск —
@@ -1217,9 +1422,15 @@ step = "arrows";
             if (controller == null || !controller.IsActive)
                 return;
 
-            // Контекст: есть ли авиация/наземка в выделении; одиночный борт со станциями
-            // получает ряд чипов выбора вооружения залпа.
+            // Контекст по ТИПАМ боевых единиц (v0.92): ряды показываются только
+            // тем, к кому применимы. Скорость — самолётам (у вертолётов газ ведёт
+            // игровой hover-контур); «Залп» и чипы станций — ракетоносцам
+            // (бомбовозу/пулемётному залп нечем); статичные здания без мобильных
+            // в выделении — только hold-fire; пустое выделение — базовый набор
+            // без авиарядов.
             bool hasAir = false;
+            bool hasPlane = false;
+            bool hasMissileAir = false;
             bool hasGround = false;
             Aircraft singleAir = null;
             int selCount = 0;
@@ -1231,22 +1442,30 @@ step = "arrows";
                 if (unit is Aircraft a)
                 {
                     hasAir = true;
-                    if (selCount == 1 && a.weaponStations.Count > 0)
-                        singleAir = a;
+                    if (!GameApi.IsHeloFamily(a))
+                        hasPlane = true;
+                    if (HasMissileStation(a))
+                    {
+                        hasMissileAir = true;
+                        if (selCount == 1)
+                            singleAir = a; // чипы станций — одиночному ракетоносцу
+                    }
                 }
                 else if (unit is GroundVehicle || unit is Ship)
                     hasGround = true;
             }
             if (selCount != 1)
                 singleAir = null;
-            bool showAir = hasAir || selCount == 0; // пустое выделение — полный набор
+            bool showAir = hasAir;
+            bool buildingsOnly = selCount > 0 && !hasAir && !hasGround;
             WeaponClass gateClasses = WeaponGateService.ClassesOf(controller.Selection.Selected);
-            int key = (showAir ? 1 : 0) | (hasGround ? 2 : 0) | (singleAir != null ? 4 : 0) |
-                      ((int)gateClasses << 3); // состав классов — тоже контекст кнопок
+            int key = (showAir ? 1 : 0) | (hasGround ? 2 : 0) | (hasPlane ? 4 : 0) |
+                      (hasMissileAir ? 8 : 0) | (singleAir != null ? 16 : 0) |
+                      (buildingsOnly ? 32 : 0) | ((int)gateClasses << 6);
             if (key != _cmdContextKey)
             {
                 _cmdContextKey = key;
-                BuildCommandButtons(controller, showAir, singleAir);
+                BuildCommandButtons(controller, showAir, hasPlane, hasMissileAir, singleAir, buildingsOnly);
             }
 
             // Подсказка — ТОЛЬКО в активном спец-режиме (стройка/залп/веер/приказ):
@@ -1256,16 +1475,25 @@ step = "arrows";
                 : null;
             if (BuildTasks.Pending != null)
                 _modeHint.text = Util.FitLine(
-                    $"{BuildTasks.Pending.unitName}: ЛКМ — площадка, удержание — поворот (Shift — серия) · ПКМ/Esc — отмена", 62);
-            else if (pending == "Залп")
+                    Loc.F("{0}: ЛКМ — площадка, удержание — поворот (Shift — серия) · ПКМ/Esc — отмена",
+                            BuildTasks.Pending.unitName), 62);
+            else if (BuildTasks.PendingRunway)
                 _modeHint.text = Util.FitLine(
-                    "Залп: ПКМ по цели/земле — залповый пуск · Shift+ПКМ по целям — доб. в залп", 62);
-            else if (pending == "Атака веером")
+                    Loc.F("ВПП: ЛКМ — торец, ПРОТЯНУТЬ — второй ({0}–{1} м) · ПКМ/Esc — отмена",
+                            Settings.RunwayMinM.ToString("F0"), Settings.RunwayMaxM.ToString("F0")), 62);
+            else if (BuildTasks.PendingDock)
                 _modeHint.text = Util.FitLine(
-                    "Веер: ПКМ по целям — накопить · ПКМ по земле — раздать группу", 62);
+                    Loc.F("Верфь: ЛКМ по воде (глубже {0} м) — платформа, удержание — поворот · ПКМ/Esc — отмена",
+                            Settings.DockMinDepthM.ToString("F0")), 62);
+            else if (pending == Loc.Tr("Залп"))
+                _modeHint.text = Util.FitLine(
+                    Loc.Tr("Залп: ПКМ по цели/земле — залповый пуск · Shift+ПКМ по целям — доб. в залп"), 62);
+            else if (pending == Loc.Tr("Атака веером"))
+                _modeHint.text = Util.FitLine(
+                    Loc.Tr("Веер: ПКМ по целям — накопить · ПКМ по земле — раздать группу"), 62);
             else if (pending != null)
                 _modeHint.text = Util.FitLine(
-                    $"{pending}: ПКМ — вейпоинт (Shift — серия) · Esc — движение", 62);
+                    Loc.F("{0}: ПКМ — вейпоинт (Shift — серия) · Esc — движение", pending), 62);
             else
                 _modeHint.text = "";
             ApplyCommandLayout();
@@ -1288,6 +1516,9 @@ step = "arrows";
                 HighlightCommand("cmd_spd0", AircraftOrders.SpeedIndex == SpeedMode.Full);
                 HighlightCommand("cmd_spd1", AircraftOrders.SpeedIndex == SpeedMode.Cruise);
                 HighlightCommand("cmd_spd2", AircraftOrders.SpeedIndex == SpeedMode.Economy);
+                HighlightCommand("cmd_tf0", AircraftOrders.TerrainHug == TerrainHugMode.Profile);
+                HighlightCommand("cmd_tf1", AircraftOrders.TerrainHug == TerrainHugMode.Always);
+                HighlightCommand("cmd_tf2", AircraftOrders.TerrainHug == TerrainHugMode.Never);
                 DefenseMode defense = DefenseMode.Auto;
                 foreach (Unit unit in controller.Selection.Selected)
                     if (unit is Aircraft)
@@ -1320,26 +1551,38 @@ step = "arrows";
                     (state > 0 ? "+ " : state == 0 ? "- " : "± ") + Catalog.ClassLabel(cls));
             }
 
-            // Чипы станций: боезапас живой, выбранность — подсветкой.
+            // Чипы станций: боезапас живой, выбранность — подсветкой. Кнопка st_i
+            // соответствует _chipStations[i]-й станции борта (только ракетные).
             if (singleAir != null)
             {
-                int idx = 0;
+                int chip = 0;
                 foreach (var (btn, img, _, label) in _cmdButtons)
                 {
                     if (!btn.name.StartsWith("st_"))
                         continue;
-                    if (idx < singleAir.weaponStations.Count)
+                    if (chip >= _chipStations.Count)
+                        break;
+                    int stIdx = _chipStations[chip];
+                    WeaponStation st = singleAir.weaponStations[stIdx];
+                    if (st != null && st.WeaponInfo != null)
                     {
-                        WeaponStation st = singleAir.weaponStations[idx];
-                        if (st != null && st.WeaponInfo != null)
-                        {
-                            label.text = StationChipLabel(st);
-                            img.color = SalvoService.StationEnabled(singleAir, idx) ? BtnActive : BtnBg;
-                        }
+                        label.text = StationChipLabel(st);
+                        img.color = SalvoService.StationEnabled(singleAir, stIdx) ? BtnActive : BtnBg;
                     }
-                    idx++;
+                    chip++;
                 }
             }
+        }
+
+        /// <summary>Есть ли у борта ракетная станция (без учёта боезапаса): залп V
+        /// и чипы станций — только ракетоносцам; бомбовозу/пулемётному залп
+        /// нечем (SalvoService завершит сегмент сразу — долг §12-21).</summary>
+        private static bool HasMissileStation(Aircraft a)
+        {
+            foreach (WeaponStation st in a.weaponStations)
+                if (st != null && !st.Cargo && st.WeaponInfo != null && st.WeaponInfo.missile)
+                    return true;
+            return false;
         }
 
         /// <summary>Подпись чипа станции: короткое имя вооружения ×боезапас.</summary>
@@ -1349,7 +1592,7 @@ step = "arrows";
                 ? st.WeaponInfo.shortName
                 : st.WeaponInfo.weaponName;
             if (string.IsNullOrEmpty(name))
-                name = "ст.";
+                name = Loc.Tr("ст.");
             if (name.Length > 8)
                 name = name.Substring(0, 8);
             return name + " ×" + st.Ammo;
@@ -1376,11 +1619,14 @@ step = "arrows";
                 }
         }
 
-        /// <summary>Контекстная пересборка сетки команд (состав выделения сменился):
-        /// базовые приказы — всегда, ряды авиации (высота/скорость/защита) — при
-        /// авиации в выделении, чипы станций — одиночному борту. Карточка растёт
-        /// вверх, панель свойств выделения поднимается за ней.</summary>
-        private void BuildCommandButtons(CommanderModeController controller, bool showAir, Aircraft singleAir)
+        /// <summary>Контекстная пересборка сетки команд (состав выделения сменился,
+        /// v0.92 — по типам боевых единиц): базовые приказы — мобильным (авиация/
+        /// наземка/флот), ряды авиации — при авиации, скорость — только при
+        /// самолётах, залп — ракетоносцам, чипы станций — одиночному ракетоносцу,
+        /// статичным зданиям — только hold-fire. Карточка растёт вверх, панель
+        /// свойств выделения поднимается за ней.</summary>
+        private void BuildCommandButtons(CommanderModeController controller, bool showAir,
+            bool hasPlane, bool hasMissileAir, Aircraft singleAir, bool buildingsOnly)
         {
             Transform grid = null;
             foreach (Transform child in _canvas.transform)
@@ -1394,69 +1640,75 @@ step = "arrows";
             foreach (var (btn, _, _, _) in _cmdButtons)
                 Destroy(btn.gameObject);
             _cmdButtons.Clear();
+            _chipStations.Clear();
 
             var defs = new List<(string name, string label, System.Action a)>();
+            if (!buildingsOnly)
+            {
+                // Базовые приказы — всем мобильным (авиация/наземка/флот).
+                defs.Add(("cmd_move", Loc.Tr("Движение (M)"), () => OrderModes.Pending = OrderMode.Move));
+                defs.Add(("cmd_amove", Loc.Tr("Атака-движ (A)"), () => OrderModes.Pending = OrderMode.AttackMove));
+                // Патруль — авиации и наземке/флоту (v0.95: циклы; инженеры в патруле
+                // сами подхватывают близлежащие недострои).
+                defs.Add(("cmd_patrol", Loc.Tr("Патруль (U)"), () => OrderModes.Pending = OrderMode.Patrol));
+                defs.Add(("cmd_attack", Loc.Tr("Атака (T)"), () => OrderModes.Pending = OrderMode.Attack));
+                if (showAir && hasMissileAir)
+                    defs.Add(("cmd_salvo", Loc.Tr("Залп (V)"), () => OrderModes.Pending = OrderMode.Salvo));
+                defs.Add(("cmd_fan", Loc.Tr("Веер (R)"), () => controller.MoveOrders.ChargeFanAttack()));
+                defs.Add(("cmd_stop", Loc.Tr("Стоп (S)"), () => controller.MoveOrders.CancelAll(controller.Selection.Selected)));
+                defs.Add(("cmd_disperse", Loc.Tr("Распределить (Alt+Shift+R)"), () =>
+                    controller.MoveOrders.IssueDisperseMove(controller.Selection.Selected)));
+                if (showAir)
+                    defs.Add(("cmd_rtb", Loc.Tr("На базу (G)"), () =>
+                        controller.MoveOrders.IssueReturnToBase(controller.Selection.Selected)));
+            }
+            // Hold-fire — всем, у кого есть оружие: подвижным и статичным зданиям
+            // (для выделения из одних зданий это единственная команда).
+            defs.Add(("cmd_hold", Loc.Tr("Огонь: удерж (H)"), () =>
+            {
+                foreach (Unit unit in controller.Selection.Selected)
+                    StanceService.Toggle(unit);
+            }));
             if (showAir)
             {
-                defs.Add(("cmd_move", "Движение (M)", () => OrderModes.Pending = OrderMode.Move));
-                defs.Add(("cmd_amove", "Атака-движ (A)", () => OrderModes.Pending = OrderMode.AttackMove));
-                defs.Add(("cmd_patrol", "Патруль (U)", () => OrderModes.Pending = OrderMode.Patrol));
-                defs.Add(("cmd_attack", "Атака (T)", () => OrderModes.Pending = OrderMode.Attack));
-                defs.Add(("cmd_salvo", "Залп (V)", () => OrderModes.Pending = OrderMode.Salvo));
-                defs.Add(("cmd_fan", "Веер (R)", () => controller.MoveOrders.ChargeFanAttack()));
-                defs.Add(("cmd_stop", "Стоп (S)", () => controller.MoveOrders.CancelAll(controller.Selection.Selected)));
-                defs.Add(("cmd_disperse", "Распределить (Alt+Shift+R)", () =>
-                    controller.MoveOrders.IssueDisperseMove(controller.Selection.Selected)));
-                defs.Add(("cmd_rtb", "На базу (G)", () =>
-                    controller.MoveOrders.IssueReturnToBase(controller.Selection.Selected)));
-                defs.Add(("cmd_hold", "Огонь: удерж (H)", () =>
+                defs.Add(("cmd_vlow", Loc.Tr("Свер-хнизко 75м"), () => controller.SetProfileUi(0)));
+                defs.Add(("cmd_low", Loc.Tr("Низко 150м"), () => controller.SetProfileUi(1)));
+                defs.Add(("cmd_med", Loc.Tr("Средне 800м"), () => controller.SetProfileUi(2)));
+                defs.Add(("cmd_high", Loc.Tr("Высоко 2500м"), () => controller.SetProfileUi(3)));
+                if (hasPlane) // вертолётам тротл не назначается — газ ведёт игра
                 {
-                    foreach (Unit unit in controller.Selection.Selected)
-                        StanceService.Toggle(unit);
-                }));
-                defs.Add(("cmd_vlow", "Свер-хнизко 75м", () => controller.SetProfileUi(0)));
-                defs.Add(("cmd_low", "Низко 150м", () => controller.SetProfileUi(1)));
-                defs.Add(("cmd_med", "Средне 800м", () => controller.SetProfileUi(2)));
-                defs.Add(("cmd_high", "Высоко 2500м", () => controller.SetProfileUi(3)));
-                defs.Add(("cmd_spd0", "Полный (Shift+1)", () => controller.SetSpeedUi(0)));
-                defs.Add(("cmd_spd1", "Крейсер (Shift+2)", () => controller.SetSpeedUi(1)));
-                defs.Add(("cmd_spd2", "Эконом (Shift+3)", () => controller.SetSpeedUi(2)));
-                defs.Add(("cmd_flare", "Ловушки! (X)", () =>
+                    defs.Add(("cmd_spd0", Loc.Tr("Полный (Shift+1)"), () => controller.SetSpeedUi(0)));
+                    defs.Add(("cmd_spd1", Loc.Tr("Крейсер (Shift+2)"), () => controller.SetSpeedUi(1)));
+                    defs.Add(("cmd_spd2", Loc.Tr("Эконом (Shift+3)"), () => controller.SetSpeedUi(2)));
+                    // «Вдоль рельефа» (v0.94): вертолётам руление огибает всегда —
+                    // тоггл показываем только при самолётах.
+                    defs.Add(("cmd_tf0", Loc.Tr("Рельеф: авто (Alt+T)"), () => controller.SetTerrainFollowUi(0)));
+                    defs.Add(("cmd_tf1", Loc.Tr("Рельеф: огибать"), () => controller.SetTerrainFollowUi(1)));
+                    defs.Add(("cmd_tf2", Loc.Tr("Рельеф: напрямую"), () => controller.SetTerrainFollowUi(2)));
+                }
+                defs.Add(("cmd_flare", Loc.Tr("Ловушки! (X)"), () =>
                 {
                     int popped = DefenseService.PopNow(controller.Selection.Selected);
-                    CommanderHud.Notice(popped > 0 ? $"Ловушки: бортов — {popped}" : "Нет бортов с контрмерами");
+                    CommanderHud.Notice(popped > 0 ? Loc.F("Ловушки: бортов — {0}", popped) : Loc.Tr("Нет бортов с контрмерами"));
                 }));
-                defs.Add(("cmd_def0", "Защита: Авто", () => controller.SetDefenseUi(0)));
-                defs.Add(("cmd_def1", "Защита: Ловушки", () => controller.SetDefenseUi(1)));
-                defs.Add(("cmd_def2", "Защита: Выкл", () => controller.SetDefenseUi(2)));
-            }
-            else
-            {
-                // Наземка/флот: только применимые приказы, без авиарядов.
-                defs.Add(("cmd_move", "Движение (M)", () => OrderModes.Pending = OrderMode.Move));
-                defs.Add(("cmd_amove", "Атака-движ (A)", () => OrderModes.Pending = OrderMode.AttackMove));
-                defs.Add(("cmd_attack", "Атака (T)", () => OrderModes.Pending = OrderMode.Attack));
-                defs.Add(("cmd_fan", "Веер (R)", () => controller.MoveOrders.ChargeFanAttack()));
-                defs.Add(("cmd_stop", "Стоп (S)", () => controller.MoveOrders.CancelAll(controller.Selection.Selected)));
-                defs.Add(("cmd_disperse", "Распределить (Alt+Shift+R)", () =>
-                    controller.MoveOrders.IssueDisperseMove(controller.Selection.Selected)));
-                defs.Add(("cmd_hold", "Огонь: удерж (H)", () =>
-                {
-                    foreach (Unit unit in controller.Selection.Selected)
-                        StanceService.Toggle(unit);
-                }));
+                defs.Add(("cmd_def0", Loc.Tr("Защита: Авто"), () => controller.SetDefenseUi(0)));
+                defs.Add(("cmd_def1", Loc.Tr("Защита: Ловушки"), () => controller.SetDefenseUi(1)));
+                defs.Add(("cmd_def2", Loc.Tr("Защита: Выкл"), () => controller.SetDefenseUi(2)));
             }
 
-            // Чипы станций залпа (одиночный борт): ЛКМ — вкл/выкл станции в залпе.
-            int chips = 0;
+            // Чипы ракетных станций залпа (одиночный ракетоносец): ЛКМ — вкл/выкл
+            // станции; индексы — реальные позиции в weaponStations (для обновления
+            // подписи/подсветки в RefreshCommands).
             if (singleAir != null)
-                foreach (WeaponStation st in singleAir.weaponStations)
+                for (int idx = 0; idx < singleAir.weaponStations.Count && _chipStations.Count < 12; idx++)
                 {
-                    if (st == null || st.Cargo || st.WeaponInfo == null || chips >= 12)
+                    WeaponStation st = singleAir.weaponStations[idx];
+                    if (st == null || st.Cargo || st.WeaponInfo == null || !st.WeaponInfo.missile)
                         continue;
-                    int idx = chips;
-                    defs.Add(("st_" + idx, StationChipLabel(st), () => SalvoService.ToggleStation(singleAir, idx)));
-                    chips++;
+                    int stationIdx = idx;
+                    defs.Add(("st_" + _chipStations.Count, StationChipLabel(st),
+                        () => SalvoService.ToggleStation(singleAir, stationIdx)));
+                    _chipStations.Add(idx);
                 }
 
             int rows = Mathf.CeilToInt(defs.Count / 4f);
@@ -1499,24 +1751,39 @@ step = "arrows";
         /// <summary>Раскладка командной карточки по последней сборке кнопок и наличию
         /// подсказки активного режима: без подсказки заголовок «ПРИКАЗЫ» у верхнего
         /// края (никаких пустых строк), с подсказкой — под ней. Панель свойств
-        /// выделения поднимается за карточкой (низ = верх карточки + зазор 6).</summary>
+        /// выделения поднимается за карточкой (низ = верх карточки + зазор 6);
+        /// скрытая карточка (чистый осмотр) места в стеке не занимает.</summary>
         private void ApplyCommandLayout()
         {
-            bool hint = _modeHint != null && !string.IsNullOrEmpty(_modeHint.text);
-            if (_ordersHdr != null)
+            // Стек левой колонки (снизу вверх): командная карта → ОПИСАНИЕ (ховер
+            // плитки закупки) → панель свойств. Панель свойств всегда опирается
+            // на верх того, что под ней; без командной карты — на низ экрана.
+            float above = 12f;
+            if (_commandPanel != null && _commandPanel.gameObject.activeSelf)
             {
-                var rt = (RectTransform)_ordersHdr.transform;
-                rt.offsetMin = new Vector2(10f, hint ? -31f : -15f);
-                rt.offsetMax = new Vector2(-8f, hint ? -19f : -3f);
+                bool hint = _modeHint != null && !string.IsNullOrEmpty(_modeHint.text);
+                if (_ordersHdr != null)
+                {
+                    var rt = (RectTransform)_ordersHdr.transform;
+                    rt.offsetMin = new Vector2(10f, hint ? -31f : -15f);
+                    rt.offsetMax = new Vector2(-8f, hint ? -19f : -3f);
+                }
+                if (_cmdGrid != null)
+                    _cmdGrid.offsetMax = new Vector2(-8f, hint ? -33f : -17f);
+                float height = (hint ? 18f : 2f) + 13f + _cmdRows * 26f +
+                               Mathf.Max(0, _cmdRows - 1) * 4f + 5f +
+                               (_cmdGates ? 44f : 3f);
+                _commandPanel.offsetMax = new Vector2(430f, 12f + height);
+                above = 12f + height + 6f;
             }
-            if (_cmdGrid != null)
-                _cmdGrid.offsetMax = new Vector2(-8f, hint ? -33f : -17f);
-            float height = (hint ? 18f : 2f) + 13f + _cmdRows * 26f +
-                           Mathf.Max(0, _cmdRows - 1) * 4f + 5f +
-                           (_cmdGates ? 44f : 3f);
-            _commandPanel.offsetMax = new Vector2(430f, 12f + height);
+            if (_descPanel != null && _descPanel.gameObject.activeSelf)
+            {
+                _descPanel.offsetMin = new Vector2(12f, above);
+                _descPanel.offsetMax = new Vector2(430f, above + _descHeight);
+                above += _descHeight + 6f;
+            }
             if (_infoPanel != null)
-                _infoPanel.offsetMin = new Vector2(12f, 12f + height + 6f);
+                _infoPanel.offsetMin = new Vector2(12f, above);
         }
 
         private void RefreshTabs()
@@ -1528,14 +1795,20 @@ step = "arrows";
             Airbase airbase = controller.Selection.SelectedAirbase;
 
             VehicleDepot depot = null;
+            Building navalDock = null;
             Unit extractor = null;
             bool hasEngineer = false;
+            var hangars = new List<Hangar>();
             int selHash = 17;
             foreach (Unit unit in selected)
             {
                 selHash = selHash * 31 + (unit != null ? unit.GetInstanceID() : 0);
-                if (unit is VehicleDepot d)
+                if (BuildTasks.IsDock(unit))
+                    navalDock = unit as Building; // корпус-депо верфи — ФЛОТ, не техника
+                else if (unit is VehicleDepot d)
                     depot = d;
+                else if (unit is Building b && b.GetComponent<Hangar>() != null)
+                    hangars.Add(b.GetComponent<Hangar>());
                 else if (EconomyService.IsExtractor(unit) && extractor == null)
                     extractor = unit;
                 else if (!hasEngineer && GameApi.IsEngineer(unit))
@@ -1545,14 +1818,16 @@ step = "arrows";
                 selHash = selHash * 31 + airbase.GetInstanceID();
 
             // Выделенный недострой открывает свою карточку на «Производстве».
-            if (BuildTasks.SelectedTask != null && selected.Count == 0 && depot == null && airbase == null)
+            if (BuildTasks.SelectedTask != null && selected.Count == 0 && depot == null &&
+                navalDock == null && airbase == null && hangars.Count == 0)
                 _activeTab = TabProduction;
 
             // Автопереключение вкладки под выделение; ручной клик игрока уважаем,
             // пока выделение не сменилось (_manualTabForSel).
             if (_manualTabForSel != selHash)
             {
-                if (depot != null || airbase != null || hasEngineer)
+                if (depot != null || navalDock != null || airbase != null ||
+                    hangars.Count > 0 || hasEngineer)
                     _activeTab = TabProduction;
                 else if (extractor != null && EconomyService.Running)
                     _activeTab = TabUpgrade;
@@ -1576,9 +1851,12 @@ step = "arrows";
             if (_activeTab == TabProduction)
             {
                 hash = hash * 31 + fundsKey + _prodTier * 7 + (depot != null ? 1 : 0) +
-                       (airbase != null ? 2 : 0) + (hasEngineer ? 4 : 0);
+                       (airbase != null ? 2 : 0) + (hasEngineer ? 4 : 0) +
+                       (navalDock != null ? 8 : 0);
                 if (airbase != null)
                     hash = hash * 31 + AirbaseReserve.Version; // плитки резерва ангара
+                // смена лодаута колесом — перестройка каталога (суффикс «·ЛN» на плитке)
+                hash = hash * 31 + ProductionTasks.LoadoutsVersion;
             }
             else if (_activeTab == TabUpgrade)
             {
@@ -1603,16 +1881,25 @@ step = "arrows";
                     queueKey = queueKey * 31 + (int)(t.Progress01 * 20f) + (t.ZoneBlocked ? 3 : 0);
             if (depot != null)
                 queueKey = queueKey * 31 + ProductionTasks.KeyFor(depot) + 7;
+            if (navalDock != null)
+                queueKey = queueKey * 31 + ProductionTasks.KeyFor(navalDock) + 17;
             if (airbase != null)
                 queueKey = queueKey * 31 + ProductionTasks.KeyFor(airbase) + 11;
+            foreach (Hangar hangar in hangars)
+                queueKey = queueKey * 31 + ProductionTasks.KeyFor(hangar) + 13;
             bool queueShown = _activeTab == TabProduction || _activeTab == TabTemplates;
             if (queueShown && queueKey != _queueHash)
             {
                 _queueHash = queueKey;
                 if (hasEngineer)
                     FillBuildQueue(controller);
+                else if (hangars.Count == 1)
+                    FillFactoryQueue(hangars[0]);
+                else if (hangars.Count > 1)
+                    FillHangarsQueue(hangars);
                 else
-                    FillFactoryQueue(depot != null ? (object)depot : (object)airbase);
+                    FillFactoryQueue(navalDock != null ? (object)navalDock
+                        : depot != null ? (object)depot : (object)airbase);
             }
             if (!queueShown && _queueHash != 0)
             {
@@ -1621,13 +1908,17 @@ step = "arrows";
             }
 
             // Контекстные кнопки: на «Производстве» у фабрики — Пауза/Цикл/Шаблон+,
-            // на «Ш» — только Шаблон+ (сохранить набор).
+            // на «Ш» — только Шаблон+ (сохранить набор). Ангар — индивидуальная
+            // фабрия (группа = пер-ангарно); у панели аэропорта очереди нет.
             _ctxDepot = depot;
+            _ctxDock = navalDock;
             _ctxAirbase = airbase;
+            _ctxHangar = hangars.Count == 1 ? hangars[0] : null;
             Transform ctx = _tabPanel != null ? _tabPanel.Find("factoryCtx") : null;
             if (ctx != null)
             {
-                bool ctxOnFactory = _activeTab == TabProduction && CtxFactory() != null;
+                bool ctxOnFactory = _activeTab == TabProduction &&
+                                    (_ctxDepot != null || _ctxHangar != null || _ctxDock != null);
                 ctx.gameObject.SetActive(ctxOnFactory || _activeTab == TabTemplates);
                 if (_pauseBtn != null)
                     _pauseBtn.gameObject.SetActive(ctxOnFactory);
@@ -1652,10 +1943,11 @@ step = "arrows";
             {
                 case TabProduction:
                     if (BuildTasks.SelectedTask != null && selected.Count == 0 &&
-                        depot == null && airbase == null)
+                        depot == null && navalDock == null && airbase == null &&
+                        hangars.Count == 0)
                         FillUnfinishedTab(BuildTasks.SelectedTask);
                     else
-                        FillProductionTab(hq, depot, airbase, hasEngineer);
+                        FillProductionTab(hq, depot, navalDock, airbase, hasEngineer, hangars);
                     break;
                 case TabTemplates:
                     FillTemplatesTab(controller, depot, airbase, hasEngineer, selected);
@@ -1712,8 +2004,10 @@ step = "arrows";
             Tile(content, new TileSpec
             {
                 Icon = t.Definition != null ? t.Definition.friendlyIcon : null,
-                Caption = t.Definition != null
-                    ? Catalog.ShortLabel(t.Definition.code, t.Definition.unitName) : null,
+                Caption = t.IsRunway || t.IsDock
+                    ? t.Label // спец-площадки подписаны собой («ВПП»/«Верфь»)
+                    : t.Definition != null
+                        ? Catalog.ShortLabel(t.Definition.code, t.Definition.unitName) : null,
                 Badge = count > 1 ? "×" + count : null,
                 Progress = head ? t.Progress01 : (float?)null,
                 BarColor = head && t.ZoneBlocked ? new Color(1f, 0.45f, 0.3f, 0.95f) : (Color?)null,
@@ -1740,6 +2034,7 @@ step = "arrows";
             public System.Action OnLeft;
             public System.Action OnRight;
             public UnitDefinition Def;  // не null — плитка регистрируется для hover-карточки
+            public bool WheelLoadout;    // каталог авиации: колесо над плиткой циклит пресет лодаута
         }
 
         /// <summary>ЕДИНЫЙ строитель плитки 48×48 (консолидация v0.48): иконка,
@@ -1791,7 +2086,7 @@ step = "arrows";
             tile.Left = spec.OnLeft;
             tile.Right = spec.OnRight;
             if (spec.Def != null)
-                _tipTiles.Add((rt, parent.parent as RectTransform, spec.Def));
+                _tipTiles.Add((rt, parent.parent as RectTransform, spec.Def, spec.WheelLoadout));
             return go;
         }
 
@@ -1819,19 +2114,23 @@ step = "arrows";
         }
 
         /// <summary>Цвет бейджа типа: класс техники/роли авиации кодируется цветом
-        /// (броня — зелёный, ПВО — фиолетовый, артиллерия — оранжевый и т.д.).</summary>
-        private static Color BadgeColorOf(string badge) => badge switch
+        /// (броня — зелёный, ПВО — фиолетовый, артиллерия — оранжевый и т.д.).
+        /// Цепочка if, а не switch: паттерны switch — только константы, вызов
+        /// Loc.Tr в позиции case не компилируется (CS0426).</summary>
+        private static Color BadgeColorOf(string badge)
         {
-            "И" => new Color(0.45f, 0.85f, 1f, 1f),
-            "У" => new Color(1f, 0.68f, 0.3f, 1f),
-            "М" => new Color(1f, 0.9f, 0.35f, 1f),
-            "ТР" => new Color(0.72f, 0.78f, 0.84f, 1f),
-            "РЛС" => new Color(0.62f, 0.9f, 1f, 1f),
-            "ТНК" or "ББМ" or "ЛБМ" => new Color(0.55f, 0.85f, 0.5f, 1f),
-            "АРТ" => new Color(1f, 0.65f, 0.35f, 1f),
-            "ЗУ" or "ПЗРК" or "ЗРК" => new Color(0.85f, 0.55f, 1f, 1f),
-            _ => new Color(0.72f, 0.76f, 0.72f, 1f),
-        };
+            if (badge == Loc.Tr("И")) return new Color(0.45f, 0.85f, 1f, 1f);
+            if (badge == Loc.Tr("У")) return new Color(1f, 0.68f, 0.3f, 1f);
+            if (badge == Loc.Tr("М")) return new Color(1f, 0.9f, 0.35f, 1f);
+            if (badge == Loc.Tr("ТР")) return new Color(0.72f, 0.78f, 0.84f, 1f);
+            if (badge == Loc.Tr("РЛС")) return new Color(0.62f, 0.9f, 1f, 1f);
+            if (badge == Loc.Tr("ТНК") || badge == Loc.Tr("ББМ") || badge == Loc.Tr("ЛБМ"))
+                return new Color(0.55f, 0.85f, 0.5f, 1f);
+            if (badge == Loc.Tr("АРТ")) return new Color(1f, 0.65f, 0.35f, 1f);
+            if (badge == Loc.Tr("ЗУ") || badge == Loc.Tr("ПЗРК") || badge == Loc.Tr("ЗРК"))
+                return new Color(0.85f, 0.55f, 1f, 1f);
+            return new Color(0.72f, 0.76f, 0.72f, 1f);
+        }
 
         /// <summary>Иконка плитки: авиация — индивидуальный силуэт mapIcon (как на
         /// макрокамере/миникарте), прочее — визорный маркер friendlyIcon.</summary>
@@ -1844,12 +2143,14 @@ step = "arrows";
             return def.friendlyIcon != null ? def.friendlyIcon : def.mapIcon;
         }
 
-        /// <summary>Бейдж типа плитки: наземка — из vehicleType, авиация — роль
-        /// из roleIdentity; здания — без бейджа.</summary>
+        /// <summary>Бейдж типа плитки: наземка — из vehicleType, флот — класс
+        /// корабля, авиация — роль из roleIdentity; здания — без бейджа.</summary>
         private static string TypeBadgeOf(UnitDefinition def)
         {
             if (def is VehicleDefinition vd)
                 return Catalog.BadgeOf(vd.vehicleType);
+            if (def is ShipDefinition ship)
+                return Catalog.BadgeOf(ship.shipType);
             if (def is AircraftDefinition)
                 return Catalog.AirBadge(def.roleIdentity, def.typeIdentity);
             return null;
@@ -1904,7 +2205,79 @@ step = "arrows";
             fimg.raycastTarget = false;
         }
 
-                /// <summary>Нижняя строка «Производства» (фабрика): очередь заказов — плитки
+                /// <summary>Очередь ГРУППЫ ангаров (агрегат): по типу — сумма позиций,
+        /// полоса = максимальный прогресс среди наливаемых (показывает активность),
+        /// бейдж ×N — всего позиций. ЛКМ — +1 каждому умеющему (Shift ×5),
+        /// ПКМ — −1 с конца одного ангара группы (Shift ×5).</summary>
+        private void FillHangarsQueue(List<Hangar> hangars)
+        {
+            ClearChildren(_strip2Content);
+            var order = new List<UnitDefinition>();
+            var totals = new Dictionary<UnitDefinition, int>();
+            var activeCounts = new Dictionary<UnitDefinition, int>();
+            var topProgress = new Dictionary<UnitDefinition, float>();
+            foreach (ProductionTasks.QueueItem item in ProductionTasks.All)
+            {
+                if (item.UnitDef == null)
+                    continue;
+                bool ours = false;
+                foreach (Hangar hangar in hangars)
+                    if (item.Factory == (object)hangar)
+                    {
+                        ours = true;
+                        break;
+                    }
+                if (!ours)
+                    continue;
+                if (!totals.ContainsKey(item.UnitDef))
+                {
+                    totals[item.UnitDef] = 0;
+                    order.Add(item.UnitDef);
+                }
+                totals[item.UnitDef]++;
+                if (item.Paid > 0f)
+                {
+                    activeCounts[item.UnitDef] = activeCounts.TryGetValue(item.UnitDef, out int n)
+                        ? n + 1 : 1;
+                    topProgress[item.UnitDef] = Mathf.Max(
+                        topProgress.TryGetValue(item.UnitDef, out float p) ? p : 0f,
+                        item.Progress01);
+                }
+            }
+            foreach (UnitDefinition def in order)
+            {
+                UnitDefinition d = def;
+                int act = activeCounts.TryGetValue(def, out int n) ? n : 0;
+                Tile(_strip2Content, new TileSpec
+                {
+                    Icon = IconOf(d),
+                    Caption = Catalog.ShortLabel(d.code, d.unitName),
+                    TypeBadge = TypeBadgeOf(d),
+                    Badge = "×" + totals[def] + (act > 0 ? " ▲" + act : ""),
+                    Progress = act > 0 && topProgress.TryGetValue(def, out float p) ? p : (float?)null,
+                    OnLeft = () =>
+                    {
+                        if (!(d is AircraftDefinition ad))
+                            return;
+                        foreach (Hangar hangar in hangars)
+                            if (ProductionTasks.CanBuild(hangar, ad))
+                                ProductionTasks.EnqueueAirSilent(hangar, ad);
+                    },
+                    OnRight = () =>
+                    {
+                        for (int i = hangars.Count - 1; i >= 0; i--)
+                            if (ProductionTasks.CountFor(hangars[i]) > 0)
+                            {
+                                ProductionTasks.RemoveTail(hangars[i], d, RtsInput.Shift ? 5 : 1);
+                                break;
+                            }
+                    },
+                    Def = d,
+                });
+            }
+        }
+
+        /// <summary>Нижняя строка «Производства» (фабрика): очередь заказов — плитки
         /// «иконка + подпись + ×N», у головной позиции — прогресс; клики по стаку:
         /// ЛКМ — добавить 1 (Shift — 5), ПКМ — снять 1 с конца (Shift — 5, с возвратом денег).</summary>
         private void FillFactoryQueue(object factory)
@@ -1912,53 +2285,76 @@ step = "arrows";
             ClearChildren(_strip2Content);
             if (factory == null)
                 return;
-            // Стак подряд идущих одинаковых позиций (порядок сохраняется).
-            var runs = new List<(UnitDefinition def, ProductionTasks.QueueItem head,
-                ProductionTasks.QueueItem tail, int count)>();
+            // Стак подряд идущих одинаковых позиций. НАЛИВАЕМЫЕ позиции (Paid > 0)
+            // при параллельной оплате видны КАЖДАЯ со своей полосой (SupCom-очередь),
+            // ждущий хвост — одной плиткой ×N. Раньше полоса была только у головы
+            // первого стака — параллельная сборка была невидима (плейтест v0.87).
+            var runDef = default(UnitDefinition);
+            var items = new List<ProductionTasks.QueueItem>();
+            void EmitRun()
+            {
+                int waiting = 0;
+                for (int i = 0; i < items.Count; i++)
+                {
+                    if (items[i].Paid <= 0f)
+                    {
+                        waiting = items.Count - i;
+                        break;
+                    }
+                    ProductionTasks.QueueItem active = items[i];
+                    Tile(_strip2Content, new TileSpec
+                    {
+                        Icon = IconOf(runDef),
+                        Caption = Catalog.ShortLabel(runDef.code, runDef.unitName),
+                        TypeBadge = TypeBadgeOf(runDef),
+                        Progress = active.Progress01,
+                        OnLeft = () => ProductionTasks.InsertAfter(active, RtsInput.Shift ? 5 : 1),
+                        OnRight = () => ProductionTasks.Cancel(active),
+                        Def = runDef,
+                    });
+                }
+                if (waiting > 0)
+                {
+                    UnitDefinition def = runDef;
+                    ProductionTasks.QueueItem tail = items[items.Count - 1];
+                    Tile(_strip2Content, new TileSpec
+                    {
+                        Icon = IconOf(def),
+                        Caption = Catalog.ShortLabel(def.code, def.unitName),
+                        TypeBadge = TypeBadgeOf(def),
+                        Badge = waiting > 1 ? "×" + waiting : null,
+                        OnLeft = () => ProductionTasks.InsertAfter(tail, RtsInput.Shift ? 5 : 1),
+                        OnRight = () => ProductionTasks.RemoveTail(factory, def, RtsInput.Shift ? 5 : 1),
+                        Def = def,
+                    });
+                }
+            }
             foreach (ProductionTasks.QueueItem item in ProductionTasks.All)
             {
                 if (item.Factory != factory || item.UnitDef == null)
                     continue;
-                if (runs.Count > 0 && runs[runs.Count - 1].def == item.UnitDef)
+                if (items.Count > 0 && item.UnitDef != runDef)
                 {
-                    var last = runs[runs.Count - 1];
-                    runs[runs.Count - 1] = (last.def, last.head, item, last.count + 1);
+                    EmitRun();
+                    items.Clear();
                 }
-                else
-                    runs.Add((item.UnitDef, item, item, 1));
+                if (items.Count == 0)
+                    runDef = item.UnitDef;
+                items.Add(item);
             }
-            bool first = true;
-            foreach (var run in runs)
-            {
-                UnitDefinition def = run.def;
-                ProductionTasks.QueueItem head = run.head;
-                ProductionTasks.QueueItem tail = run.tail;
-                int count = run.count;
-                bool headFirst = first;
-                first = false;
-                Tile(_strip2Content, new TileSpec
-                {
-                    Icon = IconOf(def),
-                    Caption = Catalog.ShortLabel(def.code, def.unitName),
-                    TypeBadge = TypeBadgeOf(def),
-                    Badge = count > 1 ? "×" + count : null,
-                    Progress = headFirst ? head.Progress01 : (float?)null,
-                    OnLeft = () => ProductionTasks.InsertAfter(tail, RtsInput.Shift ? 5 : 1),
-                    OnRight = () => ProductionTasks.RemoveTail(factory, def, RtsInput.Shift ? 5 : 1),
-                    Def = def,
-                });
-            }
+            if (items.Count > 0)
+                EmitRun();
         }
 
         /// <summary>Карточка недостроя (выделен кликом по площадке): прогресс и действия.</summary>
         private void FillUnfinishedTab(BuildTasks.Task t)
         {
-            _contextTitle.text = "Недострой: " + (t.Definition != null ? t.Definition.unitName : "?") +
-                                 " · " + t.Progress01.ToString("P0");
+            _contextTitle.text = Loc.F("Недострой: {0} · {1}",
+                t.Definition != null ? t.Definition.unitName : "?", t.Progress01.ToString("P0"));
             BuildTasks.Task task = t;
             AddItemButton(_strip1Content,
                 t.Definition != null ? t.Definition.friendlyIcon : null,
-                "Снести площадку (без возврата)",
+                Loc.Tr("Снести площадку (без возврата)"),
                 () =>
                 {
                     BuildTasks.Cancel(task);
@@ -1982,17 +2378,17 @@ step = "arrows";
             bool setMode = buildingSet.Count > 0;
             if (setMode)
             {
-                _contextTitle.text = "Шаблон: набор " + buildingSet.Count + " зданий";
+                _contextTitle.text = Loc.F("Шаблон: набор {0} зданий", buildingSet.Count);
                 FillBuildingSetRow(buildingSet);
             }
             else if (hasEngineer)
-                _contextTitle.text = "Шаблон: очередь стройки инженера";
+                _contextTitle.text = Loc.Tr("Шаблон: очередь стройки инженера");
             else if (depot != null)
-                _contextTitle.text = "Шаблон: очередь фабрики";
+                _contextTitle.text = Loc.Tr("Шаблон: очередь фабрики");
             else if (airbase != null)
-                _contextTitle.text = "Шаблон: очередь аэродрома";
+                _contextTitle.text = Loc.Tr("Шаблон: очередь аэродрома");
             else
-                _contextTitle.text = "Шаблоны";
+                _contextTitle.text = Loc.Tr("Шаблоны");
 
             // Верх: сохранённые шаблоны.
             foreach (OrderTemplates.Template tpl in OrderTemplates.All)
@@ -2009,21 +2405,21 @@ step = "arrows";
                                 engineers.Add(unit);
                         if (engineers.Count == 0)
                         {
-                            CommanderHud.Notice("Выдели инженера для постройки шаблона");
+                            CommanderHud.Notice(Loc.Tr("Выдели инженера для постройки шаблона"));
                             return;
                         }
                         OrderTemplates.PendingTemplate = (t, engineers);
-                        CommanderHud.Notice(t.name + ": призраки у курсора · ЛКМ — строить");
+                        CommanderHud.Notice(Loc.F("{0}: призраки у курсора · ЛКМ — строить", t.name));
                     }
                     else if (depot != null || airbase != null)
                     {
                         int n = OrderTemplates.Enqueue(t, depot != null ? (object)depot : (object)airbase);
-                        CommanderHud.Notice(t.name + ": в очередь " + n);
+                        CommanderHud.Notice(Loc.F("{0}: в очередь {1}", t.name, n));
                     }
                 });
             }
             if (OrderTemplates.Count == 0)
-                AddItemButton(_strip1Content, null, "шаблонов нет — собери набор и нажми Шаблон+", null);
+                AddItemButton(_strip1Content, null, Loc.Tr("шаблонов нет — собери набор и нажми Шаблон+"), null);
         }
 
         private Sprite ResolveTemplateIcon(OrderTemplates.Template t)
@@ -2072,12 +2468,109 @@ step = "arrows";
         /// полоса тиров сверху фильтрует пул по цене (терцили каталога). Инженер в
         /// выделении → здания (стройка где угодно), иначе депо/аэродром. Нижняя лента —
         /// задел под очередь фабрики (этап B).</summary>
-        private void FillProductionTab(FactionHQ hq, VehicleDepot depot, Airbase airbase, bool hasEngineer)
+        private void FillProductionTab(FactionHQ hq, VehicleDepot depot, Building navalDock,
+            Airbase airbase, bool hasEngineer, List<Hangar> hangars = null)
         {
             string tierName = _prodTier == 0 ? "" : " · T" + _prodTier;
+            // АНГАР(Ы) — индивидуальные авиафабрии (v0.88): каталог — юнион списков
+            // выделенных; клик по плитке = +1 КАЖДОМУ выделенному, кто умеет строить
+            // (паттерн SupCom «выделил пачку фабрик — скормил заказ всем»).
+            if (hangars != null && hangars.Count > 0)
+            {
+                _contextTitle.text = hangars.Count == 1
+                    ? Loc.Tr("Ангар — авиация (клик: в очередь)") + tierName
+                    : Loc.F("Ангары ×{0} — клик: +1 каждому умеющему", hangars.Count) + tierName;
+                var defs = new List<AircraftDefinition>();
+                foreach (Hangar hangar in hangars)
+                    foreach (AircraftDefinition a in hangar.GetAvailableAircraft())
+                        if (a != null && !defs.Contains(a))
+                            defs.Add(a);
+                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                foreach (AircraftDefinition def in defs)
+                {
+                    AircraftDefinition d = def;
+                    // Отступление от стандарта — суффикс подписи «·ЛN» (индекс пресета)
+                    int li = ProductionTasks.LoadoutIndexOf(d);
+                    Tile(_strip1Content, new TileSpec
+                    {
+                        Icon = IconOf(def),
+                        Caption = Catalog.ShortLabel(def.code, def.unitName) + (li > 0 ? Loc.Tr("·Л") + li : ""),
+                        TypeBadge = TypeBadgeOf(def),
+                        Badge = def.value > 0f ? def.value.ToString("F0") : null,
+                        OnLeft = () =>
+                        {
+                            int n = 0;
+                            foreach (Hangar hangar in hangars)
+                                if (ProductionTasks.CanBuild(hangar, d) &&
+                                    ProductionTasks.EnqueueAirSilent(hangar, d))
+                                    n++;
+                            if (n == 0)
+                                CommanderHud.Notice(Loc.F("Ни один выделенный ангар не строит: {0}",
+                                    Catalog.ShortLabel(d.code, d.unitName)));
+                        },
+                        Def = def,
+                        WheelLoadout = true,
+                    });
+                }
+                return; // нижняя строка — очередь ангара(ов) (RefreshTabs)
+            }
+            // ВЕРФЬ — третья фабрика (v0.92): каталог — весь флот энциклопедии
+            // (терциль по цене тем же тир-фильтром: T1 катера, T3 авианосцы).
+            if (navalDock != null && Encyclopedia.i != null && Encyclopedia.i.ships != null)
+            {
+                _contextTitle.text = Loc.Tr("Верфь — флот (клик: в очередь)") + tierName;
+                var defs = new List<ShipDefinition>();
+                foreach (ShipDefinition def in Encyclopedia.i.ships)
+                    if (def != null && def.unitPrefab != null &&
+                        def.unitPrefab.GetComponent<Ship>() != null && def.IsAllowed(false))
+                        defs.Add(def);
+                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                foreach (ShipDefinition def in defs)
+                {
+                    ShipDefinition d = def;
+                    Tile(_strip1Content, new TileSpec
+                    {
+                        Icon = IconOf(def),
+                        Caption = Catalog.ShortLabel(def.code, def.unitName),
+                        TypeBadge = TypeBadgeOf(def),
+                        Badge = def.value > 0f ? def.value.ToString("F0") : null,
+                        OnLeft = () => ProductionTasks.EnqueueShip(navalDock, d),
+                        Def = def,
+                    });
+                }
+                return; // нижняя строка — очередь верфи (RefreshTabs)
+            }
             if (hasEngineer && Encyclopedia.i != null && Encyclopedia.i.buildings != null)
             {
-                _contextTitle.text = "Стройка (инженер): здание → ЛКМ по земле" + tierName;
+                _contextTitle.text = Loc.Tr("Стройка (инженер): здание → ЛКМ по земле") + tierName;
+                // ВПП — особый элемент: не здание, по готовности создаёт НОВЫЙ
+                // аэродром (своя очередь + грид ангаров) — «ещё одна фабрика».
+                Tile(_strip1Content, new TileSpec
+                {
+                    Caption = Loc.Tr("ВПП"),
+                    TypeBadge = Loc.Tr("АЭР"),
+                    Badge = Settings.RunwayCost.ToString("F0"),
+                    OnLeft = () =>
+                    {
+                        BuildTasks.Pending = null;
+                        BuildTasks.PendingRunway = true;
+                    },
+                });
+                // ВЕРФЬ — вторая спец-площадка: платформа на воде, производит
+                // флот (SupCom naval yard; каталог — вся Encyclopedia.ships).
+                if (BuildTasks.DockDefinition() != null)
+                    Tile(_strip1Content, new TileSpec
+                    {
+                        Caption = Loc.Tr("ВЕРФЬ"),
+                        TypeBadge = Loc.Tr("ФЛОТ"),
+                        Badge = Settings.DockCost.ToString("F0"),
+                        OnLeft = () =>
+                        {
+                            BuildTasks.Pending = null;
+                            BuildTasks.PendingRunway = false;
+                            BuildTasks.PendingDock = true;
+                        },
+                    });
                 var defs = new List<BuildingDefinition>();
                 foreach (BuildingDefinition def in Encyclopedia.i.buildings)
                     if (def != null)
@@ -2090,7 +2583,7 @@ step = "arrows";
                     {
                         Icon = def.friendlyIcon != null ? def.friendlyIcon : def.mapIcon,
                         Caption = Catalog.ShortLabel(def.code, def.unitName),
-                        TypeBadge = BuildTasks.IsHangarDefinition(d) ? "АНГ" : null,
+                        TypeBadge = BuildTasks.IsHangarDefinition(d) ? Loc.Tr("АНГ") : null,
                         Badge = def.value > 0f ? def.value.ToString("F0") : null,
                         OnLeft = () => BuildTasks.Pending = d,
                         Def = def,
@@ -2101,7 +2594,7 @@ step = "arrows";
 
             if (depot != null && PurchaseService.Catalog != null)
             {
-                _contextTitle.text = "Фабрика — техника (клик: в очередь)" + tierName;
+                _contextTitle.text = Loc.Tr("Фабрика — техника (клик: в очередь)") + tierName;
                 var defs = new List<VehicleDefinition>();
                 foreach (VehicleDefinition def in PurchaseService.Catalog)
                     if (def != null)
@@ -2125,7 +2618,7 @@ step = "arrows";
 
             if (airbase != null && Encyclopedia.i != null && Encyclopedia.i.aircraft != null)
             {
-                _contextTitle.text = "Аэродром — авиация (клик: в очередь; РЕЗ — выкат)" + tierName;
+                _contextTitle.text = Loc.Tr("Аэродром — авиация (клик: в очередь; РЕЗ — выкат)") + tierName;
                 // Резерв ангаров (вернувшиеся «на базу» борта): выкат бесплатный,
                 // плитки ПЕРЕД каталогом, бейдж РЕЗ + счётчик.
                 var reserve = AirbaseReserve.Of(airbase);
@@ -2138,7 +2631,7 @@ step = "arrows";
                         {
                             Icon = IconOf(d),
                             Caption = Catalog.ShortLabel(d.code, d.unitName),
-                            TypeBadge = "РЕЗ",
+                            TypeBadge = Loc.Tr("РЕЗ"),
                             Badge = "×" + count,
                             OnLeft = () => PurchaseService.DeployReserve(airbase, d),
                             Def = d,
@@ -2154,28 +2647,30 @@ step = "arrows";
                         defs.Add(a);
                 if (defs.Count == 0)
                 {
-                    AddItemButton(_strip1Content, null, "нет работоспособных ангаров", null);
+                    AddItemButton(_strip1Content, null, Loc.Tr("нет работоспособных ангаров"), null);
                     return;
                 }
                 Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
                 foreach (AircraftDefinition def in defs)
                 {
                     AircraftDefinition d = def;
+                    int li = ProductionTasks.LoadoutIndexOf(d);
                     Tile(_strip1Content, new TileSpec
                     {
                         Icon = IconOf(def),
-                        Caption = Catalog.ShortLabel(def.code, def.unitName),
+                        Caption = Catalog.ShortLabel(def.code, def.unitName) + (li > 0 ? Loc.Tr("·Л") + li : ""),
                         TypeBadge = TypeBadgeOf(def),
                         Badge = def.value > 0f ? def.value.ToString("F0") : null,
-                        OnLeft = () => ProductionTasks.EnqueueAir(airbase, d),
+                        OnLeft = () => ProductionTasks.EnqueueAirDistributed(airbase, d),
                         Def = def,
+                        WheelLoadout = true,
                     });
                 }
                 return; // нижняя строка — очередь аэродрома (RefreshTabs)
             }
 
-            _contextTitle.text = "Производство";
-            AddItemButton(_strip1Content, null, "выдели депо, аэродром или инженера", null);
+            _contextTitle.text = Loc.Tr("Производство");
+            AddItemButton(_strip1Content, null, Loc.Tr("выдели депо, аэродром или инженера"), null);
             _strip2.gameObject.SetActive(false);
         }
 
@@ -2189,24 +2684,24 @@ step = "arrows";
         {
             if (extractor == null || !ecoRunning)
             {
-                _contextTitle.text = "Апгрейд";
-                AddItemButton(_strip1Content, null, "выдели свой экстрактор", null);
+                _contextTitle.text = Loc.Tr("Апгрейд");
+                AddItemButton(_strip1Content, null, Loc.Tr("выдели свой экстрактор"), null);
                 _strip2.gameObject.SetActive(false);
                 return;
             }
             int tier = EconomyService.TierOf(extractor);
-            _contextTitle.text = "Экстрактор T" + tier + " · +" +
-                                 EconomyService.IncomeRate(tier).ToString("F0") + "/мин";
+            _contextTitle.text = Loc.F("Экстрактор T{0} · +{1}/мин",
+                tier, EconomyService.IncomeRate(tier).ToString("F0"));
             float cost = EconomyService.NextUpgradeCost(extractor);
             if (cost >= 0f)
             {
                 bool ok = hq.factionFunds >= cost;
                 AddItemButton(_strip1Content, null,
-                    "Улучшить до T" + (tier + 1) + " — " + cost.ToString("F0"),
+                    Loc.F("Улучшить до T{0} — {1}", tier + 1, cost.ToString("F0")),
                     ok ? () => EconomyService.TryUpgrade(hq, extractor) : null);
             }
             else
-                AddItemButton(_strip1Content, null, "максимальный тир", null);
+                AddItemButton(_strip1Content, null, Loc.Tr("максимальный тир"), null);
             _strip2.gameObject.SetActive(false);
         }
 
@@ -2264,151 +2759,476 @@ step = "arrows";
             txt.raycastTarget = false;
         }
 
-        // ---------- hover-инфоокно плиток ----------
+        // ---------- наведение на плитку закупки (карточка определения, SupCom) ----------
 
         /// <summary>Опрос плиток под курсором (каждый кадр, без uGUI-событий — игровой
         /// input-модуль Enter/Exit не доставляет): курсор внутри плитки И внутри её
         /// ленты-вьюпорта (замаскированные при прокрутке плитки не считаются).
-        /// Снесённые плитки выпадают сами (Unity fake-null).</summary>
+        /// Снесённые плитки выпадают сами (Unity fake-null). Наведение переключает
+        /// панель свойств на карточку закупки МГНОВЕННО (v0.87.0; в v0.60.0–v0.85.0
+        /// карточка не показывалась вообще — сброс состояния наведения в окне
+        /// задержки перезапускал её таймер каждый кадр). КОЛЕСО над плиткой каталога
+        /// авиации циклит пресет лодаута (событие ввода — только в кадр прокрутки;
+        /// каталог пересобирается по LoadoutsVersion, карточка — ключом кэша).</summary>
         private void UpdateTileHover()
         {
-            if (!Settings.UiTooltips || RtsInput.Typing || _canvas == null)
+            UnitDefinition hit = null;
+            bool hitWheel = false;
+            if (Settings.UiTooltips && !RtsInput.Typing && _canvas != null)
             {
-                HideTip();
+                for (int i = _tipTiles.Count - 1; i >= 0; i--)
+                {
+                    var entry = _tipTiles[i];
+                    if (entry.tile == null)
+                    {
+                        _tipTiles.RemoveAt(i);
+                        continue;
+                    }
+                    if (hit != null || !entry.tile.gameObject.activeInHierarchy)
+                        continue;
+                    if (RectTransformUtility.RectangleContainsScreenPoint(entry.tile, Input.mousePosition, null) &&
+                        (entry.viewport == null ||
+                         RectTransformUtility.RectangleContainsScreenPoint(entry.viewport, Input.mousePosition, null)))
+                    {
+                        hit = entry.def;
+                        hitWheel = entry.wheel;
+                    }
+                }
+            }
+            if (hit != _hoverShow)
+            {
+                // Вход/уход с плитки — панель переклеивается немедленно, не ждём
+                // очередного 0.2-секундного рефреша.
+                _hoverShow = hit;
+                _infoHash = -1;
+                _nextRefresh = 0f;
+            }
+            float wheel = Input.mouseScrollDelta.y;
+            if (wheel != 0f && hitWheel && hit is AircraftDefinition ad)
+            {
+                ProductionTasks.CycleLoadout(ad, wheel > 0f ? 1 : -1);
+                // Колесо УПТРЕБЛЕНО UI: камера в этом кадре не зумит (PointerOverUi
+                // не всегда ловит плитки — подавляем явно).
+                RtsInput.WheelConsumedByUi = true;
+                _nextRefresh = 0f;   // карточка/каталог — немедленно (оружие по пресету, бейдж плитки)
+            }
+            // СКМ по плитке каталога авиации — редактор лодаута «ОСНАЩЕНИЕ»
+            // (правки станций/топлива = пресет «Свой» в общем цикле колеса).
+            if (Input.GetMouseButtonDown(2) && hitWheel && hit is AircraftDefinition adEdit)
+            {
+                RtsInput.MiddleConsumedByUi = true;   // камера не начинает драг/тап
+                ToggleLoadoutEditor(adEdit);
+            }
+            // Редактор лодаута перерисовывается по версии выбора: колесо по плитке
+            // или правки в другом месте меняют выбор — окно не ждёт 0.2-с цикла.
+            if (_loWin != null && _loWin.gameObject.activeSelf && _loDef != null &&
+                ProductionTasks.LoadoutsVersion != _loVersion)
+                RefreshLoadoutEditor();
+        }
+
+        /// <summary>Сброс наведения (режим выключен/чат/пересборка канваса):
+        /// панель возвращается к выделению на ближайшем рефреше.</summary>
+        private void ResetHover()
+        {
+            if (_hoverShow == null)
+                return;
+            _hoverShow = null;
+            _infoHash = -1;
+            _nextRefresh = 0f;
+        }
+
+        // ---------- окно «ОСНАЩЕНИЕ» (редактор лодаута, СКМ по плитке каталога) ----------
+
+        /// <summary>Открыть/закрыть редактор лодаута борта (СКМ по плитке каталога
+        /// авиации). Живёт в плавающем окне до закрытия; правки станций/топлива
+        /// = пресет «Свой», встающий в общий цикл колеса.</summary>
+        private void ToggleLoadoutEditor(AircraftDefinition def)
+        {
+            if (_loWin != null && _loWin.gameObject.activeSelf && _loDef == def)
+            {
+                _loWin.gameObject.SetActive(false);
                 return;
             }
-            UnitDefinition hit = null;
-            for (int i = _tipTiles.Count - 1; i >= 0; i--)
+            if (ProductionTasks.HardpointSetsOf(def) == null)
             {
-                var entry = _tipTiles[i];
-                if (entry.tile == null)
+                CommanderHud.Notice(Loc.F("Нет данных о станциях: {0}",
+                                    Catalog.ShortLabel(def.code, def.unitName)));
+                return;
+            }
+            _loDef = def;
+            _loVersion = -1;
+            if (_loWin == null)
+            {
+                // Над панелью закупки (низ-центр, правее левой колонки); окно
+                // перетаскиваемо и самовосстанавливается в границах канваса.
+                var crt = (RectTransform)_canvas.transform;
+                float x = Mathf.Clamp(crt.rect.width * 0.5f - 60f, 460f, crt.rect.width - 420f);
+                _loWin = FloatingWindow.Create(_canvas.transform, _font, Loc.Tr("ОСНАЩЕНИЕ"),
+                    new Vector2(x, 168f), new Vector2(404f, 330f), null);
+            }
+            if (!_loWin.gameObject.activeSelf)
+                _loWin.gameObject.SetActive(true);
+            RefreshLoadoutEditor();
+        }
+
+        /// <summary>Полная перерисовка контента редактора (открытие, клики, колесо —
+        /// всё через смену LoadoutsVersion/прямой вызов). Контент —_fact-на-строку,
+        /// правки применяются к заказам сразу (сохранять нечего: состояние липкое).</summary>
+        private void RefreshLoadoutEditor()
+        {
+            if (_loWin == null || _loWin.Content == null || _loDef == null)
+                return;
+            _loVersion = ProductionTasks.LoadoutsVersion;
+            AircraftDefinition def = _loDef;
+            HardpointSet[] sets = ProductionTasks.HardpointSetsOf(def);
+            GameManager.GetLocalHQ(out FactionHQ hq);
+            Airbase ab = _ctxAirbase != null ? _ctxAirbase
+                : (_ctxHangar != null ? _ctxHangar.parentAirbase : null);
+
+            ClearChildren(_loWin.Content);
+            var content = _loWin.Content;
+
+            // Шапка: силуэт + имя/класс + масса пустого борта
+            var icon = Icon(content, def.mapIcon != null ? def.mapIcon : def.friendlyIcon,
+                new Vector2(84f, 84f));
+            var irt = (RectTransform)icon.transform;
+            irt.anchorMin = irt.anchorMax = new Vector2(0f, 1f);
+            irt.pivot = new Vector2(0f, 1f);
+            irt.anchoredPosition = new Vector2(10f, -6f);
+            icon.preserveAspect = true;
+
+            var name = Label(content, "name", Util.FitLine(def.unitName, 34), 16, TextMain,
+                TextAnchor.UpperLeft, true);
+            PlaceLo(name.transform, 104f, 4f, 300f, 22f);
+            var cls = Label(content, "cls", Loc.F("{0} · цена {1}", ClassOfDefinition(def), def.value.ToString("F0")),
+                12, TextDim, TextAnchor.UpperLeft, true);
+            PlaceLo(cls.transform, 104f, 26f, 300f, 18f);
+            string emptyMass = def.mass > 1000f
+                ? Loc.F("масса пустого ≈ {0} т", (def.mass / 1000f).ToString("0.#",
+                      System.Globalization.CultureInfo.InvariantCulture))
+                : def.mass > 0f ? Loc.F("масса ≈ {0} кг", def.mass.ToString("0")) : "";
+            var mass = Label(content, "mass", emptyMass, 12, TextDim, TextAnchor.UpperLeft, true);
+            PlaceLo(mass.transform, 104f, 44f, 300f, 18f);
+            int sel = ProductionTasks.LoadoutIndexOf(def);
+            var selLo = ProductionTasks.SelectedLoadout(def, out float selFuel);
+            string fuelTxt = selFuel > 0.995f ? "100%" : Mathf.RoundToInt(selFuel * 100f) + "%";
+            var cur = Label(content, "cur", Loc.F("выбрано: {0} · топливо {1}", LoNameOf(def, sel), fuelTxt),
+                13, Accent, TextAnchor.UpperLeft, true);
+            PlaceLo(cur.transform, 104f, 64f, 300f, 18f);
+
+            // Пресеты-кнопки: Стандарт → авторские → «Свои N»; «+» — новый «Свой»
+            // (клон текущего выбора), «−» — удалить выбранный «Свой».
+            float y = 96f;
+            var phdr = Label(content, "phdr", Loc.Tr("Пресеты (клик — выбрать):"), 11, TextDim,
+                TextAnchor.UpperLeft, true);
+            PlaceLo(phdr.transform, 10f, y, 300f, 14f);
+            y += 16f;
+            float x = 10f;
+            for (int i = 0; i < ProductionTasks.LoadoutCount(def); i++)
+            {
+                int idx = i;
+                var b = Button_(content, "preset" + i, LoNameOf(def, i), () =>
                 {
-                    _tipTiles.RemoveAt(i);
+                    ProductionTasks.SelectLoadoutIndex(def, idx);
+                    RefreshLoadoutEditor();
+                }, 11);
+                PaintLoButton(b, x, y, 84f, 24f, i == sel);
+                x += 88f;
+                if (x > 290f)
+                {
+                    x = 10f;
+                    y += 28f;
+                }
+            }
+            var plus = Button_(content, "plus", "+", () =>
+            {
+                ProductionTasks.AddCustom(def);
+                _nextRefresh = 0f;
+                RefreshLoadoutEditor();
+            }, 14);
+            PaintLoButton(plus, x, y, 26f, 24f, false);
+            x += 30f;
+            if (ProductionTasks.SelectedCustom(def) != null)
+            {
+                var minus = Button_(content, "minus", "−", () =>
+                {
+                    ProductionTasks.RemoveSelectedCustom(def);
+                    _nextRefresh = 0f;
+                    RefreshLoadoutEditor();
+                }, 14);
+                PaintLoButton(minus, x, y, 26f, 24f, false);
+            }
+
+            // Топливо (чипы — для «Своего»; у пресета топливо зашито автором)
+            y += 30f;
+            bool customSel = ProductionTasks.SelectedCustom(def) != null;
+            var fl = Label(content, "fuel", Loc.Tr("Топливо:"), 11, TextDim, TextAnchor.UpperLeft, true);
+            PlaceLo(fl.transform, 10f, y, 60f, 14f);
+            x = 66f;
+            foreach (float f in new[] { 0.5f, 0.75f, 1f })
+            {
+                float val = f;
+                var b = Button_(content, "fuel" + f, Mathf.RoundToInt(f * 100f) + "%", () =>
+                {
+                    if (ProductionTasks.HasCustomLoadout(def))
+                        ProductionTasks.SetCustomFuel(def, val);
+                    RefreshLoadoutEditor();
+                }, 11);
+                PaintLoButton(b, x, y - 4f, 46f, 22f, customSel &&
+                    Mathf.Abs(selFuel - val) < 0.01f);
+                x += 50f;
+            }
+            if (!customSel)
+            {
+                var note = Label(content, "fnote", Loc.Tr("у пресета — авторское"), 10, TextDim,
+                    TextAnchor.UpperLeft, true);
+                PlaceLo(note.transform, x + 4f, y, 150f, 14f);
+            }
+
+            // Станции: клик — следующий легальный вариант (правки = «Свой»)
+            y += 26f;
+            var shdr = Label(content, "shdr", Loc.Tr("Станции (клик — сменить вооружение):"), 11, TextDim,
+                TextAnchor.UpperLeft, true);
+            PlaceLo(shdr.transform, 10f, y, 380f, 14f);
+            y += 16f;
+            for (int i = 0; i < sets.Length; i++)
+            {
+                int setIdx = i;
+                HardpointSet set = sets[i];
+                int pylons = set != null && set.hardpoints != null ? set.hardpoints.Count : 1;
+                string setName = set != null && !string.IsNullOrEmpty(set.name)
+                    ? set.name : Loc.F("Ст.{0}", i + 1);
+                // Отображение: маунт выбранного лодаута, а при «Стандарте» —
+                // заводской из дефолт-лодаута игры (внутренние пушки и т.п.).
+                WeaponMount m = selLo != null && i < selLo.weapons.Count ? selLo.weapons[i]
+                    : ProductionTasks.DefaultMountOf(def, i);
+                string mount = m != null && m.info != null
+                    ? (!string.IsNullOrEmpty(m.info.shortName) ? m.info.shortName : m.info.weaponName)
+                      + " ×" + Mathf.Max(1, m.ammo) * pylons
+                    : Loc.Tr("пусто");
+                if (!ProductionTasks.StationConfigurable(def, i, ab, hq))
+                {
+                    // Настроек нет (пустые options и ничего не висит) — надпись, не кнопка
+                    var lbl = Label(content, "st" + i,
+                        setName + " ×" + pylons + " · " + Loc.Tr("нет вариантов"),
+                        11, TextDim, TextAnchor.MiddleLeft, true);
+                    PlaceLo(lbl.transform, 10f, y, 384f, 24f);
+                    y += 27f;
                     continue;
                 }
-                if (hit != null || !entry.tile.gameObject.activeInHierarchy)
-                    continue;
-                if (RectTransformUtility.RectangleContainsScreenPoint(entry.tile, Input.mousePosition, null) &&
-                    (entry.viewport == null ||
-                     RectTransformUtility.RectangleContainsScreenPoint(entry.viewport, Input.mousePosition, null)))
-                    hit = entry.def;
+                var b = Button_(content, "st" + i, setName + " ×" + pylons + " · " + mount, () =>
+                {
+                    ProductionTasks.CycleStation(def, setIdx, 1, ab, hq);
+                    _nextRefresh = 0f;
+                    RefreshLoadoutEditor();
+                }, 11);
+                PaintLoButton(b, 10f, y, 384f, 24f, false);
+                y += 27f;
             }
-            if (hit != _hoverDef)
-            {
-                _hoverDef = hit;
-                _hoverSince = Time.unscaledTime;
-            }
-            if (hit == null || Time.unscaledTime - _hoverSince < TipDelaySec)
-            {
-                HideTip();
-                return;
-            }
-            ShowTip(hit);
+
+            // Итог: масса подвесок + легальность на текущем аэродроме
+            float susp = 0f;
+            if (selLo != null)
+                for (int i = 0; i < selLo.weapons.Count; i++)
+                {
+                    WeaponMount m = selLo.weapons[i];
+                    if (m == null || m.info == null)
+                        continue;
+                    int pylons = sets != null && i < sets.Length && sets[i] != null &&
+                                 sets[i].hardpoints != null ? sets[i].hardpoints.Count : 1;
+                    susp += Mathf.Max(1, m.ammo) * m.info.massPerRound * pylons;
+                }
+            bool allowed = ProductionTasks.LoadoutAllowed(def, selLo, hq);
+            string massLine = (susp >= 1000f
+                ? Loc.F("+≈{0} т подвесок", (susp / 1000f).ToString("0.#",
+                      System.Globalization.CultureInfo.InvariantCulture))
+                : susp > 0f ? Loc.F("+≈{0} кг подвесок", susp.ToString("0")) : Loc.Tr("без подвесок"))
+                + (selLo == null ? Loc.Tr(" (стандарт)") : "")
+                + Loc.F(" · на этом аэродроме: {0}", allowed ? Loc.Tr("легально") : Loc.Tr("НЕДОСТУПНО"));
+            var it = Label(content, "itogo", massLine, 11, allowed ? TextDim : new Color(1f, 0.5f, 0.4f, 1f),
+                TextAnchor.UpperLeft, true);
+            PlaceLo(it.transform, 10f, y, 384f, 16f);
+            y += 20f;
+
+            _loWin.Root.sizeDelta = new Vector2(404f, Mathf.Max(240f, y + 8f));
+            _loWin.ClampToParent();
         }
 
-        private void HideTip()
+        /// <summary>Имя варианта по индексу: Стандарт / пресет / «Свой N».</summary>
+        private static string LoNameOf(AircraftDefinition def, int idx)
         {
-            if (_tipRoot != null && _tipRoot.gameObject.activeSelf)
-                _tipRoot.gameObject.SetActive(false);
-            _hoverDef = null;
-        }
-
-        /// <summary>Карточка определения у курсора: имя, класс/роль, цена, описание
-        /// из энциклопедии игры (как панель свойств юнита, но по определению).</summary>
-        private void ShowTip(UnitDefinition def)
-        {
-            BuildTipOnce();
-            if (_tipRoot == null)
-                return;
-            if (_tipDef != def)
+            if (idx <= 0)
+                return Loc.Tr("Стандарт");
+            var presets = ProductionTasks.UsablePresets(def);
+            if (idx - 1 < presets.Count)
             {
-                _tipDef = def;
-                _tipTitle.text = def.unitName;
-                _tipClass.text = ClassOfDefinition(def) + " · " + def.value.ToString("F0");
-                string desc = def.description;
-                if (desc != null && desc.Length > 260)
-                    desc = desc.Substring(0, 259) + "…";
-                _tipDesc.text = desc ?? "";
-                _tipDesc.gameObject.SetActive(!string.IsNullOrEmpty(desc));
+                string n = presets[idx - 1].Name;
+                return string.IsNullOrEmpty(n) ? "#" + idx : n;
             }
-
-            var canvasRt = (RectTransform)_canvas.transform;
-            if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
-                    canvasRt, Input.mousePosition, null, out Vector2 p))
-                return;
-            Vector2 size = _tipRoot.sizeDelta;
-            Rect cr = canvasRt.rect;
-            // Пивот окна — левый-низ: держим карточку у курсора, у краёв — через курсор.
-            float x = p.x + 16f;
-            float y = p.y + 16f;
-            if (x + size.x > cr.width * 0.5f)
-                x = p.x - size.x - 16f;
-            if (y + size.y > cr.height * 0.5f)
-                y = p.y - size.y - 16f;
-            _tipRoot.anchoredPosition = new Vector2(x, y);
-            if (!_tipRoot.gameObject.activeSelf)
-                _tipRoot.gameObject.SetActive(true);
+            return ProductionTasks.CustomName + " " + (idx - presets.Count);
         }
 
-        private void BuildTipOnce()
+        private void PlaceLo(Transform t, float x, float y, float w, float h)
         {
-            if (_tipRoot != null || _canvas == null)
-                return;
+            var rt = (RectTransform)t;
+            rt.anchorMin = rt.anchorMax = new Vector2(0f, 1f);
+            rt.pivot = new Vector2(0f, 1f);
+            rt.anchoredPosition = new Vector2(x, -y);
+            rt.sizeDelta = new Vector2(w, h);
+        }
+
+        private void PaintLoButton(Button b, float x, float y, float w, float h, bool selected)
+        {
+            PlaceLo(b.transform, x, y, w, h);
+            var img = b.GetComponent<Image>();
+            if (img != null)
+                img.color = selected ? BtnActive : BtnBg;
+        }
+
+        /// <summary>Контент карточки с кэшем (ключ — определение + индекс лодаута:
+        /// колесо даёт новую запись, старые не портятся); сбой расчёта не роняет UI —
+        /// показывает что насчиталось (например, только имя).</summary>
+        private TipContent GetTipContent(UnitDefinition def, int loadIdx)
+        {
+            var key = (def, loadIdx);
+            if (_tipContent.TryGetValue(key, out TipContent c))
+                return c;
+            c = new TipContent { Title = def.unitName ?? "?" };
             try
             {
-                var go = new GameObject("TileTip", typeof(RectTransform), typeof(Image));
-                var rt = (RectTransform)go.transform;
-                rt.SetParent(_canvas.transform, false);
-                rt.anchorMin = rt.anchorMax = rt.pivot = Vector2.zero;
-                rt.sizeDelta = new Vector2(330f, 122f);
-                go.GetComponent<Image>().color = new Color(0.04f, 0.06f, 0.08f, 0.97f);
-                _tipRoot = rt;
-
-                _tipTitle = Label(rt, "t", "", 15, TextMain, TextAnchor.UpperLeft);
-                var rtT = (RectTransform)_tipTitle.transform;
-                rtT.anchorMin = new Vector2(0f, 1f);
-                rtT.anchorMax = new Vector2(1f, 1f);
-                rtT.pivot = new Vector2(0.5f, 1f);
-                rtT.offsetMin = new Vector2(10f, -22f);
-                rtT.offsetMax = new Vector2(-10f, -4f);
-                _tipTitle.raycastTarget = false;
-
-                _tipClass = Label(rt, "cls", "", 12, Accent, TextAnchor.UpperLeft);
-                var rtC = (RectTransform)_tipClass.transform;
-                rtC.anchorMin = new Vector2(0f, 1f);
-                rtC.anchorMax = new Vector2(1f, 1f);
-                rtC.pivot = new Vector2(0.5f, 1f);
-                rtC.offsetMin = new Vector2(10f, -38f);
-                rtC.offsetMax = new Vector2(-10f, -22f);
-                _tipClass.raycastTarget = false;
-
-                _tipDesc = Label(rt, "desc", "", 12, TextDim, TextAnchor.UpperLeft);
-                var rtD = (RectTransform)_tipDesc.transform;
-                rtD.anchorMin = new Vector2(0f, 1f);
-                rtD.anchorMax = new Vector2(1f, 1f);
-                rtD.pivot = new Vector2(0.5f, 1f);
-                rtD.offsetMin = new Vector2(10f, -116f);
-                rtD.offsetMax = new Vector2(-10f, -42f);
-                _tipDesc.raycastTarget = false;
-
-                rt.SetAsLastSibling();
-                rt.gameObject.SetActive(false);
+                BuildTipContent(def, c, loadIdx);
             }
             catch (System.Exception e)
             {
-                Log.Error("SupcomUi: сбой построения hover-карточки — " + e.GetType().Name + ": " + e.Message);
-                _tipRoot = null;
+                Log.Error("SupcomUi: сбой расчёта карточки закупки (" + (def.unitName ?? "?") +
+                          ") — " + e.GetType().Name + ": " + e.Message);
+            }
+            _tipContent[key] = c;
+            return c;
+        }
+
+        /// <summary>Расчёт строк карточки по определению: темп фабрики/стройки —
+        /// из Settings; вооружение — состав ВЫБРАННОГО ЛОДАУТА у авиации с пресетами
+        /// (заряд пилона × пилонов сета, hardpointSets сериализованы на префабе),
+        /// иначе дефолтная нагрузка префаба (Weapon-компоненты с info/ammo);
+        /// скорость авиации — aircraftInfo (фолбэк — параметры).</summary>
+        private void BuildTipContent(UnitDefinition def, TipContent c, int loadIdx)
+        {
+            bool building = def is BuildingDefinition;
+            float seconds = building ? Settings.BuildSecondsPerBuilder : Settings.ProductionSecondsPerItem;
+            c.Title = Util.FitLine(def.unitName, FitTitleChars);
+            c.ClassLine = Catalog.FormatTipClass(ClassOfDefinition(def), def.value, seconds, building);
+
+            var acc = new WeaponTallyAccumulator();
+            acc.BeginUnit();
+            Loadout lo = null;
+            if (def is AircraftDefinition adef)
+            {
+                int n = ProductionTasks.LoadoutCount(adef);
+                if (n > 1)
+                {
+                    int i = Mathf.Clamp(loadIdx, 0, n - 1);
+                    lo = ProductionTasks.SelectedLoadout(adef, out float selFuel);
+                    string name = i == 0 ? Loc.Tr("Стандарт") : LoNameOf(adef, i);
+                    // Бак — только когда отличен от полного: выбор виден целиком.
+                    string tank = selFuel > 0.05f && selFuel < 0.995f
+                        ? Loc.F(" · бак {0}%", Mathf.RoundToInt(selFuel * 100f)) : "";
+                    c.LoadoutLine = Loc.F("лодаут: {0}{1} · колесо — смена · СКМ — правка", name, tank);
+                }
+            }
+            if (lo != null)
+            {
+                HardpointSet[] sets = ProductionTasks.HardpointSetsOf(def as AircraftDefinition);
+                List<WeaponMount> ws = lo.weapons;
+                for (int i = 0; i < ws.Count; i++)
+                {
+                    WeaponMount mount = ws[i];
+                    WeaponInfo wi = mount != null ? mount.info : null;
+                    if (wi == null || wi.hideInDisplay)
+                        continue;
+                    int mult = 1;
+                    if (sets != null && i < sets.Length && sets[i] != null && sets[i].hardpoints != null)
+                        mult = Mathf.Max(1, sets[i].hardpoints.Count);
+                    int total = Mathf.Max(1, mount.ammo) * mult;
+                    string name = !string.IsNullOrEmpty(wi.shortName) ? wi.shortName : wi.weaponName;
+                    acc.AddStation(name, total, total,
+                        Catalog.WeaponDomains(wi.effectiveness.antiAir, wi.effectiveness.antiSurface,
+                            wi.effectiveness.antiMissile, wi.nuclear, wi.jammer));
+                }
+            }
+            else if (def.unitPrefab != null)
+                foreach (Weapon w in def.unitPrefab.GetComponentsInChildren<Weapon>(true))
+                {
+                    WeaponInfo wi = w != null ? w.info : null;
+                    if (wi == null || wi.hideInDisplay)
+                        continue;
+                    string name = !string.IsNullOrEmpty(wi.shortName) ? wi.shortName : wi.weaponName;
+                    acc.AddStation(name, w.ammo, w.ammo,
+                        Catalog.WeaponDomains(wi.effectiveness.antiAir, wi.effectiveness.antiSurface,
+                            wi.effectiveness.antiMissile, wi.nuclear, wi.jammer));
+                }
+            for (int i = 0; i < acc.Rows.Count; i++)
+            {
+                if (c.Weapons.Count == DefMaxWeaponRows)
+                {
+                    int rest = acc.Rows.Count - i;
+                    c.Weapons.Add(Loc.F("+ ещё {0} {1}", rest, Loc.Plural(rest, "тип", "типа", "типов")));
+                    break;
+                }
+                c.Weapons.Add(Catalog.FormatTipWeaponRow(acc.Rows[i]));
+            }
+
+            float speed = 0f;
+            if (def is AircraftDefinition ad)
+                speed = ad.aircraftInfo != null ? ad.aircraftInfo.maxSpeed
+                    : (ad.aircraftParameters != null ? ad.aircraftParameters.maxSpeed : 0f);
+            c.StatRows.AddRange(Catalog.TipStatRows(def.visibleRange, speed,
+                def.armorTier, def.manpower, def.mass));
+
+            // Описание: перенос по ширине окна «ОПИСАНИЕ»; длиннее максимума строк —
+            // подрезаем хвостами по 24 символа с «…» (только на первом расчёте).
+            string desc = def.description ?? "";
+            if (desc.Length > 0)
+            {
+                c.Desc = desc;
+                c.DescLines = MeasureLines(c.Desc);
+                while (c.DescLines > DefMaxDescLines && c.Desc.Length > 16)
+                {
+                    c.Desc = c.Desc.Substring(0, System.Math.Max(16, c.Desc.Length - 24)).TrimEnd() + "…";
+                    c.DescLines = MeasureLines(c.Desc);
+                }
+                if (c.DescLines > DefMaxDescLines)
+                    c.DescLines = DefMaxDescLines;
             }
         }
 
-        /// <summary>Класс определения для карточки: тип наземки / роль авиации.</summary>
+        /// <summary>Число строк переноса текста по ширине окна «ОПИСАНИЕ»
+        /// (шрифт/настройки живого лейбла); пустой текст или нет лейбла — 0.</summary>
+        private int MeasureLines(string text)
+        {
+            if (string.IsNullOrEmpty(text) || _descText == null || _descText.font == null)
+                return 0;
+            var gen = _descText.cachedTextGenerator;
+            gen.Populate(text, _descText.GetGenerationSettings(new Vector2(DescTextWidth, 4096f)));
+            return System.Math.Max(1, gen.lineCount);
+        }
+
+        /// <summary>Класс определения для карточки: тип наземки/флота/роль авиации.
+        /// v0.97: рядом расшифровка бейджа плитки «(ТНК)/(ЭМ)/(И)» — сокращения
+        /// каталога читаются без шпаргалки; корабли раньше падали в «здание».</summary>
         private static string ClassOfDefinition(UnitDefinition def)
         {
             if (def is AircraftDefinition)
-                return "авиация · " + Catalog.AirRoleName(def.roleIdentity, def.typeIdentity);
+                return Loc.F("авиация · {0} ({1})",
+                    Catalog.AirRoleName(def.roleIdentity, def.typeIdentity),
+                    Catalog.AirBadge(def.roleIdentity, def.typeIdentity));
+            if (def is ShipDefinition sea)
+                return Loc.F("флот · {0} ({1})",
+                    Catalog.TypeNameOf(sea.shipType), Catalog.BadgeOf(sea.shipType));
             if (def is VehicleDefinition vd)
-                return Catalog.TypeNameOf(vd.vehicleType);
-            return "здание";
+                return Loc.F("наземка · {0} ({1})",
+                    Catalog.TypeNameOf(vd.vehicleType), Catalog.BadgeOf(vd.vehicleType));
+            return Loc.Tr("здание");
         }
 
         private static void ClearChildren(Transform t)

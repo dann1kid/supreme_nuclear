@@ -60,6 +60,14 @@ namespace SupremeNuclear
             {
                 return true;
             }
+            else if (mode == AirOrderMode.Escort &&
+                     AircraftOrders.EnemyNearby(aircraft, aircraft.NetworkHQ,
+                         AircraftOrders.EngageRadius(aircraft)))
+            {
+                // Сопровождение: враг в дальности вооружения — нативный бой, не уводим
+                // борт от цели дальше выстрела (зеркально самолётному патчу №1).
+                return true;
+            }
 
             // Залп (Salvo): нативный бой НЕ включаем — рулит мод, пуски делает SalvoService.
             // Режим «Ловушки»: маршрут держим, контрмеры сбрасываем по интервалу.
@@ -69,10 +77,14 @@ namespace SupremeNuclear
             if (aircraft.autopilot != null)
             {
                 // Вертолётная перегрузка: altitudeHold — ВЫСОТА НАД РЕЛЬЕФОМ (AGL
-                // профиля сегмента), не мировая Y (AutopilotHelo/Tiltwing сами ведут
-                // waypoint-навигацию и обход рельефа, throttle не трогаем).
+                // профиля сегмента), throttle не трогаем (hover-контур ведёт газ).
+                // followTerrain для вертолётов ВСЕГДА true (DESIGN §2.11a, как у
+                // нативного AIHeloCombatState): при false автопилот считает высоту
+                // как «Y борта − Y точки − altitudeHold», а наши точки уже несут
+                // AGL в мировой Y — профиль вычитался бы ДВАЖДЫ, борт полез к
+                // двойной высоте, коллектив охотился за ней и болтал борт (v0.92).
                 aircraft.autopilot.AutoAim(destination, altitudeAgl,
-                    Vector3.zero, Vector3.zero, followTerrain);
+                    Vector3.zero, Vector3.zero, true);
             }
             return false;
         }

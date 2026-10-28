@@ -14,8 +14,8 @@ namespace SupremeNuclear
         private static Mesh[] _meshes;
 
         /// <summary>Число сабмешей-цветов: 0 ход/RTB, 1 атака-движение, 2 патруль,
-        /// 3 атака, 4 залп.</summary>
-        private const int SubmeshCount = 5;
+        /// 3 атака, 4 залп, 5 сопровождение.</summary>
+        private const int SubmeshCount = 6;
         private static Material[] _mats;
         private static int _layer;
         private static float _nextRebuild;
@@ -24,9 +24,9 @@ namespace SupremeNuclear
         private static int _lastGroundVersion = -1;
         private static bool _ready;
 
-        private static readonly List<Vector3>[] Verts = { new List<Vector3>(), new List<Vector3>(), new List<Vector3>(), new List<Vector3>(), new List<Vector3>() };
-        private static readonly List<Vector2>[] Uv = { new List<Vector2>(), new List<Vector2>(), new List<Vector2>(), new List<Vector2>(), new List<Vector2>() };
-        private static readonly List<int>[] Tris = { new List<int>(), new List<int>(), new List<int>(), new List<int>(), new List<int>() };
+        private static readonly List<Vector3>[] Verts = { new List<Vector3>(), new List<Vector3>(), new List<Vector3>(), new List<Vector3>(), new List<Vector3>(), new List<Vector3>() };
+        private static readonly List<Vector2>[] Uv = { new List<Vector2>(), new List<Vector2>(), new List<Vector2>(), new List<Vector2>(), new List<Vector2>(), new List<Vector2>() };
+        private static readonly List<int>[] Tris = { new List<int>(), new List<int>(), new List<int>(), new List<int>(), new List<int>(), new List<int>() };
         // Скругление углов цепочки перед сэмплированием рельефа (та же логика, что в IMGUI-ленте).
         private static readonly List<Vector3> ChainPts = new List<Vector3>();
         private static readonly List<Vector3> SmoothChain = new List<Vector3>();
@@ -74,7 +74,7 @@ namespace SupremeNuclear
         {
             if (!_ready || _meshes == null || _mats == null)
                 return;
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < SubmeshCount; i++) // все сабмеши: залп (4) раньше не подавался
             {
                 if (_meshes[i] == null || _meshes[i].vertexCount == 0 || _mats[i] == null)
                     continue;
@@ -97,6 +97,9 @@ namespace SupremeNuclear
             return frame;
         }
 
+        private static readonly List<Unit> MeshEscortUnits = new List<Unit>();
+        private static readonly List<Unit> MeshEscortTargets = new List<Unit>();
+
         private static void CollectGround(List<RouteDraw> routes)
         {
             var units = new List<Unit>();
@@ -106,15 +109,42 @@ namespace SupremeNuclear
             for (int i = 0; i < units.Count; i++)
             {
                 Unit unit = units[i];
+                // Цепочка инженера с живой очередью — служебная выданная голова;
+                // маршрут инженера рисует IMGUI-проход очередей, ленту не дублируем.
+                if (BuildTasks.ChainIsIssuedHead(unit))
+                    continue;
+                bool patrol = GroundOrders.KindOf(unit) == GroundOrderKind.Patrol;
                 ChainPts.Clear();
                 Vector3 up = unit.transform.position;
                 ChainPts.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                Vector3 first = default;
                 for (int q = GroundOrders.DrawStartIndex(unit); q < queues[i].Count; q++)
                 {
                     Vector3 l = queues[i][q].ToLocalPosition();
-                    ChainPts.Add(new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z));
+                    Vector3 wp = new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z);
+                    if (q == GroundOrders.DrawStartIndex(unit))
+                        first = wp;
+                    ChainPts.Add(wp);
                 }
-                AddSmoothedRoute(routes, 0, ChainPts);
+                if (patrol && ChainPts.Count > 2)
+                    ChainPts.Add(first); // замыкающая нога цикла
+                AddSmoothedRoute(routes, patrol ? 2 : 0, ChainPts);
+            }
+
+            // Связи сопровождения наземки/флота (v0.97): лента «эскорт → цель».
+            GroundOrders.CollectEscorts(MeshEscortUnits, MeshEscortTargets);
+            for (int i = 0; i < MeshEscortUnits.Count; i++)
+            {
+                Unit t = MeshEscortTargets[i];
+                if (t == null || t.disabled)
+                    continue;
+                Vector3 up = MeshEscortUnits[i].transform.position;
+                var r = new RouteDraw { Submesh = 5 };
+                r.World.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                Vector3 tp = t.transform.position;
+                AppendSamples(r.World, new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z));
+                if (r.World.Count > 1)
+                    routes.Add(r);
             }
         }
 
@@ -135,6 +165,18 @@ namespace SupremeNuclear
                     int sub = SubmeshOf(seg.Mode);
                     if (seg.Mode == AirOrderMode.Attack && seg.Target != null)
                     {
+                        Vector3 tp = seg.Target.transform.position;
+                        var r = new RouteDraw { Submesh = sub };
+                        r.World.Add(anchor);
+                        AppendSamples(r.World, new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z));
+                        if (r.World.Count > 1)
+                            routes.Add(r);
+                        anchor = r.World[r.World.Count - 1];
+                        continue;
+                    }
+                    if (seg.Mode == AirOrderMode.Escort && seg.Target != null)
+                    {
+                        // Эскорт-сегмент (v0.97): зелёная нога «борт → цель».
                         Vector3 tp = seg.Target.transform.position;
                         var r = new RouteDraw { Submesh = sub };
                         r.World.Add(anchor);
@@ -199,6 +241,7 @@ namespace SupremeNuclear
                 AirOrderMode.Patrol => 2,
                 AirOrderMode.Attack => 3,
                 AirOrderMode.Salvo => 4, // залп — малиновый
+                AirOrderMode.Escort => 5, // сопровождение — зелёный
                 AirOrderMode.Rtb => 0, // цвет возврата даёт IMGUI; меш-режим экспериментальный
                 _ => 0
             };
@@ -310,7 +353,8 @@ namespace SupremeNuclear
                 new Color(1f, 0.5f, 0.2f),
                 new Color(0.3f, 0.95f, 0.85f),
                 new Color(1f, 0.25f, 0.2f),
-                new Color(0.95f, 0.3f, 0.8f) // залп
+                new Color(0.95f, 0.3f, 0.8f), // залп
+                new Color(0.55f, 0.95f, 0.4f) // сопровождение
             };
             // Белая 1x1 текстура вместо текстуры донора (иначе лента получает «асфальт» корпуса).
             var white = new Texture2D(1, 1);

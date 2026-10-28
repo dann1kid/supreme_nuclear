@@ -47,27 +47,37 @@ namespace SupremeNuclear
             bool active = controller != null && controller.IsActive;
 
             GUI.Label(new Rect(10f, 8f, 1100f, 22f),
-                $"SUPREME NUCLEAR v{PluginInfo.Version}  |  Режим командира: {(active ? "<color=lime>ВКЛ</color>" : "ВЫКЛ")}  |  {Settings.ToggleCommanderKey} — переключить",
+                $"SUPREME NUCLEAR v{PluginInfo.Version}  |  " + Loc.F("Режим командира: {0}  |  {1} — переключить",
+                    active ? "<color=lime>" + Loc.Tr("ВКЛ") + "</color>" : Loc.Tr("ВЫКЛ"),
+                    Settings.ToggleCommanderKey),
                 _label);
 
             if (active)
             {
-                SelectionService selection = controller.Selection;
+                // Тяжёлая отрисовка — ТОЛЬКО на Repaint: OnGUI вызывается 2-4 раза за
+                // кадр (Layout + Repaint + события мыши/клавиатуры), а пиксели пишет
+                // только Repaint — остальные проходы гнали сотни проекций/физлучей
+                // GroundY вхолостую (лагало при большом числе вейпоинтов). GUILayout
+                // не используется — пропуск Layout-проходов безопасен.
+                if (Event.current.type == EventType.Repaint)
+                {
+                    SelectionService selection = controller.Selection;
 
-                if (selection.IsDragging)
-                    DrawBoxOutline(selection.DragRectGui, 1.5f, new Color(0.6f, 1f, 0.6f, 0.9f));
+                    if (selection.IsDragging)
+                        DrawBoxOutline(selection.DragRectGui, 1.5f, new Color(0.6f, 1f, 0.6f, 0.9f));
 
-                RangeRings.Draw(); // кольца дальности — самый нижний слой
-                DrawDepositMarkers();
-                DrawStrategicIcons(controller);
-                DrawHpBars();
-                DrawBuildMarkers();
-                DrawSelectionRings(controller);
-                DrawSelectionBrackets(controller);
-                DrawInspectedBrackets(controller);
-                DrawAircraftRoutes(controller);
-                DrawOrderMarkers(controller);
-                DrawFanTargets(controller);
+                    RangeRings.Draw(); // кольца дальности — самый нижний слой
+                    DrawDepositMarkers();
+                    DrawStrategicIcons(controller);
+                    DrawHpBars();
+                    DrawBuildMarkers();
+                    DrawSelectionRings(controller);
+                    DrawSelectionBrackets(controller);
+                    DrawInspectedBrackets(controller);
+                    DrawAircraftRoutes(controller);
+                    DrawOrderMarkers(controller);
+                    DrawFanTargets(controller);
+                }
             }
 
             DrawNotices();
@@ -181,13 +191,15 @@ namespace SupremeNuclear
                 DrawBoxOutline(r, 2f * k, t.ZoneBlocked ? new Color(1f, 0.5f, 0.35f, 0.95f) : c);
                 if (t.ZoneBlocked)
                     GUI.Label(new Rect(sp.x - 140f, gy + s * 0.5f + 2f, 280f, 18f * k),
-                        "зона не расчищена", _small);
+                        Loc.Tr("зона не расчищена"), _small);
                 float p = t.Progress01;
                 var fill = new Rect(r.x + 3f * k, r.yMax - 3f * k - (r.height - 6f * k) * p,
                     r.width - 6f * k, (r.height - 6f * k) * p);
                 DrawRect(fill, new Color(c.r, c.g, c.b, 0.28f));
                 GUI.Label(new Rect(sp.x - 140f, gy - s * 0.5f - 20f * k, 280f, 18f * k),
-                    $"{(t.Definition != null ? t.Definition.unitName : "?")} {p:P0}", _small);
+                    Loc.F("{0} {1}",
+                        t.Definition != null ? t.Definition.unitName : t.IsRunway ? Loc.Tr("ВПП") : "?",
+                        p.ToString("P0")), _small);
             }
 
             // Призраки шаблона: весь набор у курсора с сохранёнными смещениями;
@@ -214,7 +226,7 @@ namespace SupremeNuclear
                 Vector3 csp = cam.WorldToScreenPoint(tplGround + Vector3.up * 6f);
                 if (csp.z > 0f)
                     GUI.Label(new Rect(csp.x - 220f, Screen.height - csp.y + 16f * k, 440f, 18f * k),
-                        tpl.name + " · ЛКМ — построить (Shift — серия) · ПКМ — отмена", _small);
+                        Loc.F("{0} · ЛКМ — построить (Shift — серия) · ПКМ — отмена", tpl.name), _small);
             }
 
             if (BuildTasks.Pending == null || RtsInput.PointerOverUi)
@@ -244,7 +256,8 @@ namespace SupremeNuclear
             DrawBoxOutline(new Rect(gsp.x - fw * 0.5f, ggy - fw * 0.5f, fw, fw), 1.5f * k, gc);
             DrawCross(new Vector2(gsp.x, ggy), 26f * k, gc);
             GUI.Label(new Rect(gsp.x - 220f, ggy + 16f * k, 440f, 18f * k),
-                $"{BuildTasks.Pending.unitName} — {BuildTasks.Pending.value:F0} · ЛКМ — поставить (удержание — поворот) · ПКМ — отмена", _small);
+                Loc.F("{0} — {1} · ЛКМ — поставить (удержание — поворот) · ПКМ — отмена",
+                    BuildTasks.Pending.unitName, BuildTasks.Pending.value.ToString("F0")), _small);
         }
 
         private static bool IsExtractor(Unit unit) => EconomyService.IsExtractor(unit);
@@ -702,6 +715,7 @@ namespace SupremeNuclear
                 AirOrderMode.AttackMove => new Color(1f, 0.5f, 0.2f, 1f),
                 AirOrderMode.Attack => new Color(1f, 0.25f, 0.2f, 1f),
                 AirOrderMode.Salvo => new Color(0.95f, 0.3f, 0.8f, 1f),
+                AirOrderMode.Escort => new Color(0.55f, 0.95f, 0.4f, 1f),
                 AirOrderMode.Rtb => new Color(0.55f, 0.7f, 1f, 1f),
                 _ => new Color(1f, 0.8f, 0.25f, 1f)
             };
@@ -904,9 +918,10 @@ namespace SupremeNuclear
             }
         }
 
-        /// <summary>Индекс вейпоинта под курсором (радиус px) или -1.</summary>
-        private static int HoverWaypointIndex(Camera cam, List<Vector3> wps, float radiusPx = 22f)
+        /// <summary>Индекс вейпоинта под курсором (единый пик-радиус вейпоинтов) или -1.</summary>
+        private static int HoverWaypointIndex(Camera cam, List<Vector3> wps)
         {
+            float radiusPx = Settings.WaypointPickPx;
             Vector3 m = RtsInput.MousePos;
             for (int i = 0; i < wps.Count; i++)
             {
@@ -956,9 +971,22 @@ namespace SupremeNuclear
         private static readonly HashSet<BuildTasks.Task> DrawnSites = new HashSet<BuildTasks.Task>();
         private static readonly HashSet<int> DrawnGroupMoves = new HashSet<int>();
         private static readonly HashSet<Unit> DrawnGroundTargets = new HashSet<Unit>();
+        // Связи сопровождения (наземка + авиа-эскорт): маркер на ЦЕЛИ — один на цель.
+        private static readonly List<Unit> EscortUnits = new List<Unit>();
+        private static readonly List<Unit> EscortTargetsBuf = new List<Unit>();
+        private static readonly HashSet<Unit> DrawnEscortMarkers = new HashSet<Unit>();
         // Групповые точки планов авиации: центроид группы бортов + дедуп маркеров.
         private static readonly Dictionary<int, Vector4> AirGidCentroids = new Dictionary<int, Vector4>();
         private static readonly HashSet<int> DrawnAirGid = new HashSet<int>();
+        // SupCom-магистраль авиации (v0.91, зеркально наземке): узел группы —
+        // центроид формационных точек, вход — от центроида якорей членов, сегменты
+        // магистрали/входы/ноги атак и RTB — по одному разу на приказ.
+        private static readonly Dictionary<int, Vector4> AirGidAnchors = new Dictionary<int, Vector4>();
+        private static readonly HashSet<int> SeenAirGids = new HashSet<int>();
+        private static readonly HashSet<long> DrawnAirLegs = new HashSet<long>();
+        private static readonly HashSet<int> DrawnAirEntries = new HashSet<int>();
+        private static readonly HashSet<Unit> DrawnAirTargets = new HashSet<Unit>();
+        private static readonly HashSet<Airbase> DrawnRtbBases = new HashSet<Airbase>();
 
         private static long PairKey(int a, int b) => (long)a << 32 | (uint)b;
 
@@ -986,7 +1014,7 @@ namespace SupremeNuclear
         /// вместе); текущая цель погони — яркая, с пульсирующим крестом, ждущие свою
         /// позицию — приглушённые, со статичным крестом. Hover подсвечивает путь до узла.</summary>
         private static void DrawGroundChain(Camera cam, Unit unit, IReadOnlyList<GlobalPosition> queue,
-            int qi, Color c, float a)
+            int qi, Color c, float a, bool loop = false)
         {
             // Узлы очереди В ПОРЯДКЕ КЛИКОВ: дозревшие/текущие цели — в голове,
             // дальше точки, с целями, вставленными после своей позиции серии.
@@ -1104,6 +1132,29 @@ namespace SupremeNuclear
                 prevGid = gid;
                 prevTarget = nodeTarget;
             }
+            // Замыкающая нога патруля: последний узел → первый. Магистральные
+            // групповые сегменты дедуплицированы тем же PairKey (каждый член
+            // группы не рисует её дважды), индивидуальные — своя у каждого.
+            if (loop && ChainNodes.Count >= 2)
+            {
+                int lastGid = NodeGids[NodeGids.Count - 1];
+                int firstGid = NodeGids[0];
+                bool closeLeg = lastGid != 0 && firstGid != 0
+                    ? DrawnGidLegs.Add(PairKey(lastGid, firstGid))
+                    : true;
+                if (closeLeg)
+                {
+                    if (ChainPts.Count == 0)
+                    {
+                        ChainPts.Add(ChainNodes[ChainNodes.Count - 1]);
+                        ChainCols.Add(c);
+                        ChainAlphas.Add(a);
+                    }
+                    ChainPts.Add(ChainNodes[0]);
+                    ChainCols.Add(c);
+                    ChainAlphas.Add(a);
+                }
+            }
             if (ChainPts.Count >= 2)
                 DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
 
@@ -1145,6 +1196,43 @@ namespace SupremeNuclear
         {
             Vector3 tp = target.transform.position;
             return new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z);
+        }
+
+        /// <summary>Связи сопровождения наземки/флота (v0.97): лента «эскорт → цель»
+        /// и ЗЕЛЁНЫЙ маркер на цели (один на цель; дедуп общий с авиа-эскортом —
+        /// DrawPlanCurve). Выделенные ярко, при Shift и остальные приглушённо —
+        /// как цепочки.</summary>
+        private static void DrawEscortLinks(Camera cam, CommanderModeController controller,
+            bool shiftHeld)
+        {
+            GroundOrders.CollectEscorts(EscortUnits, EscortTargetsBuf);
+            if (EscortUnits.Count == 0)
+                return;
+            Color c = ModeColor(AirOrderMode.Escort);
+            for (int i = 0; i < EscortUnits.Count; i++)
+            {
+                Unit unit = EscortUnits[i];
+                bool own = controller.Selection.Selected.Contains(unit);
+                if (!own && !shiftHeld)
+                    continue;
+                Unit target = EscortTargetsBuf[i];
+                if (target == null || target.disabled)
+                    continue;
+                float a = own ? 0.85f : 0.3f;
+                if (!DrawnEscortMarkers.Add(target))
+                    continue; // ногу и маркер на цель уже нарисовал первый эскорт
+                Vector3 anchor = new Vector3(unit.transform.position.x, 0f, unit.transform.position.z);
+                anchor.y = GameApi.GroundY(anchor.x, anchor.z);
+                ChainPts.Clear();
+                ChainCols.Clear();
+                ChainAlphas.Clear();
+                ChainPts.Add(anchor);
+                ChainPts.Add(TargetGround(target));
+                ChainCols.Add(c);
+                ChainAlphas.Add(a);
+                DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                DrawWorldWaypointColored(cam, TargetGround(target), c, a);
+            }
         }
 
         private void DrawAircraftRoutes(CommanderModeController controller)
@@ -1200,6 +1288,7 @@ namespace SupremeNuclear
             DrawnGidEntries.Clear();
             DrawnGroundTargets.Clear(); // цели-узлы: дедуп крестов и ног для всей группы
             DrawnTargetExits.Clear();
+            DrawnEscortMarkers.Clear();
             // Два прохода: сначала выделенные (ярко), затем при Shift остальные —
             // общие ленты/маркеры достаются первому встретившему (дедуп).
             for (int pass = 0; pass < 2; pass++)
@@ -1209,11 +1298,24 @@ namespace SupremeNuclear
                     bool own = controller.Selection.Selected.Contains(unit);
                     if (own != (pass == 0) || (!own && !shiftHeld))
                         continue;
+                    // Инженер с живой очередью: его цепочка — СЛУЖЕБНАЯ выданная голова
+                    // (транспорт SetDestination), маршрут рисует проход очередей ниже;
+                    // оба прохода рисовали одну и ту же голову дважды (v0.82.2).
+                    if (BuildTasks.ChainIsIssuedHead(unit))
+                        continue;
                     // Смешанная очередь (точки + цели на позициях серии) рисуется
-                    // ЕДИНОЙ лентой через цель — DrawGroundChain.
-                    DrawGroundChain(cam, unit, gQueues[gi], GroundOrders.DrawStartIndex(unit), routeC,
-                        own ? 0.85f : 0.3f);
+                    // ЕДИНОЙ лентой через цель — DrawGroundChain. Патруль — цветом
+                    // цикла и с замыкающей ногой (последняя точка → первая).
+                    bool patrol = GroundOrders.KindOf(unit) == GroundOrderKind.Patrol;
+                    DrawGroundChain(cam, unit, gQueues[gi], GroundOrders.DrawStartIndex(unit),
+                        patrol ? ModeColor(AirOrderMode.Patrol) : routeC,
+                        own ? 0.85f : 0.3f, patrol);
                 }
+
+            // Связи сопровождения наземки/флота (v0.97): эскорт-цепочки без точек —
+            // CollectAll их не отдаёт; лента «эскорт → цель» + зелёный маркер на цели
+            // (один на цель, дедуп общий с авиа-эскортом в DrawPlanCurve).
+            DrawEscortLinks(cam, controller, shiftHeld);
 
             // ЕДИНАЯ очередь инженеров по порядку кликов: движения (оранж) и площадки
             // (бирюза) одной цепочкой. Запись с groupId — ГРУППОВАЯ (групповая точка —
@@ -1387,6 +1489,7 @@ namespace SupremeNuclear
             List<IReadOnlyList<AircraftOrders.OrderSegment>> airPlans = RouteAirPlans;
             AircraftOrders.CollectAll(airUnits, airPlans);
             AirGidCentroids.Clear();
+            AirGidAnchors.Clear();
             for (int ai = 0; ai < airUnits.Count; ai++)
                 for (int s = 0; s < airPlans[ai].Count; s++)
                 {
@@ -1402,7 +1505,31 @@ namespace SupremeNuclear
                             : new Vector4(w.x, w.y, w.z, 1f));
                     }
                 }
+            // Якорь члена группы — по одному на группу приказа (вход в магистраль
+            // рисуется от центроида якорей, не от каждого борта).
+            for (int ai = 0; ai < airUnits.Count; ai++)
+            {
+                SeenAirGids.Clear();
+                for (int s = 0; s < airPlans[ai].Count; s++)
+                {
+                    var seg = airPlans[ai][s];
+                    for (int p = 0; p < seg.PointGroups.Count; p++)
+                    {
+                        int gid = seg.PointGroups[p];
+                        if (gid == 0 || !SeenAirGids.Add(gid))
+                            continue;
+                        Vector3 up = airUnits[ai].transform.position;
+                        AirGidAnchors[gid] = (AirGidAnchors.TryGetValue(gid, out Vector4 aacc)
+                            ? aacc + new Vector4(up.x, 0f, up.z, 1f)
+                            : new Vector4(up.x, 0f, up.z, 1f));
+                    }
+                }
+            }
             DrawnAirGid.Clear();
+            DrawnAirLegs.Clear();
+            DrawnAirEntries.Clear();
+            DrawnAirTargets.Clear();
+            DrawnRtbBases.Clear();
             for (int ai = 0; ai < airUnits.Count; ai++)
             {
                 Unit unit = airUnits[ai];
@@ -1426,6 +1553,14 @@ namespace SupremeNuclear
             ChainAlphas.Clear();
             AirOrderMode runMode = AirOrderMode.Transit;
             bool runOpen = false;
+            // Групповое слияние (SupCom-магистраль, зеркально наземке): групповая
+            // точка (gid≠0) — узел-ЦЕНТРОИД формационных точек группы; ноги между
+            // соседними узлами группы, вход в группу, ноги атак и RTB — ОДИН раз на
+            // приказ (сколько бы бортов ни рисовало); индивидуальные точки — личные
+            // ветки схождения/расхождения от магистрали. Пачка вертолётов рисует
+            // одну магистраль, а не N параллельных цепочек по решётке формации.
+            int prevGid = 0;
+            bool firstNode = true;
 
             for (int si = 0; si < plan.Count; si++)
             {
@@ -1446,23 +1581,62 @@ namespace SupremeNuclear
                     }
                     Vector3 tp = seg.Target.transform.position;
                     Vector3 tgt = new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z);
-                    ChainPts.Add(anchor);
-                    ChainPts.Add(tgt);
-                    ChainCols.Add(c);
-                    ChainAlphas.Add(alpha);
-                    DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
-                    ChainPts.Clear();
-                    ChainCols.Clear();
-                    ChainAlphas.Clear();
-                    Vector3 sp = cam.WorldToScreenPoint(GameApi.UnitAnchorWorld(seg.Target));
-                    if (sp.z > 0f)
+                    // Групповая атака: нога и крест — один раз на цель (пачка бортов
+                    // не рисует N линий в одну и ту же цель).
+                    if (DrawnAirTargets.Add(seg.Target))
                     {
-                        Vector2 scr = new Vector2(sp.x, Screen.height - sp.y);
-                        float pulse = 10f + 8f * Mathf.Abs(Mathf.Sin(Time.unscaledTime * 3f));
-                        DrawCross(scr, pulse * 2f, c);
-                        DrawCross(scr, pulse, c);
+                        ChainPts.Add(anchor);
+                        ChainPts.Add(tgt);
+                        ChainCols.Add(c);
+                        ChainAlphas.Add(alpha);
+                        DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                        ChainPts.Clear();
+                        ChainCols.Clear();
+                        ChainAlphas.Clear();
+                        Vector3 sp = cam.WorldToScreenPoint(GameApi.UnitAnchorWorld(seg.Target));
+                        if (sp.z > 0f)
+                        {
+                            Vector2 scr = new Vector2(sp.x, Screen.height - sp.y);
+                            float pulse = 10f + 8f * Mathf.Abs(Mathf.Sin(Time.unscaledTime * 3f));
+                            DrawCross(scr, pulse * 2f, c);
+                            DrawCross(scr, pulse, c);
+                        }
                     }
                     anchor = tgt;
+                    prevGid = 0;
+                    firstNode = false;
+                    continue;
+                }
+
+                if (seg.Mode == AirOrderMode.Escort && seg.Target != null)
+                {
+                    // Эскорт-сегмент (v0.97): зелёная нога «борт → цель» и маркер на
+                    // цели (один на цель — дедуп общий с наземными связями).
+                    if (runOpen)
+                    {
+                        DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                        runOpen = false;
+                        ChainPts.Clear();
+                        ChainCols.Clear();
+                        ChainAlphas.Clear();
+                    }
+                    Vector3 etp = seg.Target.transform.position;
+                    Vector3 etgt = new Vector3(etp.x, GameApi.GroundY(etp.x, etp.z), etp.z);
+                    if (DrawnEscortMarkers.Add(seg.Target))
+                    {
+                        ChainPts.Add(anchor);
+                        ChainPts.Add(etgt);
+                        ChainCols.Add(c);
+                        ChainAlphas.Add(alpha);
+                        DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                        ChainPts.Clear();
+                        ChainCols.Clear();
+                        ChainAlphas.Clear();
+                        DrawWorldWaypointColored(cam, etgt, c, alpha);
+                    }
+                    anchor = etgt;
+                    prevGid = 0;
+                    firstNode = false;
                     continue;
                 }
 
@@ -1483,36 +1657,83 @@ namespace SupremeNuclear
                 }
                 if (!runOpen)
                 {
-                    ChainPts.Add(anchor);
                     runMode = seg.Mode;
                     runOpen = true;
                 }
 
                 int hover = HoverWaypointIndex(cam, wps);
                 bool loop = seg.Mode == AirOrderMode.Patrol && wps.Count > 1;
-                ChainPts.Add(wps[0]); // нога от конца предыдущего сегмента прогона
-                ChainCols.Add(c);
-                ChainAlphas.Add(hover >= 0 ? Mathf.Max(alpha, 1f) : alpha);
-                for (int i = 1; i < wps.Count; i++)
-                {
-                    ChainPts.Add(wps[i]);
-                    ChainCols.Add(c);
-                    ChainAlphas.Add(hover >= i - 1 ? Mathf.Max(alpha, 1f) : alpha);
-                }
-                if (loop)
-                {
-                    ChainPts.Add(wps[0]); // замыкающая нога патруля
-                    ChainCols.Add(c);
-                    ChainAlphas.Add(alpha);
-                }
-                // Маркеры: групповая точка (groupId≠0) — ОДНА на приказ группы бортов
-                // (в центроиде их формационных точек), индивидуальная — своя.
-                // Служебные точки (взлёт патруля i=0, одиночный стоп-старт после
-                // отмены) — НЕ вейпоинты приказа: маркер не рисуем.
+                Vector3 firstNodePos = wps[0];
+                int firstGid = AircraftOrders.GroupIdOf(unit, si, 0);
                 for (int i = 0; i < wps.Count; i++)
                 {
                     int gid = AircraftOrders.GroupIdOf(unit, si, i);
-                    if (gid == 0 && (seg.Mode == AirOrderMode.Patrol ? i == 0 : wps.Count == 1))
+                    Vector3 node = gid != 0 && AirGidCentroids.TryGetValue(gid, out Vector4 pc)
+                        ? new Vector3(pc.x / pc.w, pc.y / pc.w, pc.z / pc.w)
+                        : wps[i];
+                    if (i == 0)
+                        firstNodePos = node;
+                    bool drawLeg;
+                    if (firstNode && gid != 0)
+                    {
+                        // Вход в группу — от центроида якорей её членов, один раз на группу.
+                        if (AirGidAnchors.TryGetValue(gid, out Vector4 anc))
+                        {
+                            anchor = new Vector3(anc.x / anc.w,
+                                GameApi.GroundY(anc.x / anc.w, anc.z / anc.w), anc.z / anc.w);
+                        }
+                        drawLeg = DrawnAirEntries.Add(gid);
+                    }
+                    else if (prevGid != 0 && gid != 0)
+                        drawLeg = DrawnAirLegs.Add(PairKey(prevGid, gid)); // сегмент магистрали
+                    else if (seg.Mode == AirOrderMode.Rtb && seg.Base != null)
+                        drawLeg = DrawnRtbBases.Add(seg.Base); // домой — одна нога на базу
+                    else
+                        drawLeg = true; // индивидуальные ветки — свои у каждого борта
+                    firstNode = false;
+                    if (drawLeg)
+                    {
+                        if (ChainPts.Count == 0)
+                            ChainPts.Add(anchor); // нога от конца предыдущего сегмента прогона
+                        ChainPts.Add(node);
+                        ChainCols.Add(c);
+                        ChainAlphas.Add((i == 0 ? hover >= 0 : hover >= i - 1)
+                            ? Mathf.Max(alpha, 1f) : alpha);
+                    }
+                    else if (ChainPts.Count > 0)
+                    {
+                        // Разрыв: общий сегмент уже нарисован другим членом группы.
+                        DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                        ChainPts.Clear();
+                        ChainCols.Clear();
+                        ChainAlphas.Clear();
+                    }
+                    prevGid = gid;
+                    anchor = node;
+                }
+                if (loop)
+                {
+                    // Замыкающая нога патруля — тоже сегмент магистрали (дедуп).
+                    bool drawClose = firstGid != 0 && prevGid != 0
+                        ? DrawnAirLegs.Add(PairKey(prevGid, firstGid))
+                        : true;
+                    if (drawClose)
+                    {
+                        if (ChainPts.Count == 0)
+                            ChainPts.Add(anchor);
+                        ChainPts.Add(firstNodePos);
+                        ChainCols.Add(c);
+                        ChainAlphas.Add(alpha);
+                    }
+                }
+                // Маркеры: групповая точка (groupId≠0) — ОДНА на приказ группы бортов
+                // (в центроиде их формационных точек), индивидуальная — своя.
+                // Служебные точки — НЕ вейпоинты приказа: маркер не рисуем (единое
+                // правило со сканером — AircraftOrders.IsServicePoint).
+                for (int i = 0; i < wps.Count; i++)
+                {
+                    int gid = AircraftOrders.GroupIdOf(unit, si, i);
+                    if (AircraftOrders.IsServicePoint(seg, i))
                         continue;
                     if (gid != 0)
                     {
@@ -1525,7 +1746,6 @@ namespace SupremeNuclear
                     else
                         DrawWorldWaypointColored(cam, wps[i], c, alpha);
                 }
-                anchor = wps[wps.Count - 1];
                 if (loop)
                 {
                     DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);

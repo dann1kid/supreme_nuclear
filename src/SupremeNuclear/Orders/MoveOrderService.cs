@@ -37,10 +37,15 @@ namespace SupremeNuclear
                 BuildTasks.RmbEaten)
                 return;
 
-            // Ctrl+Shift+ПКМ = УДАЛИТЬ вейпоинт (цепочки/планы/площадки/хвосты).
-            if (RtsInput.Ctrl && RtsInput.Shift && RtsInput.RightDown && !RtsInput.PointerOverUi &&
-                TryDeleteWaypoint())
+            // Ctrl+Shift+ПКМ = ТОЛЬКО удаление вейпоинта (цепочки/планы/площадки/
+            // хвосты). Клик комбинацией гасится ВСЕГДА: промах по вейпоинту не
+            // должен проваливаться дальше по конвейеру — раньше мимо вейпоинта
+            // эта комбинация выставляла НОВЫЙ приказ (ралли/движение/атака).
+            if (RtsInput.Ctrl && RtsInput.Shift && RtsInput.RightDown && !RtsInput.PointerOverUi)
+            {
+                TryDeleteWaypoint();
                 return;
+            }
 
             // Ралли проверяется ПЕРВЫМ: выделение аэродрома живёт отдельно от списка
             // юнитов (Selected при этом пуст — ранний return его съедал).
@@ -76,7 +81,7 @@ namespace SupremeNuclear
                     // раздача по ПКМ по земле.
                     if (!FanTargets.Contains(enemy))
                         FanTargets.Add(enemy);
-                    CommanderHud.Notice($"Веер: целей — {FanTargets.Count}");
+                    CommanderHud.Notice(Loc.F("Веер: целей — {0}", FanTargets.Count));
                     return;
                 }
                 if (enemy != null && IssueAttackOrders(enemy))
@@ -95,11 +100,20 @@ namespace SupremeNuclear
                 if (TryConvertWaypointToPatrol())
                     return;
 
-                // ПКМ по недострою (площадке существующей задачи) — достройка выделенными
-                // инженерами (shift не обязателен, это адресное действие).
+                // ПКМ по ПРИЗРАКУ/маркеру недостроя — достройка выделенными инженерами
+                // (адресное действие по силуэту, не по земле под ним; без Shift —
+                // новая очередь, с Shift — дописать).
                 if (BuildTasks.TryResume(
                         new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y),
-                        GameApi.MainCam, _controller.Selection.Selected))
+                        GameApi.MainCam, _controller.Selection.Selected, RtsInput.Shift))
+                    return;
+
+                // ПКМ по СОЮЗНОМУ мобильному юниту = СОПРОВОЖДЕНИЕ/АССИСТ (v0.97,
+                // канон SupCom: ПКМ по своему — assist/escort): боевые следуют за
+                // целью и защищают её, инженеры вливаются в её стройки, авиация
+                // сопровождает полётом. Только в дефолтном режиме «Движение» —
+                // заряженные спец-режимы сохраняют свою семантику.
+                if (OrderModes.Pending == OrderMode.Move && TryIssueEscortOrders(localHq))
                     return;
 
                 IssuePending(_controller.Selection.Selected, RtsInput.Shift);
@@ -111,80 +125,19 @@ namespace SupremeNuclear
 
         /// <summary>Удаление вейпоинта под курсором (Ctrl+Shift+ПКМ): цепочки наземки,
         /// планы авиации, площадки стройки (недострой сносится без возврата), хвосты
-        /// движений инженеров. Shift расширяет поиск на ВСЕ юниты (режим видимости).</summary>
+        /// движений инженеров. Shift расширяет поиск на ВСЕ юниты (режим видимости).
+        /// Семантика (скан, групповой фан-аут по groupId) — WaypointOps.DeleteAt.</summary>
         private bool TryDeleteWaypoint()
         {
             Camera cam = GameApi.MainCam;
             if (cam == null)
                 return false;
-            Vector2 mouse = new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y);
-
-            // Тело 3D-призрака под курсором — снос его площадки.
-            foreach (BuildTasks.Task t in BuildTasks.All)
-                if (BuildGhosts.ScreenContains(t, cam, mouse))
-                {
-                    BuildTasks.Cancel(t);
-                    if (BuildTasks.SelectedTask == t)
-                        BuildTasks.SelectedTask = null;
-                    CommanderHud.Notice("Площадка снесена");
-                    return true;
-                }
-
-            // ЕДИНЫЙ скан (консолидация v0.48) — тот же, что у захвата вейпоинтов.
-            WaypointHit hit = WaypointScanner.Scan(_controller, cam, mouse, 16f, RtsInput.Shift);
-            switch (hit.Kind)
-            {
-                case WaypointKind.BuildSite:
-                    BuildTasks.Cancel(hit.Task); // снос недостроя, без возврата
-                    if (BuildTasks.SelectedTask == hit.Task)
-                        BuildTasks.SelectedTask = null;
-                    CommanderHud.Notice("Площадка снесена");
-                    return true;
-                case WaypointKind.SequenceMove:
-                {
-                    // Групповой вейпоинт: удаляется у ВСЕХ членов группы приказа
-                    // (по groupId, не по текущему выделению — корректировать можно,
-                    // выделив любого инженера группы).
-                    int gid = BuildTasks.GroupIdOf(hit.Owner, hit.Index);
-                    BuildTasks.RemoveSequenceMove(hit.Owner, hit.Index);
-                    if (gid != 0)
-                        foreach (Unit unit in BuildTasks.UnitsWithSequences())
-                            if (unit != null && unit != hit.Owner)
-                                BuildTasks.RemoveByGroupId(unit, gid);
-                    return true;
-                }
-                case WaypointKind.GroundPoint:
-                {
-                    // Групповой вейпоинт: удаляется у ВСЕХ цепочек с этим groupId.
-                    int gid = GroundOrders.GroupIdOf(hit.Owner, hit.Index);
-                    GroundOrders.RemovePoint(hit.Owner, hit.Index);
-                    if (gid != 0)
-                    {
-                        GroundOrders.CollectGroup(gid, _groupUnits, _groupIdx);
-                        for (int m = 0; m < _groupUnits.Count; m++)
-                            if (_groupUnits[m] != hit.Owner)
-                                GroundOrders.RemoveByGroupId(_groupUnits[m], gid);
-                    }
-                    return true;
-                }
-                case WaypointKind.AirPoint:
-                {
-                    // Групповой вейпоинт авиации: удаляется по groupId у ВСЕХ бортов
-                    // с этой точкой (планы бортов асинхронны — индексы у каждого свои).
-                    int gid = AircraftOrders.GroupIdOf(hit.Owner, hit.Segment, hit.Index);
-                    AircraftOrders.RemovePoint(hit.Owner, hit.Segment, hit.Index);
-                    if (gid != 0)
-                    {
-                        AircraftOrders.CollectGroup(gid, _groupUnits, _groupIdx, _groupIdx2);
-                        for (int m = 0; m < _groupUnits.Count; m++)
-                            if (_groupUnits[m] != hit.Owner)
-                                AircraftOrders.RemoveByGroupId(_groupUnits[m], gid);
-                    }
-                    return true;
-                }
-                default:
-                    return false;
-            }
+            if (!WaypointOps.DeleteAt(_controller, cam,
+                    new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y), RtsInput.Shift, out WaypointHit hit))
+                return false;
+            if (hit.Kind == WaypointKind.BuildSite)
+                CommanderHud.Notice(Loc.Tr("Площадка снесена"));
+            return true;
         }
 
         /// <summary>Выделение без мобильных юнитов, но с фабриками (депо/аэродром)?
@@ -216,15 +169,11 @@ namespace SupremeNuclear
                     ProductionTasks.SetRally(factory, target);
             }
             int points = ProductionTasks.RallyOf(factories[0])?.Count ?? 0;
-            CommanderHud.Notice($"Ралли фабрики: маршрут из {points} тчк");
+            CommanderHud.Notice(Loc.F("Ралли фабрики: маршрут из {0} тчк", points));
             return true;
         }
 
         private int _moveGroupId;
-        // Буферы групповых операций удаления (event-time, не OnGUI).
-        private readonly List<Unit> _groupUnits = new List<Unit>();
-        private readonly List<int> _groupIdx = new List<int>();
-        private readonly List<int> _groupIdx2 = new List<int>();
 
         private void IssuePending(List<Unit> selected, bool queue)
         {
@@ -350,24 +299,42 @@ namespace SupremeNuclear
 
                 case OrderMode.Patrol:
                     bool anyAir = false;
+                    bool anyGround = false;
                     foreach (Unit unit in selected)
+                    {
                         if (unit is Aircraft a)
                         {
                             if (queue) AircraftOrders.Enqueue(a, AirOrderMode.Patrol, target, _moveGroupId);
                             else AircraftOrders.Set(a, AirOrderMode.Patrol, target, _moveGroupId);
                             anyAir = true;
+                            continue;
                         }
-                    if (!anyAir)
-                        CommanderHud.Notice("Патруль пока только для авиации");
+                        if (!(unit is GroundVehicle || unit is Ship))
+                            continue;
+                        bool engineer = GameApi.IsEngineer(unit);
+                        if (engineer && !(queue &&
+                                          GroundOrders.KindOf(unit) == GroundOrderKind.Patrol))
+                            BuildTasks.ClearFor(unit); // патруль = новая очередь (Shift дописывает только в цикл)
+                        if (queue && GroundOrders.KindOf(unit) == GroundOrderKind.Patrol)
+                            GroundOrders.EnqueuePatrol(unit, target.ToGlobalPosition(), _moveGroupId);
+                        else
+                            GroundOrders.SetPatrol(unit, target.ToGlobalPosition(), _moveGroupId);
+                        anyGround = true;
+                    }
+                    if (!anyAir && !anyGround)
+                        CommanderHud.Notice(Loc.Tr("Патруль: в выделении нет мобильных"));
                     break;
             }
         }
 
         /// <summary>Команда «на базу» (G, DESIGN §2.11): выделенные борта (пачкой или
         /// поодиночке, самолёты и вертолёты) — терминальный RTB к ближайшему подходящему
-        /// своему аэродрому: посадка, обслуживание и паркинг до следующего приказа.</summary>
+        /// своему аэродрому: посадка, обслуживание и паркинг до следующего приказа.
+        /// Shift — RTB дописывается в очередь (EnqueueRtb): борт вернётся домой
+        /// после отработки текущего плана.</summary>
         public void IssueReturnToBase(List<Unit> selected)
         {
+            bool queue = RtsInput.Shift;
             int n = 0;
             foreach (Unit unit in selected)
             {
@@ -376,12 +343,17 @@ namespace SupremeNuclear
                 Airbase airbase = SortieService.NearestOwnAirbase(aircraft);
                 if (airbase == null)
                     continue;
-                AircraftOrders.ReturnToBase(aircraft, airbase);
+                if (queue)
+                    AircraftOrders.EnqueueRtb(aircraft, airbase);
+                else
+                    AircraftOrders.ReturnToBase(aircraft, airbase);
                 n++;
             }
             CommanderHud.Notice(n > 0
-                ? $"На базу: бортов — {n}"
-                : "В выделении нет бортов или нет своего аэродрома");
+                ? queue
+                    ? Loc.F("На базу (в очередь): бортов — {0}", n)
+                    : Loc.F("На базу: бортов — {0}", n)
+                : Loc.Tr("В выделении нет бортов или нет своего аэродрома"));
         }
 
         /// <summary>Мгновенная отмена всех приказов выделенных.</summary>
@@ -417,44 +389,154 @@ namespace SupremeNuclear
             }
             if (_controller.Selection.SelectedAirbase != null)
                 ProductionTasks.ClearRally(_controller.Selection.SelectedAirbase);
-            CommanderHud.Notice("Приказы отменены");
+            CommanderHud.Notice(Loc.Tr("Приказы отменены"));
         }
 
-        /// <summary>ПКМ по вейпоинту плана выделенного борта: сегмент становится патрульным циклом.</summary>
+        /// <summary>ПКМ по вейпоинту: сегмент плана борта становится патрульным
+        /// циклом, цепочка наземки/флота (≥2 точки) замыкается в цикл. Поиск и
+        /// гард — WaypointOps.ConvertToPatrolAt (единый скан: земля-проекция,
+        /// служебные точки не отдаются); конвертация пер-бортовая.</summary>
         private bool TryConvertWaypointToPatrol()
         {
             Camera cam = GameApi.MainCam;
             if (cam == null)
                 return false;
-            Vector2 mouse = new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y);
-            foreach (Unit unit in _controller.Selection.Selected)
-            {
-                if (!(unit is Aircraft) || !AircraftOrders.TryGetPlan(unit, out var plan))
-                    continue;
-                for (int s = 0; s < plan.Count; s++)
-                {
-                    var seg = plan[s];
-                    if (seg.Mode == AirOrderMode.Attack || seg.Mode == AirOrderMode.Salvo ||
-                        seg.Mode == AirOrderMode.Rtb)
-                        continue; // атака/залп/возврат на базу в патруль не превращаются
-                    for (int p = 0; p < seg.Points.Count; p++)
-                    {
-                        Vector3 sp = cam.WorldToScreenPoint(seg.Points[p].ToLocalPosition());
-                        if (sp.z <= 0f)
-                            continue;
-                        if (Vector2.Distance(new Vector2(sp.x, sp.y), mouse) > 14f)
-                            continue;
-                        AircraftOrders.ConvertToPatrol(unit, s);
-                        CommanderHud.Notice("Сегмент превращён в патруль");
-                        return true;
-                    }
-                }
-            }
-            return false;
+            if (!WaypointOps.ConvertToPatrolAt(_controller, cam,
+                    new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y), RtsInput.Shift,
+                    out WaypointHit hit))
+                return false;
+            CommanderHud.Notice(hit.Kind == WaypointKind.GroundPoint
+                ? Loc.Tr("Маршрут замкнут в патруль")
+                : Loc.Tr("Сегмент превращён в патруль"));
+            return true;
         }
 
         // Наземные атакующие текущего клика: сортировка по азимуту для полукруга.
         private readonly List<Unit> _attackFan = new List<Unit>();
+
+        // Сопровождающие текущего клика (веер секторов вокруг цели) — наземка и авиация.
+        private readonly List<Unit> _escortFan = new List<Unit>();
+
+        /// <summary>Сопровождение/ассист союзного юнита (v0.97): боевые наземка/флот —
+        /// следование своим сектором веера + защита stop-and-fire; инженеры — следование
+        /// и вливание в стройки ЦЕЛИ (эскорт-ассист BuildTasks, без Shift — новая связь);
+        /// авиация — эскорт-сегмент плана (Shift дописывает в план, наземке Shift не
+        /// кладёт сопровождение в очередь — цепочка одна, Notice). Цель сама себе
+        /// сопроводителем быть не может.</summary>
+        private bool TryIssueEscortOrders(FactionHQ localHq)
+        {
+            Unit friend = TryPickFriendlyAt(localHq);
+            if (friend == null)
+                return false;
+            Vector3 fp = friend.transform.position;
+
+            _escortFan.Clear();
+            int airCount = 0, groundCount = 0, engCount = 0;
+            foreach (Unit unit in _controller.Selection.Selected)
+            {
+                if (unit == null || unit == friend)
+                    continue; // сам себя не сопровождает
+                if (unit is Aircraft)
+                {
+                    _escortFan.Add(unit);
+                    airCount++;
+                    continue;
+                }
+                if (unit is GroundVehicle || unit is Ship)
+                {
+                    _escortFan.Add(unit);
+                    if (GameApi.IsEngineer(unit))
+                        engCount++;
+                    else
+                        groundCount++;
+                }
+            }
+            if (_escortFan.Count == 0)
+            {
+                CommanderHud.Notice(Loc.Tr("Сопровождение: цель — всё выделение"));
+                return true; // клик съеден: приказов движению по самому себе не выдаём
+            }
+
+            // Сортировка по азимутам вокруг цели: соседние по кругу получают соседние
+            // сектора веера — эскорты распределяются вокруг цели, а не в кучу (как
+            // полукруг групповой атаки).
+            _escortFan.Sort((a, b) => Mathf.Atan2(a.transform.position.x - fp.x,
+                    a.transform.position.z - fp.z)
+                .CompareTo(Mathf.Atan2(b.transform.position.x - fp.x,
+                    b.transform.position.z - fp.z)));
+            float groundStandoff = Settings.EscortStandoffM + friend.maxRadius + 10f;
+            float airStep = Settings.FormationSpacing * 4f;
+            int issued = 0, engNotQueued = 0;
+            for (int i = 0; i < _escortFan.Count; i++)
+            {
+                Unit unit = _escortFan[i];
+                if (unit is Aircraft aircraft)
+                {
+                    float bearing = i * airStep / Settings.EscortAirDistM;
+                    if (RtsInput.Shift)
+                        AircraftOrders.EnqueueEscort(aircraft, friend, bearing);
+                    else
+                        AircraftOrders.SetEscort(aircraft, friend, bearing);
+                    issued++;
+                    continue;
+                }
+                if (RtsInput.Shift)
+                {
+                    // Наземная цепочка одна: сопровождение — стоящий приказ, в очередь
+                    // точек не кладётся (долг §12-36). Инженеру Shift ломать очередь
+                    // молча тоже нельзя — пропускаем с объяснением.
+                    if (GameApi.IsEngineer(unit))
+                        engNotQueued++;
+                    continue;
+                }
+                if (GameApi.IsEngineer(unit))
+                    BuildTasks.ClearFor(unit); // новая связь = новая очередь (как патруль)
+                Vector3 up = unit.transform.position;
+                float bearingFull = Mathf.Atan2(up.x - fp.x, up.z - fp.z) +
+                    GroundOrders.FanBearingOffset(i, _escortFan.Count,
+                        Settings.FormationSpacing, groundStandoff);
+                GroundOrders.SetEscort(unit, friend, bearingFull);
+                issued++;
+            }
+            if (issued > 0)
+                CommanderHud.Notice(Loc.F("Сопровождение: {0} → {1}", issued,
+                    friend.definition != null ? friend.definition.unitName : "?"));
+            if (engNotQueued > 0)
+                CommanderHud.Notice(Loc.Tr("Сопровождение не ставится в очередь — выдай без Shift"));
+            return true;
+        }
+
+        /// <summary>Союзный мобильный юнит под курсором — экранный пик (свои видны
+        /// всегда, даталинк не нужен). Зеркало TryPickEnemyAt: движущаяся техника,
+        /// флот и авиация (здания статичны — сопровождать нечего).</summary>
+        private Unit TryPickFriendlyAt(FactionHQ localHq)
+        {
+            float radiusPx = Settings.EnemyPickRadiusPx;
+            Camera cam = GameApi.MainCam;
+            if (cam == null || localHq == null)
+                return null;
+            Unit best = null;
+            float bestDist = float.MaxValue;
+            Vector2 mouse = new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y);
+            foreach (Unit unit in UnitRegistry.allUnits)
+            {
+                if (unit == null || unit.disabled || unit.NetworkHQ == null || unit.NetworkHQ != localHq)
+                    continue;
+                if (!(unit is GroundVehicle || unit is Ship || unit is Aircraft))
+                    continue;
+                Vector3 sp = cam.WorldToScreenPoint(GameApi.UnitAnchorWorld(unit));
+                if (sp.z <= 0f)
+                    continue;
+                float d = Vector2.Distance(new Vector2(sp.x, sp.y), mouse);
+                float limit = Mathf.Max(radiusPx, GameApi.ApparentSizePx(unit, cam) * 0.5f);
+                if (d < limit && d < bestDist)
+                {
+                    bestDist = d;
+                    best = unit;
+                }
+            }
+            return best;
+        }
 
         /// <summary>Атака/залп выделенных по указанной цели (DESIGN §2.11): авиация —
         /// приказ с пиннингом цели (Shift — дописать в план серией), наземка/флот —
@@ -525,14 +607,14 @@ namespace SupremeNuclear
             if (any)
             {
                 CommanderHud.Notice(salvo
-                    ? $"Залп: {enemy.definition.unitName}"
-                    : $"Атака: {enemy.definition.unitName}");
+                    ? Loc.F("Залп: {0}", enemy.definition.unitName)
+                    : Loc.F("Атака: {0}", enemy.definition.unitName));
                 // Даталинк-гейт (DESIGN §2.11): цель вне трекинга фракции не пиннится —
                 // огонь откроется только после захвата сенсорами по пути. Говорим об этом
                 // сразу, иначе «летит и молчит» читается как игнор приказа.
                 if (GameApi.TryGetLocalHQ(out FactionHQ hq) &&
                     !hq.TryGetKnownPosition(enemy, out _))
-                    CommanderHud.Notice("Цель вне разведки: ведём на позицию, огонь — после захвата сенсорами");
+                    CommanderHud.Notice(Loc.Tr("Цель вне разведки: ведём на позицию, огонь — после захвата сенсорами"));
             }
             return any;
         }
@@ -555,7 +637,7 @@ namespace SupremeNuclear
                     FanTargets.RemoveAt(i);
             if (FanTargets.Count == 0)
             {
-                CommanderHud.Notice("Веер: цели потеряны");
+                CommanderHud.Notice(Loc.Tr("Веер: цели потеряны"));
                 return;
             }
 
@@ -567,7 +649,7 @@ namespace SupremeNuclear
                     attackers.Add(unit);
             if (attackers.Count == 0)
             {
-                CommanderHud.Notice("Веер: в выделении нет атакующих");
+                CommanderHud.Notice(Loc.Tr("Веер: в выделении нет атакующих"));
                 FanTargets.Clear();
                 return;
             }
@@ -588,8 +670,8 @@ namespace SupremeNuclear
                 else
                     GroundOrders.SetAttack(attackers[i], target);
             }
-            CommanderHud.Notice($"Веер: {attackers.Count} → {FanTargets.Count} " +
-                Util.RuPlural(FanTargets.Count, "цель", "цели", "целей"));
+            CommanderHud.Notice(Loc.F("Веер: {0} → {1} {2}", attackers.Count, FanTargets.Count,
+                Loc.Plural(FanTargets.Count, "цель", "цели", "целей")));
             FanTargets.Clear();
         }
 
@@ -634,9 +716,10 @@ namespace SupremeNuclear
             }
 
             CommanderHud.Notice(dispersed > 0
-                ? $"Распределение: {dispersed} {Util.RuPlural(dispersed, "юнит", "юнита", "юнитов")} " +
-                  $"на {vectors} {Util.RuPlural(vectors, "вектор", "вектора", "векторов")}"
-                : "Нет очереди вейпоинтов");
+                ? Loc.F("Распределение: {0} {1} на {2} {3}", dispersed,
+                      Loc.Plural(dispersed, "юнит", "юнита", "юнитов"), vectors,
+                      Loc.Plural(vectors, "вектор", "вектора", "векторов"))
+                : Loc.Tr("Нет очереди вейпоинтов"));
         }
 
         /// <summary>Групповые клики в ОСТАВШИХСЯ очередях наземки (groupId по возрастанию
@@ -733,7 +816,7 @@ namespace SupremeNuclear
                 LastDestinations[unit] = pos.ToGlobalPosition();
             }
             if (aircraft > 0 || ground > 0)
-                CommanderHud.Notice($"Залп по площади: бортов {aircraft}, наземки {ground}");
+                CommanderHud.Notice(Loc.F("Залп по площади: бортов {0}, наземки {1}", aircraft, ground));
         }
 
         /// <summary>Есть ли у борта ракетная станция с боеприпасами (залп чем пускать).</summary>

@@ -47,39 +47,67 @@ namespace SupremeNuclear
         /// аббревиатуры различают «одинаковые квадратики» каталога депо.</summary>
         public static string BadgeOf(VehicleType type) => type switch
         {
-            VehicleType.MBT => "ТНК",
-            VehicleType.AFV => "ББМ",
-            VehicleType.LCV => "ЛБМ",
-            VehicleType.ART => "АРТ",
-            VehicleType.AAA => "ЗУ",
-            VehicleType.IR_SAM => "ПЗРК",
-            VehicleType.R_SAM => "ЗРК",
-            VehicleType.RDR => "РЛС",
-            VehicleType.TRUCK => "ГРЗ",
-            VehicleType.UGV => "БНП",
+            VehicleType.MBT => Loc.Tr("ТНК"),
+            VehicleType.AFV => Loc.Tr("ББМ"),
+            VehicleType.LCV => Loc.Tr("ЛБМ"),
+            VehicleType.ART => Loc.Tr("АРТ"),
+            VehicleType.AAA => Loc.Tr("ЗУ"),
+            VehicleType.IR_SAM => Loc.Tr("ПЗРК"),
+            VehicleType.R_SAM => Loc.Tr("ЗРК"),
+            VehicleType.RDR => Loc.Tr("РЛС"),
+            VehicleType.TRUCK => Loc.Tr("ГРЗ"),
+            VehicleType.UGV => Loc.Tr("БНП"),
             _ => "",
+        };
+
+        /// <summary>Бейдж типа корабля (нативный enum ShipType): русские
+        /// аббревиатуры классов надводных сил.</summary>
+        public static string BadgeOf(ShipType type) => type switch
+        {
+            ShipType.CV => Loc.Tr("АВ"),   // авианосец
+            ShipType.LHA => Loc.Tr("УДК"), // универсальный десантный корабль
+            ShipType.LFD => Loc.Tr("ДКД"), // доковый корабль десанта
+            ShipType.DDG => Loc.Tr("ЭМ"),  // эсминец
+            ShipType.FFG => Loc.Tr("ФР"),  // фрегат
+            ShipType.FFL => Loc.Tr("КР"),  // корвет
+            ShipType.LC => Loc.Tr("ДКА"),  // десантный катер
+            ShipType.PB => Loc.Tr("КА"),   // катер
+            _ => "",
+        };
+
+        /// <summary>Полное имя типа корабля для инфоокна.</summary>
+        public static string TypeNameOf(ShipType type) => type switch
+        {
+            ShipType.CV => Loc.Tr("авианосец"),
+            ShipType.LHA => Loc.Tr("универсальный десантный корабль"),
+            ShipType.LFD => Loc.Tr("доковый корабль десанта"),
+            ShipType.DDG => Loc.Tr("эсминец"),
+            ShipType.FFG => Loc.Tr("фрегат"),
+            ShipType.FFL => Loc.Tr("корвет"),
+            ShipType.LC => Loc.Tr("десантный катер"),
+            ShipType.PB => Loc.Tr("патрульный катер"),
+            _ => Loc.Tr("корабль"),
         };
 
         /// <summary>Полное имя типа наземки для инфоокна.</summary>
         public static string TypeNameOf(VehicleType type) => type switch
         {
-            VehicleType.MBT => "танк",
-            VehicleType.AFV => "боевая бронированная машина",
-            VehicleType.LCV => "лёгкая боевая машина",
-            VehicleType.ART => "артиллерия",
-            VehicleType.AAA => "зенитная установка",
-            VehicleType.IR_SAM => "ПЗРК",
-            VehicleType.R_SAM => "ЗРК",
-            VehicleType.RDR => "РЛС",
-            VehicleType.TRUCK => "грузовик",
-            VehicleType.UGV => "беспилотная наземная платформа",
-            _ => "техника",
+            VehicleType.MBT => Loc.Tr("танк"),
+            VehicleType.AFV => Loc.Tr("боевая бронированная машина"),
+            VehicleType.LCV => Loc.Tr("лёгкая боевая машина"),
+            VehicleType.ART => Loc.Tr("артиллерия"),
+            VehicleType.AAA => Loc.Tr("зенитная установка"),
+            VehicleType.IR_SAM => Loc.Tr("ПЗРК"),
+            VehicleType.R_SAM => Loc.Tr("ЗРК"),
+            VehicleType.RDR => Loc.Tr("РЛС"),
+            VehicleType.TRUCK => Loc.Tr("грузовик"),
+            VehicleType.UGV => Loc.Tr("беспилотная наземная платформа"),
+            _ => Loc.Tr("техника"),
         };
 
-        /// <summary>Бейдж роли авиации: истребитель/ударный/многоролевой выводится
-        /// из roleIdentity (какой цели угрожает), слабый бойец — ДРЛО/транспорт
-        /// по typeIdentity (кем является).</summary>
-        public static string AirBadge(RoleIdentity role, TypeIdentity type)
+        /// <summary>Ключ роли авиации — нелокализуемые метки: по ним же switch
+        /// полного имени ниже, поэтому сами через Tr не проходят.</summary>
+        private static string RoleKey(RoleIdentity role, TypeIdentity type)
         {
             float aa = role.antiAir, asu = role.antiSurface;
             if (aa < 0.25f && asu < 0.25f)
@@ -89,16 +117,22 @@ namespace SupremeNuclear
             return aa > asu ? "И" : "У";
         }
 
+        /// <summary>Бейдж роли авиации: истребитель/ударный/многоролевой выводится
+        /// из roleIdentity (какой цели угрожает), слабый бойец — ДРЛО/транспорт
+        /// по typeIdentity (кем является).</summary>
+        public static string AirBadge(RoleIdentity role, TypeIdentity type) =>
+            Loc.Tr(RoleKey(role, type));
+
         /// <summary>Полное имя роли авиации для инфоокна.</summary>
         public static string AirRoleName(RoleIdentity role, TypeIdentity type) =>
-            AirBadge(role, type) switch
+            RoleKey(role, type) switch
             {
-                "И" => "истребитель",
-                "У" => "ударный",
-                "М" => "многоролевой",
-                "РЛС" => "ДРЛО",
-                "ТР" => "транспорт",
-                _ => "авиация",
+                "И" => Loc.Tr("истребитель"),
+                "У" => Loc.Tr("ударный"),
+                "М" => Loc.Tr("многоролевой"),
+                "РЛС" => Loc.Tr("ДРЛО"),
+                "ТР" => Loc.Tr("транспорт"),
+                _ => Loc.Tr("авиация"),
             };
 
         // ---------- сводка вооружения массового выделения (инфопанель) ----------
@@ -124,15 +158,15 @@ namespace SupremeNuclear
         public static string DomainTag(WeaponDomain d)
         {
             if ((d & WeaponDomain.Jammer) != 0)
-                return "РЕБ";
+                return Loc.Tr("РЕБ");
             bool air = (d & WeaponDomain.Air) != 0, srf = (d & WeaponDomain.Surface) != 0;
             string core;
-            if (air && srf) core = "У";
-            else if (air) core = "АА";
-            else if (srf) core = "АЗ";
-            else if ((d & WeaponDomain.Missile) != 0) core = "ПР";
+            if (air && srf) core = Loc.Tr("У");
+            else if (air) core = Loc.Tr("АА");
+            else if (srf) core = Loc.Tr("АЗ");
+            else if ((d & WeaponDomain.Missile) != 0) core = Loc.Tr("ПР");
             else return "";
-            return (d & WeaponDomain.Nuclear) != 0 ? "Я " + core : core;
+            return (d & WeaponDomain.Nuclear) != 0 ? Loc.Tr("Я") + " " + core : core;
         }
 
         /// <summary>Строка сводки группы: «АА AIM-120C: 12/16 · 4 носителя»;
@@ -141,9 +175,63 @@ namespace SupremeNuclear
         {
             string tag = DomainTag(t.Domains);
             string head = string.IsNullOrEmpty(tag) ? t.Name : tag.PadRight(3) + " " + t.Name;
-            return head + ": " + t.Ammo + "/" + t.Full + " · " + t.Carriers + " " +
-                   Util.RuPlural(t.Carriers, "носитель", "носителя", "носителей") +
-                   (t.Ammo <= 0 ? " · пусто" : "");
+            string row = Loc.F("{0}: {1}/{2} · {3} {4}", head, t.Ammo, t.Full, t.Carriers,
+                Loc.Plural(t.Carriers, "носитель", "носителя", "носителей"));
+            return t.Ammo <= 0 ? row + Loc.Tr(" · пусто") : row;
+        }
+
+        // ---------- hover-карточка определения (SupCom-инфо у плитки покупки) ----------
+
+        /// <summary>Верхняя строка карточки: класс/роль · цена · оценка времени
+        /// (фабрика платит константные SecondsPerItem на единицу; стройка — темп
+        /// одного инженера, несколько ускоряют). seconds&lt;=0 — время не показываем.</summary>
+        public static string FormatTipClass(string cls, float value, float seconds, bool building)
+        {
+            string head = cls + " · " + value.ToString("F0");
+            if (seconds <= 0f)
+                return head;
+            return head + Loc.F(" · {0}{1} с", building ? Loc.Tr("стройка ~") : "~", seconds.ToString("0"));
+        }
+
+        /// <summary>Строки ТТХ карточки закупки — ФАКТ-НА-СТРОКУ (плейтест: без
+        /// склейки всего через «·» и обрезок): скорость / обзор / броня·экипаж·масса.
+        /// Только ненулевые факты; км с десятыми — инвариантно. Пустой список — данных нет.</summary>
+        public static List<string> TipStatRows(float visionM, float speedMs,
+            float armorTier, float crew, float massKg)
+        {
+            var rows = new List<string>(3);
+            if (speedMs > 0f)
+                rows.Add(Loc.F("скорость {0} м/с", speedMs.ToString("0")));
+            if (visionM > 0f)
+            {
+                if (visionM >= 1000f)
+                    rows.Add(Loc.F("обзор {0} км",
+                        (visionM / 1000f).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)));
+                else
+                    rows.Add(Loc.F("обзор {0} м", visionM.ToString("0")));
+            }
+            string rest = "";
+            if (armorTier > 0f)
+                rest = Loc.F("броня {0}", armorTier.ToString("0"));
+            if (crew > 0f)
+                rest += (rest.Length > 0 ? " · " : "") + Loc.F("экипаж {0}", crew.ToString("0"));
+            if (massKg > 1000f)
+                rest += (rest.Length > 0 ? " · " : "") + Loc.F("масса ≈{0} т",
+                    (massKg / 1000f).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture));
+            else if (massKg > 0f)
+                rest += (rest.Length > 0 ? " · " : "") + Loc.F("масса ≈{0} кг", massKg.ToString("0"));
+            if (rest.Length > 0)
+                rows.Add(rest);
+            return rows;
+        }
+
+        /// <summary>Строка оружия карточки: «АА AIM-120C ×4» — домен-тег + имя +
+        /// суммарный боезапас (у определения нагрузка всегда полная, «4/4» не нужно).</summary>
+        public static string FormatTipWeaponRow(WeaponTally t)
+        {
+            string tag = DomainTag(t.Domains);
+            string head = string.IsNullOrEmpty(tag) ? t.Name : tag.PadRight(3) + " " + t.Name;
+            return Loc.F("{0} ×{1}", head, t.Full);
         }
 
         // ---------- гейты вооружения (вкл/выкл классов по выделению, DESIGN §2.11) ----------
@@ -175,18 +263,19 @@ namespace SupremeNuclear
         /// <summary>Кнопочный лейбл класса: «ЯД», «Бомбы», «Пушки», «Рак.ВВ», «Рак.АС».</summary>
         public static string ClassLabel(WeaponClass cls) => cls switch
         {
-            WeaponClass.Nuclear => "ЯД",
-            WeaponClass.Bomb => "Бомбы",
-            WeaponClass.Gun => "Пушки",
-            WeaponClass.MissileAA => "Рак.ВВ",
-            WeaponClass.MissileAS => "Рак.АС",
+            WeaponClass.Nuclear => Loc.Tr("ЯД"),
+            WeaponClass.Bomb => Loc.Tr("Бомбы"),
+            WeaponClass.Gun => Loc.Tr("Пушки"),
+            WeaponClass.MissileAA => Loc.Tr("Рак.ВВ"),
+            WeaponClass.MissileAS => Loc.Tr("Рак.АС"),
             _ => "?",
         };
 
         // ---------- переводы состояний AI (инфопанель: строка «состояние») ----------
 
         /// <summary>Нативные stateDisplayName пилота (PilotBaseState.GetCurrentState) —
-        /// английские фразы; неизвестное значение возвращаем как есть.</summary>
+        /// английские фразы; неизвестное значение возвращаем как есть. Словарь даёт
+        /// русскую строку-ключ, дальше Loc.Tr (en-локаль возвращает оригинал).</summary>
         private static readonly Dictionary<string, string> RuPilotStates =
             new Dictionary<string, string>
             {
@@ -251,12 +340,12 @@ namespace SupremeNuclear
         /// неизвестное — как есть (честный фолбэк, не пустышка).</summary>
         public static string RuPilotState(string s) =>
             string.IsNullOrEmpty(s) ? "" :
-            RuPilotStates.TryGetValue(s, out string ru) ? ru : s;
+            RuPilotStates.TryGetValue(s, out string ru) ? Loc.Tr(ru) : s;
 
         /// <summary>Состояние корабля по-русски (нативный enum ShipAIState).</summary>
         public static string RuShipState(string s) =>
             string.IsNullOrEmpty(s) ? "" :
-            RuShipStates.TryGetValue(s, out string ru) ? ru : s;
+            RuShipStates.TryGetValue(s, out string ru) ? Loc.Tr(ru) : s;
     }
 
     /// <summary>Класс вооружения для гейтов (DESIGN §2.11): биты — выключенные

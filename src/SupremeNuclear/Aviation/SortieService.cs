@@ -59,7 +59,7 @@ namespace SupremeNuclear
                 // после обслуживания вылет повторится по этому же сегменту).
                 if (seg.Target == null || seg.Target.disabled || CombatReady(aircraft))
                     return;
-                InsertRtb(aircraft, plan);
+                InsertRtb(aircraft);
                 return;
             }
             if (seg.Mode == AirOrderMode.Salvo)
@@ -69,7 +69,7 @@ namespace SupremeNuclear
                 // залп Step сразу снимет). Боеготов — продолжает план.
                 if (!seg.SalvoFired || CombatReady(aircraft))
                     return;
-                InsertRtb(aircraft, plan);
+                InsertRtb(aircraft);
                 return;
             }
             if (seg.Mode != AirOrderMode.Rtb)
@@ -102,9 +102,7 @@ namespace SupremeNuclear
             if (aircraft.radarAlt > AirborneAgainM)
             {
                 // Обслужен и взлетел — вылет возобновляется следующим сегментом плана.
-                List<AircraftOrders.OrderSegment> mutable = (List<AircraftOrders.OrderSegment>)plan;
-                mutable.RemoveAt(0);
-                AircraftOrders.Version++;
+                AircraftOrders.DropHeadSegment(aircraft);
                 return;
             }
             if (aircraft.radarAlt < OnGroundAltM && !seg.Serviced)
@@ -117,7 +115,7 @@ namespace SupremeNuclear
                 AirbaseReserve.Add(seg.Base, aircraft.definition as AircraftDefinition);
                 AircraftOrders.Forget(aircraft);
                 aircraft.DisableUnit();
-                CommanderHud.Notice($"{aircraft.definition.unitName}: в резерве аэродрома");
+                CommanderHud.Notice(Loc.F("{0}: в резерве аэродрома", aircraft.definition.unitName));
                 return;
             }
             // Авто-RTB вертолёта: нативно запаркован по посадке — после обслуживания
@@ -129,13 +127,12 @@ namespace SupremeNuclear
 
         /// <summary>Вставить RTB-сегмент в голову плана (базы нет — остаёмся в бою,
         /// нативный топливный возврат).</summary>
-        private static void InsertRtb(Aircraft aircraft, IReadOnlyList<AircraftOrders.OrderSegment> plan)
+        private static void InsertRtb(Aircraft aircraft)
         {
             Airbase airbase = NearestOwnAirbase(aircraft);
             if (airbase == null)
                 return;
-            List<AircraftOrders.OrderSegment> mutable = (List<AircraftOrders.OrderSegment>)plan;
-            mutable.Insert(0, AircraftOrders.MakeRtb(aircraft, airbase));
+            AircraftOrders.InsertHeadSegment(aircraft, AircraftOrders.MakeRtb(aircraft, airbase));
         }
 
         /// <summary>Новый приказ стоящему на базе борту: выкат из паркинга — самолёты
@@ -216,7 +213,7 @@ namespace SupremeNuclear
             aircraft.RpcRearm(new RearmEventArgs { Rearmer = null, Stations = stations });
             aircraft.Refuel(null);
             seg.Serviced = true;
-            CommanderHud.Notice($"{aircraft.definition.unitName}: обслужен, вылет возобновляется");
+            CommanderHud.Notice(Loc.F("{0}: обслужен, вылет возобновляется", aircraft.definition.unitName));
         }
 
         /// <summary>Борт боеготов: топливо выше порога и есть станция с боеприпасами

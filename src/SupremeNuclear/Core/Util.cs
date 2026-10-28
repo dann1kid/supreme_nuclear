@@ -20,13 +20,18 @@ namespace SupremeNuclear
             return Vector2.Angle(h, t) <= maxDeg;
         }
 
-        /// <summary>Итоговый наклон камеры из пользовательского угла и двух автодоворотов:
-        /// к виду сверху на стратезуме (blendTop) и круче вниз у земли (blendClose),
-        /// факторы 0..1. Полосы не пересекаются, поэтому порядок вложенного лерпа не важен.
-        /// При осмотре на Space оба фактора — 0: угол осмотра применяется напрямую.</summary>
-        public static float ComposePitch(float userPitch, float topDownPitch, float closePitch,
-            float blendTop, float blendClose) =>
-            Mathf.Lerp(Mathf.Lerp(userPitch, topDownPitch, blendTop), closePitch, blendClose);
+        /// <summary>Кривая наклона стратегической камеры по дистанции (SupCom strategic
+        /// zoom): у поверхности — крутой взгляд в землю (горизонта не видно), из космоса —
+        /// вид сверху, между — один плавный S-переход. Smoothstep делает кривую пологой
+        /// у краёв диапазона («вблизи к поверхности чуть меняет наклон») и круче в середине.
+        /// Горизонт в обычной игре не виден никогда — только осмотром на Space.</summary>
+        public static float ZoomCurvePitch(float distance, float nearPitch, float topDownPitch,
+            float nearDist, float topDist)
+        {
+            float t = Mathf.InverseLerp(nearDist, topDist, distance);
+            float smooth = t * t * (3f - 2f * t);
+            return Mathf.Lerp(nearPitch, topDownPitch, smooth);
+        }
 
         /// <summary>Дистанция подхода к цели атаки: НЕ ДАЛЬШЕ текущей (0.9×— чуть
         /// ближе; приказ «назад» уводил корабли от берега, который им и был нужен)
@@ -34,16 +39,76 @@ namespace SupremeNuclear
         public static float ApproachDistance(float currentDist, float range) =>
             Mathf.Min(currentDist * 0.9f, range * 0.8f);
 
+        /// <summary>Квадрат XZ-дистанции от точки до отрезка (проекция клампится
+        /// на концы). Общая метрика «насколько точка у полосы»: выбор аэродрома
+        /// для руления (AnyNearAirbasePatch) и поиск своего аэродрома для ангара.
+        /// Чистая — тестируется.</summary>
+        public static float DistSqToSegmentXZ(Vector2 from, Vector2 a, Vector2 b)
+        {
+            Vector2 ab = b - a;
+            float abSq = ab.sqrMagnitude;
+            if (abSq < 1e-6f)
+                return (a - from).sqrMagnitude;
+            float t = Mathf.Clamp01(Vector2.Dot(from - a, ab) / abSq);
+            Vector2 proj = a + ab * t;
+            return (proj - from).sqrMagnitude;
+        }
+
+        /// <summary>Радиус кольца остановки строителей вокруг площадки: габарит
+        /// здания + запас (вне границы призрака), но НЕ дальше радиуса оплаты
+        /// площадки (дальше деньги не капают) и не ближе минимума. Чистая —
+        /// тестируется.</summary>
+        public static float BuildApproachRingM(float footprintHalfM, float marginM, float minM, float maxM) =>
+            Mathf.Clamp(footprintHalfM + marginM, minM, maxM);
+
+        /// <summary>На сколько равных шагов разбить отрезок длиной distanceM при шаге
+        /// ~stepM (проверка прямой трассы наземки на воду: последний шаг — сама
+        /// цель). Минимум 1, потолок maxSteps — длинные трассы берутся разреженнее.
+        /// Вызывается только из события приказа, не из тика. Чистая — тестируется.</summary>
+        public static int SegmentSteps(float distanceM, float stepM, int maxSteps) =>
+            Mathf.Clamp(Mathf.CeilToInt(distanceM / Mathf.Max(stepM, 1f)), 1, maxSteps);
+
+        /// <summary>Кандидаты кольцевого поиска вокруг точки (спуск корабля с верфи,
+        /// подход инженера к платформе): концентрические кольца от innerRadius шагом
+        /// stepM по directions направлений, БЛИЖНИЕ КОЛЬЦА РАНЬШЕ (первый годный
+        /// кандидат — ближайший). Чистая — тестируется.</summary>
+        public static List<Vector2> RingPoints(float innerRadius, float stepM, int directions,
+            float maxRadius)
+        {
+            var points = new List<Vector2>();
+            if (innerRadius < 0.1f || stepM < 1f || directions < 4 || maxRadius <= innerRadius)
+                return points;
+            int rings = Mathf.FloorToInt((maxRadius - innerRadius) / stepM);
+            for (int r = 0; r <= rings; r++)
+            {
+                float radius = innerRadius + r * stepM;
+                for (int d = 0; d < directions; d++)
+                {
+                    float angle = d * Mathf.PI * 2f / directions;
+                    points.Add(new Vector2(Mathf.Cos(angle) * radius, Mathf.Sin(angle) * radius));
+                }
+            }
+            return points;
+        }
+
+        /// <summary>Индекс формы множественного числа (русское правило):
+        /// 0 — один, 1 — несколько, 2 — много. 11–14 всегда «много» (11 носителей).</summary>
+        internal static int RuPluralIndex(int n)
+        {
+            int lastTwo = n % 100, last = n % 10;
+            if (lastTwo >= 11 && lastTwo <= 14)
+                return 2;
+            if (last == 1)
+                return 0;
+            return last >= 2 && last <= 4 ? 1 : 2;
+        }
+
         /// <summary>Русская форма существительного по числу: RuPlural(2, "носитель",
         /// "носителя", "носителей") → "носителя". 11–14 всегда «много» (11 носителей).</summary>
         public static string RuPlural(int n, string one, string few, string many)
         {
-            int lastTwo = n % 100, last = n % 10;
-            if (lastTwo >= 11 && lastTwo <= 14)
-                return many;
-            if (last == 1)
-                return one;
-            return last >= 2 && last <= 4 ? few : many;
+            int idx = RuPluralIndex(n);
+            return idx == 0 ? one : idx == 1 ? few : many;
         }
 
         /// <summary>Однострочная подгонка текста под фиксированную ширину: длиннее
@@ -55,9 +120,60 @@ namespace SupremeNuclear
                 return "";
             if (string.IsNullOrEmpty(s))
                 return "";
-            if (s.Length <= maxChars)
-                return s;
-            return s.Substring(0, maxChars - 1) + "…";
+            if (s.Length > maxChars)
+                return s.Substring(0, maxChars - 1) + "…";
+            return s;
+        }
+
+        /// <summary>Адаптивный фильтр курсора «one euro» (Vector2): в покое сильно
+        /// сглаживает — гасит сенсорный дрожь мыши (±1-2 пикселя при удержании
+        /// транслировались в камеру 1:1 в метры мира), при движении частота среза
+        /// растёт со скоростью и лаг остаётся малым. Состояние сбрасывается Reset().</summary>
+        public sealed class OneEuro
+        {
+            private readonly float _minCutoff;
+            private readonly float _beta;
+            private Vector2 _value;
+            private Vector2 _speed;
+            private bool _has;
+
+            public OneEuro(float minCutoff = 0.5f, float beta = 0.01f)
+            {
+                _minCutoff = minCutoff;
+                _beta = beta;
+            }
+
+            /// <summary>Текущее сглаженное значение (до вызова Filter — ноль).</summary>
+            public Vector2 Value => _value;
+
+            /// <summary>Прогнать сырую точку; первый вызов проходит без сглаживания.</summary>
+            public Vector2 Filter(Vector2 raw, float dt)
+            {
+                if (dt <= 0f)
+                    return _has ? _value : raw;
+                if (!_has)
+                {
+                    _value = raw;
+                    _speed = Vector2.zero;
+                    _has = true;
+                    return raw;
+                }
+
+                float Alpha(float cutoff) => 1f - Mathf.Exp(-2f * Mathf.PI * cutoff * dt);
+
+                // Оценка скорости (сглаженная), затем адаптивная частота среза по ней.
+                Vector2 rawSpeed = (raw - _value) / dt;
+                _speed += (rawSpeed - _speed) * Alpha(1f);
+                float cutoff = _minCutoff + _beta * _speed.magnitude;
+                _value += (raw - _value) * Alpha(cutoff);
+                return _value;
+            }
+
+            public void Reset()
+            {
+                _has = false;
+                _speed = Vector2.zero;
+            }
         }
 
         /// <summary>Серии подряд идущих одинаковых элементов (порядок сохраняется,
@@ -240,5 +356,89 @@ namespace SupremeNuclear
             }
             return smooth.Count;
         }
+
+        /// <summary>Наклон футпринта под рельеф: средние высоты передней/задней и
+        /// правой/левой кромок → продольный (pitch) и поперечный (roll) углы, град.
+        /// Знаки согласованы с Quaternion.Euler(pitch, yaw, roll): pitch&gt;0 — нос
+        /// (+Z) вниз, roll&gt;0 — правый борт (+X) вверх. Оба угла клампятся
+        /// maxDeg (0 — наклона нет, всегда плоско); длины клампятся снизу 1 м.</summary>
+        public static void FootprintTilt(float hFront, float hBack, float hRight, float hLeft,
+            float lengthM, float widthM, float maxDeg, out float pitchDeg, out float rollDeg)
+        {
+            pitchDeg = 0f;
+            rollDeg = 0f;
+            if (maxDeg <= 0f)
+                return;
+            pitchDeg = Mathf.Clamp(
+                Mathf.Atan2(hBack - hFront, Mathf.Max(lengthM, 1f)) * Mathf.Rad2Deg,
+                -maxDeg, maxDeg);
+            rollDeg = Mathf.Clamp(
+                Mathf.Atan2(hRight - hLeft, Mathf.Max(widthM, 1f)) * Mathf.Rad2Deg,
+                -maxDeg, maxDeg);
+        }
+
+        /// <summary>Равномерный Catmull-Rom: интерполяция между p1 и p2 по t∈[0..1],
+        /// p0/p3 — соседние точки следа (задают касательные; недостающие — clamp).
+        /// Чистая — тестируется.</summary>
+        public static Vector3 CatmullRom(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, float t)
+        {
+            float t2 = t * t;
+            float t3 = t2 * t;
+            return 0.5f * (2f * p1 +
+                           (p2 - p0) * t +
+                           (2f * p0 - 5f * p1 + 4f * p2 - p3) * t2 +
+                           (3f * p1 - p0 - 3f * p2 + p3) * t3);
+        }
+
+        /// <summary>Точка на сплайне-следе в arcBehind метрах ДУГИ позади живой позиции
+        /// цели (tail — виртуальный последний узел; pts — breadcrumbs в XZ, высота
+        /// возврата 0 — вызывающий кладёт GroundY). Дуга сегмента ≈ хорда (шаг
+        /// сэмплов мал против кривизны). false — след короче запрошенной дуги.
+        /// headingRad — курс следа в найденной точке (atan2(x,z), конечная разность
+        /// сплайна). Чистая — тестируется.</summary>
+        public static bool TrailPointAt(IReadOnlyList<Vector3> pts, Vector3 tail, float arcBehind,
+            out Vector3 at, out float headingRad)
+        {
+            at = Vector3.zero;
+            headingRad = 0f;
+            int n = pts.Count;
+            if (n == 0 || arcBehind < 0f)
+                return false;
+            float target = 0f;
+            for (int i = 0; i < n - 1; i++)
+                target += Horiz(pts[i], pts[i + 1]);
+            target += Horiz(pts[n - 1], tail);
+            target -= arcBehind; // ищем позицию на дуге (от головы следа)
+            if (target < -1e-3f)
+                return false; // след короче — вызывающий деградирует в прямой билин
+            float walked = 0f;
+            for (int i = 0; i < n; i++)
+            {
+                Vector3 a = pts[i];
+                Vector3 b = i + 1 < n ? pts[i + 1] : tail;
+                float seg = Horiz(a, b);
+                if (seg < 1e-3f || walked + seg < target)
+                {
+                    walked += seg;
+                    continue;
+                }
+                float t = Mathf.Clamp01((target - walked) / seg);
+                Vector3 p0 = i > 0 ? pts[i - 1] : a;
+                // Узлы цепочки: pts[0..n-1] + tail (виртуальный хвост): сосед СПРАВА
+                // от b — pts[i+2], а для предпоследнего сегмента — сам tail (иначе
+                // касательная сплайна обрывается клампом и якорь съезжает с дуги).
+                Vector3 p3 = i + 2 < n ? pts[i + 2] : i + 2 == n ? tail : b;
+                at = CatmullRom(p0, a, b, p3, t);
+                at.y = 0f;
+                Vector3 ahead = CatmullRom(p0, a, b, p3, Mathf.Min(t + 0.25f, 1f));
+                Vector2 d = new Vector2(ahead.x - at.x, ahead.z - at.z);
+                headingRad = d.sqrMagnitude < 1e-6f ? 0f : Mathf.Atan2(d.x, d.y);
+                return true;
+            }
+            return false; // вырожденный след из нулевых сегментов
+        }
+
+        private static float Horiz(Vector3 a, Vector3 b) =>
+            new Vector2(a.x - b.x, a.z - b.z).magnitude;
     }
 }

@@ -13,6 +13,11 @@ namespace SupremeNuclear
         /// ракетных станций по нескольким целям (SalvoService, распределение — нативное
         /// CombatAI.LookForMissileTargets). Сегмент живёт до отстрела или смерти целей.</summary>
         Salvo,
+        /// <summary>Сопровождение союзного юнита (v0.97): борт держится у цели
+        /// (сектор веера группы; вблизи — орбита), враг в дальности вооружения —
+        /// нативный бой (как атака-движение), после боя следование продолжается.
+        /// Живёт, пока цель жива.</summary>
+        Escort,
         /// <summary>Возврат на базу: вставляет SortieService при «сухих» станциях или
         /// низком топливе; живёт до конца обслуживания и взлёта (снимает SortieService),
         /// затем вылет возобновляется по следующему сегменту.</summary>
@@ -27,6 +32,18 @@ namespace SupremeNuclear
         Full,
         Cruise,
         Economy
+    }
+
+    /// <summary>Тоггл «вдоль рельефа» (Alt+T, кнопки панели): Profile — дефолт
+    /// профиля высоты (Сверхнизко/Низко огибают, Средне/Высоко — нет), Always/
+    /// Never — принудительно для любого профиля. Штампуется на сегмент, как
+    /// высота/скорость. Вертолётам руление огибает рельеф ВСЕГДА (v0.93.0,
+    /// AutopilotHelo) — тоггл влияет только на самолёты.</summary>
+    public enum TerrainHugMode
+    {
+        Profile,
+        Always,
+        Never
     }
 
     /// <summary>
@@ -66,6 +83,21 @@ namespace SupremeNuclear
         /// <summary>Скоростной режим для НОВЫХ сегментов (Shift+1..3 или кнопки);
         /// «Полный» — прежнее поведение руления.</summary>
         public static SpeedMode SpeedIndex = SpeedMode.Full;
+
+        /// <summary>Тоггл «вдоль рельефа» для НОВЫХ сегментов (Alt+T или кнопки);
+        /// Profile — как в профиле высоты.</summary>
+        public static TerrainHugMode TerrainHug = TerrainHugMode.Profile;
+
+        /// <summary>Итоговое огибание рельефа для штампа сегмента. Чистая — тестируется.</summary>
+        public static bool EffectiveFollowTerrain(bool profileFollow, TerrainHugMode mode) =>
+            mode == TerrainHugMode.Always || (mode == TerrainHugMode.Profile && profileFollow);
+
+        /// <summary>Профиль высоты для НОВЫХ сегментов с учётом тоггла «вдоль
+        /// рельефа»: Always/Never перекрывает дефолт профиля.</summary>
+        public static FlightProfile EffectiveProfile => new FlightProfile(
+            Profiles[ProfileIndex].AltitudeAgl,
+            EffectiveFollowTerrain(Profiles[ProfileIndex].FollowTerrain, TerrainHug),
+            Profiles[ProfileIndex].Name);
 
         /// <summary>Тротл скоростного режима (чистая функция — тестируется).</summary>
         public static float ThrottleOf(float cruiseThrottle, SpeedMode mode)
@@ -116,6 +148,11 @@ namespace SupremeNuclear
             public bool SalvoFired;
             /// <summary>Залп: индексы станций, уже пустивших ракеты в этом залпе.</summary>
             public List<int> SalvoStationsFired;
+            /// <summary>Служебный стоп-старт отмены (S): точка стоит на позиции борта,
+            /// маркер не рисуется и не сканируется. Одиночные ноги движения — НЕ
+            /// служебные (v0.90: раньше прятались, маркер пропадал, точку нельзя
+            /// было схватить/удалить).</summary>
+            public bool ServiceStart;
             /// <summary>RTB: передан нативной посадке (однократно, у аэродрома).</summary>
             public bool RtbHandedOff;
             /// <summary>RTB: сел (на земле у аэродрома — идёт обслуживание).</summary>
@@ -126,6 +163,10 @@ namespace SupremeNuclear
             public bool Serviced;
             /// <summary>RTB: аэродром назначения (резерв при терминальном возврате).</summary>
             public Airbase Base;
+            /// <summary>Escort: мир-фиксированный сектор веера группы вокруг цели
+            /// (радианы; NaN — без смещения, у цели). Своя цель известна всегда —
+            /// даталинк не нужен.</summary>
+            public float EscortBearing = float.NaN;
         }
 
         private static readonly Dictionary<Unit, List<OrderSegment>> Plans =
@@ -151,8 +192,8 @@ namespace SupremeNuclear
             var seg = new OrderSegment
             {
                 Mode = mode,
-                AltAgl = Profiles[ProfileIndex].AltitudeAgl,
-                FollowTerrain = Profiles[ProfileIndex].FollowTerrain,
+                AltAgl = EffectiveProfile.AltitudeAgl,
+                FollowTerrain = EffectiveProfile.FollowTerrain,
                 Speed = SpeedIndex
             };
             AppendPoint(seg, groundPoint, groupId);
@@ -208,8 +249,8 @@ namespace SupremeNuclear
                 var seg = new OrderSegment
                 {
                     Mode = AirOrderMode.Patrol,
-                    AltAgl = Profiles[ProfileIndex].AltitudeAgl,
-                    FollowTerrain = Profiles[ProfileIndex].FollowTerrain,
+                    AltAgl = EffectiveProfile.AltitudeAgl,
+                    FollowTerrain = EffectiveProfile.FollowTerrain,
                     Speed = SpeedIndex
                 };
                 seg.Points.Add(StartPoint(seg, aircraft));
@@ -220,7 +261,7 @@ namespace SupremeNuclear
             }
 
             OrderSegment last = plan.Count > 0 ? plan[plan.Count - 1] : null;
-            if (CanAppend(last, mode, Profiles[ProfileIndex], SpeedIndex))
+            if (CanAppend(last, mode, EffectiveProfile, SpeedIndex))
             {
                 AppendPoint(last, groundPoint, groupId);
                 return;
@@ -230,8 +271,8 @@ namespace SupremeNuclear
 
         /// <summary>Профиль/скорость сегмента совпадают с текущими (слияание ног маршрута).</summary>
         private static bool SameFlightModes(OrderSegment seg) =>
-            Mathf.Approximately(seg.AltAgl, Profiles[ProfileIndex].AltitudeAgl) &&
-            seg.FollowTerrain == Profiles[ProfileIndex].FollowTerrain &&
+            Mathf.Approximately(seg.AltAgl, EffectiveProfile.AltitudeAgl) &&
+            seg.FollowTerrain == EffectiveProfile.FollowTerrain &&
             seg.Speed == SpeedIndex;
 
         public static void SetPatrol(Unit aircraft, Vector3 groundPoint, int groupId = 0)
@@ -241,8 +282,8 @@ namespace SupremeNuclear
             var seg = new OrderSegment
             {
                 Mode = AirOrderMode.Patrol,
-                AltAgl = Profiles[ProfileIndex].AltitudeAgl,
-                FollowTerrain = Profiles[ProfileIndex].FollowTerrain,
+                AltAgl = EffectiveProfile.AltitudeAgl,
+                FollowTerrain = EffectiveProfile.FollowTerrain,
                 Speed = SpeedIndex
             };
             seg.Points.Add(StartPoint(seg, aircraft));
@@ -273,6 +314,74 @@ namespace SupremeNuclear
             plan.Add(MakeAttackSegment(target, anchorGround));
         }
 
+        /// <summary>Приказ сопровождения союзного юнита (v0.97, перезапись плана):
+        /// борт держится у цели сектором bearing веера группы, дерётся с врагами
+        /// в дальности вооружения, следование живёт, пока цель жива.</summary>
+        public static void SetEscort(Unit aircraft, Unit target, float bearing)
+        {
+            Version++;
+            SortieService.Launch(aircraft); // стоящий на базе борт — выкат под новый приказ
+            Plans[aircraft] = new List<OrderSegment> { MakeEscortSegment(target, bearing) };
+        }
+
+        /// <summary>Shift+ПКМ по союзнику: эскорт-сегмент дописывается в план
+        /// (исполнится после текущих сегментов — план-модель это умеет бесплатно).</summary>
+        public static void EnqueueEscort(Unit aircraft, Unit target, float bearing)
+        {
+            Version++;
+            SortieService.Launch(aircraft);
+            if (!Plans.TryGetValue(aircraft, out List<OrderSegment> plan))
+            {
+                SetEscort(aircraft, target, bearing);
+                return;
+            }
+            // Терминальный RTB при дописывании снимается — как у движений.
+            if (plan.Count == 1 && plan[0].Mode == AirOrderMode.Rtb)
+                plan.RemoveAt(0);
+            plan.Add(MakeEscortSegment(target, bearing));
+        }
+
+        private static OrderSegment MakeEscortSegment(Unit target, float bearing)
+        {
+            var seg = new OrderSegment
+            {
+                Mode = AirOrderMode.Escort,
+                Target = target,
+                EscortBearing = bearing,
+                AltAgl = EffectiveProfile.AltitudeAgl,
+                FollowTerrain = EffectiveProfile.FollowTerrain,
+                Speed = SpeedIndex
+            };
+            // Points[0] — якорь (позиция цели на момент клика): служебная точка,
+            // не рисуется/не сканируется — связь борт→цель рисует CommanderHud.
+            seg.Points.Add(new Vector3(target.transform.position.x, seg.AltAgl,
+                target.transform.position.z).ToGlobalPosition());
+            seg.PointGroups.Add(0);
+            return seg;
+        }
+
+        /// <summary>Снять эскорт-сегменты всех бортов, сопровождающих цель
+        /// (Ctrl+Shift+ПКМ по связи). Возвращает число снятых сегментов.</summary>
+        public static int CancelEscortOf(Unit target)
+        {
+            int removed = 0;
+            foreach (KeyValuePair<Unit, List<OrderSegment>> kv in Plans)
+            {
+                if (kv.Key == null || kv.Key.disabled)
+                    continue;
+                List<OrderSegment> plan = kv.Value;
+                for (int s = plan.Count - 1; s >= 0; s--)
+                    if (plan[s].Mode == AirOrderMode.Escort && plan[s].Target == target)
+                    {
+                        plan.RemoveAt(s);
+                        removed++;
+                    }
+            }
+            if (removed > 0)
+                Version++;
+            return removed;
+        }
+
         /// <summary>Команда «на базу» (G): терминальный RTB — посадка, обслуживание
         /// и паркинг до следующего приказа (SortieService).</summary>
         public static void ReturnToBase(Unit aircraft, Airbase airbase)
@@ -281,14 +390,32 @@ namespace SupremeNuclear
             Plans[aircraft] = new List<OrderSegment> { MakeRtb(aircraft, airbase) };
         }
 
+        /// <summary>Shift+«на базу»: RTB дописывается в ХВОСТ плана — борт вернётся
+        /// домой после отработки очереди (когда очередь до него дойдёт, RTB станет
+        /// единственным сегментом = терминальный: посадка/сервис/резерв; как у
+        /// авто-RTB, за ним ничего нет — деспавн в резерв корректен). Плана нет —
+        /// как G без Shift; хвост уже RTB — noop (второй возврат не копим).</summary>
+        public static void EnqueueRtb(Unit aircraft, Airbase airbase)
+        {
+            Version++;
+            if (!Plans.TryGetValue(aircraft, out List<OrderSegment> plan) || plan.Count == 0)
+            {
+                Plans[aircraft] = new List<OrderSegment> { MakeRtb(aircraft, airbase) };
+                return;
+            }
+            if (plan[plan.Count - 1].Mode == AirOrderMode.Rtb)
+                return;
+            plan.Add(MakeRtb(aircraft, airbase));
+        }
+
         private static OrderSegment MakeAttackSegment(Unit target, Vector3 anchorGround)
         {
             var seg = new OrderSegment
             {
                 Mode = AirOrderMode.Attack,
                 Target = target,
-                AltAgl = Profiles[ProfileIndex].AltitudeAgl,
-                FollowTerrain = Profiles[ProfileIndex].FollowTerrain,
+                AltAgl = EffectiveProfile.AltitudeAgl,
+                FollowTerrain = EffectiveProfile.FollowTerrain,
                 Speed = SpeedIndex
             };
             // Points[0] — якорь подлёта (AGR-высота профиля сегмента)
@@ -305,8 +432,8 @@ namespace SupremeNuclear
             {
                 Mode = AirOrderMode.Salvo,
                 Target = target,
-                AltAgl = Profiles[ProfileIndex].AltitudeAgl,
-                FollowTerrain = Profiles[ProfileIndex].FollowTerrain,
+                AltAgl = EffectiveProfile.AltitudeAgl,
+                FollowTerrain = EffectiveProfile.FollowTerrain,
                 Speed = SpeedIndex,
                 SalvoTargets = target != null ? new List<Unit> { target } : new List<Unit>(),
                 SalvoStationsFired = new List<int>()
@@ -385,7 +512,8 @@ namespace SupremeNuclear
                 Mode = AirOrderMode.Transit,
                 AltAgl = Profiles[ProfileIndex].AltitudeAgl,
                 FollowTerrain = false,
-                Speed = SpeedIndex
+                Speed = SpeedIndex,
+                ServiceStart = true // стоп-старт на позиции борта — не вейпоинт
             };
             seg.Points.Add(StartPoint(seg, aircraft));
             seg.PointGroups.Add(0);
@@ -402,14 +530,14 @@ namespace SupremeNuclear
             OrderSegment seg = plan[0];
             if (seg.Mode == AirOrderMode.Rtb)
                 return false;
-            bool changed = !Mathf.Approximately(seg.AltAgl, Profiles[ProfileIndex].AltitudeAgl) ||
-                           seg.FollowTerrain != Profiles[ProfileIndex].FollowTerrain ||
+            bool changed = !Mathf.Approximately(seg.AltAgl, EffectiveProfile.AltitudeAgl) ||
+                           seg.FollowTerrain != EffectiveProfile.FollowTerrain ||
                            seg.Speed != SpeedIndex;
             if (!changed)
                 return false;
             Version++;
-            seg.AltAgl = Profiles[ProfileIndex].AltitudeAgl;
-            seg.FollowTerrain = Profiles[ProfileIndex].FollowTerrain;
+            seg.AltAgl = EffectiveProfile.AltitudeAgl;
+            seg.FollowTerrain = EffectiveProfile.FollowTerrain;
             seg.Speed = SpeedIndex;
             // Точки хранят AGL в y — переписываем под новый профиль (x/z не меняются).
             for (int i = 0; i < seg.Points.Count; i++)
@@ -420,18 +548,19 @@ namespace SupremeNuclear
             return true;
         }
 
-        /// <summary>Сегмент становится патрульным циклом (ПКМ по вейпоинту).</summary>
-        public static void ConvertToPatrol(Unit aircraft, int segmentIndex)
+        /// <summary>Сегмент становится патрульным циклом (ПКМ по вейпоинту).
+        /// false — сегмент не конвертируется (атака/залп/RTB) или плана нет.</summary>
+        public static bool ConvertToPatrol(Unit aircraft, int segmentIndex)
         {
             Version++;
             if (!Plans.TryGetValue(aircraft, out List<OrderSegment> plan))
-                return;
+                return false;
             if (segmentIndex < 0 || segmentIndex >= plan.Count)
-                return;
+                return false;
             OrderSegment seg = plan[segmentIndex];
             if (seg.Mode == AirOrderMode.Attack || seg.Mode == AirOrderMode.Salvo ||
-                seg.Mode == AirOrderMode.Rtb)
-                return; // атаку/залп/возврат на базу в патруль не превращаем
+                seg.Mode == AirOrderMode.Rtb || seg.Mode == AirOrderMode.Escort)
+                return false; // атаку/залп/возврат/сопровождение в патруль не превращаем
             seg.Mode = AirOrderMode.Patrol;
             seg.Target = null;
             if (seg.Points.Count == 1)
@@ -440,9 +569,12 @@ namespace SupremeNuclear
                 seg.PointGroups.Insert(0, 0);
             }
             seg.Index = 0;
+            return true;
         }
 
-        /// <summary>Удалить точку плана (Ctrl+Shift+ПКМ). Пустые сегменты уберёт Step.</summary>
+        /// <summary>Удалить точку плана (Ctrl+Shift+ПКМ). Пост-обработка — общая
+        /// с групповым удалением (NormalizeAfterRemoval): паритет правил дропа
+        /// опустевших сегментов и клампа курсора.</summary>
         public static void RemovePoint(Unit aircraft, int segmentIndex, int pointIndex)
         {
             Version++;
@@ -456,10 +588,43 @@ namespace SupremeNuclear
             seg.PointGroups.RemoveAt(pointIndex);
             if (seg.Index > pointIndex)
                 seg.Index--;
-            if (seg.Mode != AirOrderMode.Attack && seg.Mode != AirOrderMode.Salvo && seg.Points.Count > 0)
-                seg.Index = Mathf.Clamp(seg.Index, 0, seg.Points.Count - 1);
-            if (seg.Points.Count == 0 && seg.Target == null && HasNoSalvoTargets(seg))
-                plan.RemoveAt(segmentIndex);
+            NormalizeAfterRemoval(plan, segmentIndex);
+        }
+
+        /// <summary>Нормализация сегмента после сноса точек (общая для одиночного
+        /// и группового удаления): кламп курсора (кроме Attack/Salvo — там Index
+        /// ведёт выпущенную цель) и дроп опустевшего сегмента без явной цели
+        /// и без залп-целей. Чистая — тестируется (через RemovePointsWithGroup).</summary>
+        private static void NormalizeAfterRemoval(List<OrderSegment> plan, int s)
+        {
+            OrderSegment seg = plan[s];
+            if (seg.Points.Count > 0)
+            {
+                if (seg.Mode != AirOrderMode.Attack && seg.Mode != AirOrderMode.Salvo)
+                    seg.Index = Mathf.Clamp(seg.Index, 0, seg.Points.Count - 1);
+            }
+            else if (seg.Target == null && HasNoSalvoTargets(seg))
+                plan.RemoveAt(s);
+        }
+
+        /// <summary>Служебная точка плана — НЕ вейпоинт приказа: не рисуется и не
+        /// сканируется. Это взлёт патруля (p=0), стоп-старт отмены (ServiceStart)
+        /// и якоря атаки/залпа/RTB индивидуальных приказов (gid=0) — приказы этих
+        /// видов рисуются крестом/лентой к базе, их точки не редактируются
+        /// (якорь атаки у группы всегда gid=0 — маркер дал бы стопку на одной
+        /// точке; точка RTB — точка посадки, драг ломал бы передачу нативной
+        /// посадке). Групповые точки (gid≠0) и одиночные ноги движения —
+        /// ОБЫЧНЫЕ вейпоинты. Единое правило для WaypointScanner и CommanderHud.
+        /// Чистая — тестируется.</summary>
+        public static bool IsServicePoint(OrderSegment seg, int p)
+        {
+            if (seg.PointGroups[p] != 0)
+                return false;
+            if (seg.Mode == AirOrderMode.Patrol)
+                return p == 0;
+            return seg.ServiceStart ||
+                   seg.Mode == AirOrderMode.Attack || seg.Mode == AirOrderMode.Salvo ||
+                   seg.Mode == AirOrderMode.Escort || seg.Mode == AirOrderMode.Rtb;
         }
 
         /// <summary>У залп-сегмента нет явных целей (залп по площади).</summary>
@@ -497,8 +662,10 @@ namespace SupremeNuclear
             return false;
         }
 
-        /// <summary>Удалить из плана все точки группы приказа; опустевшие сегменты —
-        /// убрать (чистая функция — тестируется).</summary>
+        /// <summary>Удалить из плана все точки группы приказа; пост-обработка —
+        /// общая с одиночным удалением (NormalizeAfterRemoval): опустевший сегмент
+        /// дропается только без явной цели И без залп-целей, курсор клампится
+        /// вне Attack/Salvo. Чистая функция — тестируется.</summary>
         public static int RemovePointsWithGroup(List<OrderSegment> plan, int groupId)
         {
             int removed = 0;
@@ -514,10 +681,7 @@ namespace SupremeNuclear
                             seg.Index--;
                         removed++;
                     }
-                if (seg.Points.Count == 0 && seg.Target == null)
-                    plan.RemoveAt(s);
-                else if (seg.Points.Count > 0)
-                    seg.Index = Mathf.Clamp(seg.Index, 0, seg.Points.Count - 1);
+                NormalizeAfterRemoval(plan, s);
             }
             return removed;
         }
@@ -636,6 +800,27 @@ namespace SupremeNuclear
             seg.Points[pointIndex] = new Vector3(groundPoint.x, agl, groundPoint.z).ToGlobalPosition();
         }
 
+        /// <summary>Снести головной сегмент плана (SortieService: обслуженный борт
+        /// взлетел — вылет продолжается следующим сегментом). Планы мутруются
+        /// только через API сервиса, не кастом списка напрямую.</summary>
+        public static void DropHeadSegment(Unit aircraft)
+        {
+            Version++;
+            if (Plans.TryGetValue(aircraft, out List<OrderSegment> plan) && plan.Count > 0)
+                plan.RemoveAt(0);
+        }
+
+        /// <summary>Вставить сегмент в голову плана (SortieService: авто-RTB).</summary>
+        public static void InsertHeadSegment(Unit aircraft, OrderSegment segment)
+        {
+            if (aircraft == null || segment == null)
+                return;
+            Version++;
+            if (!Plans.TryGetValue(aircraft, out List<OrderSegment> plan))
+                Plans[aircraft] = plan = new List<OrderSegment>();
+            plan.Insert(0, segment);
+        }
+
         public static void Forget(Unit aircraft)
         {
             Version++;
@@ -672,6 +857,14 @@ namespace SupremeNuclear
                     plan.RemoveAt(0);
                     continue;
                 }
+                if (seg.Mode == AirOrderMode.Escort)
+                {
+                    // Сопровождение живёт, пока цель жива; дальше — следующий сегмент.
+                    if (seg.Target != null && !seg.Target.disabled)
+                        return seg;
+                    plan.RemoveAt(0);
+                    continue;
+                }
                 if (seg.Mode == AirOrderMode.Rtb)
                     return seg; // снимает SortieService после обслуживания и взлёта
                 if (seg.Points.Count == 0)
@@ -682,8 +875,9 @@ namespace SupremeNuclear
                 if (seg.Mode == AirOrderMode.Patrol)
                     return seg;
 
+                float reach = ReachRadius(aircraft);
                 while (seg.Index < seg.Points.Count - 1 &&
-                       HorizontalDistance(currentPosition, WorldOf(seg, seg.Index)) < 900f)
+                       HorizontalDistance(currentPosition, WorldOf(seg, seg.Index)) < reach)
                 {
                     seg.Index++;
                 }
@@ -703,6 +897,44 @@ namespace SupremeNuclear
         {
             Vector3 p = seg.Points[pointIndex].ToLocalPosition();
             return new Vector3(p.x, GameApi.GroundY(p.x, p.z) + p.y, p.z);
+        }
+
+        /// <summary>Скретч-буфер дистанций патрульного цикла (руление, каждый
+        /// Fixed-тик; растёт только при росте цикла).</summary>
+        private static float[] PatrolDists = new float[8];
+
+        /// <summary>Радиус зачёта вейпоинта — упреждение на разворот ~4 с полёта:
+        /// реактивному на 250 м/с нужно ~900 м (кламп-потолок, прежнее поведение),
+        /// вертолёту на 60 м/с — 240 м. Общим 900 м вертолёт на малом цикле
+        /// зависал: пузырь накрывал весь цикл, и он зачитывался целиком каждый
+        /// кадр (см. NextPatrolIndex). Чистая — тестируется.</summary>
+        public static float WaypointReachRadius(float speedMps) =>
+            Mathf.Clamp(speedMps * 4f, 120f, 900f);
+
+        /// <summary>Радиус зачёта для борта (speed — м/с, Unit.speed).</summary>
+        private static float ReachRadius(Unit unit) =>
+            unit is Aircraft a ? WaypointReachRadius(a.speed) : 900f;
+
+        /// <summary>Курсор патрульного цикла: зачитываем подряд точки в радиусе
+        /// зачёта (dists[0..count) — горизонтальные дистанции до точек), переход
+        /// по кругу. Вышли по дистанции — обычное продвижение. Радиус накрыл ВЕСЬ
+        /// цикл (полный проход вернулся бы к той же точке — зависание) — следующая
+        /// цель САМАЯ ДАЛЬНЯЯ точка: борт перелетает россыпь насквозь, а не кружит
+        /// одну. Чистая — тестируется.</summary>
+        public static int NextPatrolIndex(float[] dists, int count, int index, float reach)
+        {
+            if (count <= 0 || index < 0 || index >= count)
+                return index;
+            int guard = count;
+            while (guard-- > 0 && dists[index] < reach)
+                index = (index + 1) % count;
+            if (guard >= 0)
+                return index; // остановились на точке вне радиуса
+            int far = index;
+            for (int i = 0; i < count; i++)
+                if (dists[i] > dists[far])
+                    far = i;
+            return far;
         }
 
         public static bool TryGetDestination(Unit aircraft, Vector3 currentPosition,
@@ -726,16 +958,20 @@ namespace SupremeNuclear
 
             if (seg.Mode == AirOrderMode.Patrol)
             {
-                int guard = seg.Points.Count;
-                while (guard-- > 0 && HorizontalDistance(currentPosition, WorldOf(seg, seg.Index)) < 900f)
-                    seg.Index = (seg.Index + 1) % seg.Points.Count;
-                Vector3 wp = WorldOf(seg, seg.Index);
-                destination = wp.ToGlobalPosition();
+                int n = seg.Points.Count;
+                float reach = ReachRadius(aircraft);
+                if (PatrolDists.Length < n)
+                    PatrolDists = new float[Mathf.NextPowerOfTwo(n)];
+                for (int i = 0; i < n; i++)
+                    PatrolDists[i] = HorizontalDistance(currentPosition, WorldOf(seg, i));
+                seg.Index = NextPatrolIndex(PatrolDists, n, seg.Index, reach);
+                destination = WorldOf(seg, seg.Index).ToGlobalPosition();
                 return true;
             }
 
             // Центр сегмента: атака/залп — известная позиция цели (даталинк) или якорь
-            // клика, остальное — последняя точка маршрута.
+            // клика, эскорт — живая позиция СОЮЗНОЙ цели (известна всегда) со смещением
+            // сектора веера, остальное — последняя точка маршрута.
             Vector3 center;
             if (seg.Mode == AirOrderMode.Attack)
             {
@@ -747,6 +983,18 @@ namespace SupremeNuclear
                 if (!TryGetAttackApproach(aircraft, seg, SalvoPrimary(seg), out center))
                     return false;
             }
+            else if (seg.Mode == AirOrderMode.Escort)
+            {
+                if (seg.Target == null || seg.Target.disabled)
+                    return false;
+                Vector3 tp = seg.Target.transform.position;
+                float bearing = seg.EscortBearing;
+                if (float.IsNaN(bearing))
+                    bearing = 0f;
+                float off = Settings.EscortAirDistM;
+                center = new Vector3(tp.x + Mathf.Sin(bearing) * off,
+                    GameApi.GroundY(tp.x, tp.z) + seg.AltAgl, tp.z + Mathf.Cos(bearing) * off);
+            }
             else
             {
                 if (seg.Points.Count == 0)
@@ -756,6 +1004,7 @@ namespace SupremeNuclear
 
             Vector2 d = new Vector2(currentPosition.x - center.x, currentPosition.z - center.z);
             bool atLastPoint = seg.Mode == AirOrderMode.Attack || seg.Mode == AirOrderMode.Salvo ||
+                               seg.Mode == AirOrderMode.Escort ||
                                seg.Index >= seg.Points.Count - 1;
             if (atLastPoint && d.magnitude < 2500f)
             {
@@ -768,7 +1017,8 @@ namespace SupremeNuclear
                 return true;
             }
 
-            if (seg.Mode == AirOrderMode.Attack || seg.Mode == AirOrderMode.Salvo)
+            if (seg.Mode == AirOrderMode.Attack || seg.Mode == AirOrderMode.Salvo ||
+                seg.Mode == AirOrderMode.Escort)
             {
                 destination = center.ToGlobalPosition();
                 return true;

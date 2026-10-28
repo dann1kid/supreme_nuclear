@@ -25,13 +25,13 @@ namespace SupremeNuclear
         public static string Label(OrderMode mode) =>
             mode switch
             {
-                OrderMode.Move => "Движение",
-                OrderMode.AttackMove => "Атака-движение",
-                OrderMode.Patrol => "Патруль",
-                OrderMode.Attack => "Атака",
-                OrderMode.Salvo => "Залп",
-                OrderMode.DisperseAttack => "Атака веером",
-                OrderMode.Cancel => "Стоп",
+                OrderMode.Move => Loc.Tr("Движение"),
+                OrderMode.AttackMove => Loc.Tr("Атака-движение"),
+                OrderMode.Patrol => Loc.Tr("Патруль"),
+                OrderMode.Attack => Loc.Tr("Атака"),
+                OrderMode.Salvo => Loc.Tr("Залп"),
+                OrderMode.DisperseAttack => Loc.Tr("Атака веером"),
+                OrderMode.Cancel => Loc.Tr("Стоп"),
                 _ => null
             };
     }

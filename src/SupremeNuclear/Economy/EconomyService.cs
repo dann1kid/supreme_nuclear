@@ -69,17 +69,17 @@ namespace SupremeNuclear
             float cost = NextUpgradeCost(unit);
             if (cost < 0f)
             {
-                CommanderHud.Notice("Экстрактор уже максимального тира");
+                CommanderHud.Notice(Loc.Tr("Экстрактор уже максимального тира"));
                 return false;
             }
             if (hq.factionFunds < cost)
             {
-                CommanderHud.Notice($"Не хватает денег: апгрейд — {cost:F0}");
+                CommanderHud.Notice(Loc.F("Не хватает денег: апгрейд — {0}", cost.ToString("F0")));
                 return false;
             }
             hq.AddFunds(-cost);
             found.tier++;
-            CommanderHud.Notice($"Экстрактор → T{found.tier} за {cost:F0}");
+            CommanderHud.Notice(Loc.F("Экстрактор → T{0} за {1}", found.tier, cost.ToString("F0")));
             Log.Info($"Economy: upgrade ({unit.NetworkunitName}) → T{found.tier} за {cost:F0}");
             return true;
         }

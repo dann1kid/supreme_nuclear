@@ -36,9 +36,15 @@
     <Reference Include="UnityEngine.UI"><HintPath>$(ManagedDir)\UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Локали мода: репозиторий locales/ -> игра BepInEx/plugins/SupremeNuclear/Locales/ -->
+    <LocaleJsons Include="..\..\locales\*.json" />
+  </ItemGroup>
+
   <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(Deploy)' != 'false'">
     <Message Importance="high" Text="Deploy: $(TargetPath) -> $(GameDir)\BepInEx\plugins\SupremeNuclear\" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\" />
+    <Copy SourceFiles="@(LocaleJsons)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\Locales\" SkipUnchangedFiles="true" />
   </Target>
 
 </Project>

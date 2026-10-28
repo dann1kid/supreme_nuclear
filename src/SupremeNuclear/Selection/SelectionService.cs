@@ -172,9 +172,12 @@ namespace SupremeNuclear
                     hitUnit = pick;
             }
 
-            // Клик по зданию аэродрома = выделение аэродрома (панель покупки авиации);
-            // при Shift аэродром не перехватывает — работает режим добавления.
+            // Клик по зданию аэродрома = панель АЭРОПОРТА (агрегаты/резерв) — но только
+            // по НЕ-ангару (вышка/склад): ангар — индивидуальная фабрия, клик по нему
+            // выделяет его самого (пер-ангарные очереди, плейтест v0.87: пачка ангаров
+            // + групповой заказ = паттерн SupCom). Shift — режим добавления, как было.
             if (!RtsInput.Shift && hitUnit is Building clickedBuilding &&
+                clickedBuilding.GetComponent<Hangar>() == null &&
                 clickedBuilding.Networkairbase != null &&
                 clickedBuilding.Networkairbase.CurrentHQ == localHq)
             {
@@ -211,7 +214,14 @@ namespace SupremeNuclear
                 Selected.Clear();
                 Selected.Add(hitUnit);
                 if (doubleClick)
-                    SelectAllOfTypeOnScreen(hitUnit.definition, localHq);
+                {
+                    // Даблклик по АНГАРУ = все ангары его аэродрома (группа под
+                    // пакетный заказ); прочее — все того же типа на экране.
+                    if (hitUnit is Building hb && hb.Networkairbase != null)
+                        SelectAllHangarsOf(hb.Networkairbase, localHq);
+                    else
+                        SelectAllOfTypeOnScreen(hitUnit.definition, localHq);
+                }
             }
             else if (RtsInput.Shift)
             {
@@ -391,6 +401,23 @@ namespace SupremeNuclear
                 Vector3 sp = cam.WorldToScreenPoint(GameApi.UnitAnchorWorld(unit));
                 if (sp.z > 0f && sp.x >= 0f && sp.x <= Screen.width && sp.y >= 0f && sp.y <= Screen.height)
                     Selected.Add(unit);
+            }
+        }
+
+        /// <summary>Все живые ангары аэродрома (даблклик по ангару — группа под
+        /// пакетный заказ; экран не фильтруем: аэродром — один «объект»).</summary>
+        private void SelectAllHangarsOf(Airbase airbase, FactionHQ localHq)
+        {
+            Selected.Clear();
+            foreach (Building building in airbase.buildings)
+            {
+                if (Selected.Count >= Settings.MaxSelected)
+                    break;
+                if (building == null || building.GetComponent<Hangar>() == null)
+                    continue;
+                if (!GameApi.IsSelectableFriendly(building, localHq))
+                    continue;
+                Selected.Add(building);
             }
         }
 
