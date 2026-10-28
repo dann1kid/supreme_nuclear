@@ -1,8 +1,9 @@
 """Автопубликация Supreme Nuclear на GitHub: снимок master → ветка main → пуш →
 релиз со свежим zip. Одна команда после коммита = игроки качают актуальный билд.
 
-Запуск:  python tools/publish.py            # синк main + пуш + релиз v<версия>
-         python tools/publish.py --no-push  # упаковка без пуша/релиза (проверка)
+Запуск:  python tools/publish.py                # синк main + пуш + релиз v<версия>
+         python tools/publish.py --no-push      # упаковка без пуша/релиза (проверка)
+         python tools/publish.py --no-release   # пуш main без релиза (правки доков)
 
 Почему так: GitHub Actions не соберёт мод (reference-сборки берутся из
 установленной игры), поэтому релиз делает эта машина. Артефакт собирается
@@ -51,6 +52,8 @@ def run(cmd, cwd=None):
 
 def main():
     no_push = "--no-push" in sys.argv
+    no_release = "--no-release" in sys.argv
+    will_release = not no_push and not no_release
     # Версия — из ЗАКОММИЧЕННОГО master: в рабочем дереве может лежать WIP
     # параллельной сессии с другой версией (инцидент 2026-10-28).
     code, src = run(["git", "-C", ROOT, "show", "master:src/SupremeNuclear/PluginInfo.cs"])
@@ -66,11 +69,12 @@ def main():
         code, out = run(["git", "remote", "get-url", "origin"])
         step("remote origin задан", code == 0,
              "нет — единожды: gh repo create supreme_nuclear --public --source . --remote origin (БЕЗ --push)")
+    if will_release:
         code, out = run(["gh", "release", "view", "v" + version])
         step("Релиз v%s ещё не существует" % version, code != 0,
              "уже есть — бампни версию в PluginInfo.cs")
-        if failures:
-            sys.exit(1)
+    if failures:
+        sys.exit(1)
 
     # ---------- 1. Снимок master → main (без checkout: индекс во временном файле) ----------
     code, master_sha = run(["git", "-C", ROOT, "rev-parse", "master"])
@@ -167,14 +171,16 @@ def main():
         return
     code, out = run(["git", "-C", ROOT, "push", "-u", "origin", "main"])
     step("Пуш main", code == 0, out[-200:] if code else "")
-    notes = "Автопубликация из master: %s" % subject.strip()
-    code, out = run(["gh", "release", "create", "v" + version, "--target", "main",
-                     zip_path, "--title", "v" + version, "--notes", notes], cwd=ROOT)
-    step("Релиз создан", code == 0, out[-200:] if code else "releases/tag/v" + version)
+    if will_release:
+        notes = "Автопубликация из master: %s" % subject.strip()
+        code, out = run(["gh", "release", "create", "v" + version, "--target", "main",
+                         zip_path, "--title", "v" + version, "--notes", notes], cwd=ROOT)
+        step("Релиз создан", code == 0, out[-200:] if code else "releases/tag/v" + version)
     if failures:
         print("\nПУШ/РЕЛИЗ ПРОВАЛЕН: " + ", ".join(failures))
         sys.exit(1)
-    print("\nОПУБЛИКОВАНО: v%s — игроки качают из релизов (latest)" % version)
+    print("\nОПУБЛИКОВАНО: main обновлён%s" % (
+        ", релиз v%s — игроки качают из releases/latest" % version if will_release else " (без релиза)"))
 
 
 if __name__ == "__main__":
