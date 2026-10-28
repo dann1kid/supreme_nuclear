@@ -75,9 +75,12 @@ namespace SupremeNuclear
 
             // Первичная цель: явная из сегмента (порядок кликов) либо ближайшая
             // разведанная у якоря (залп по площади). Целеуказание — только даталинк.
+            // Поиск у якоря — троттл AnchorScanSec (§12-45г, v0.112): раньше скан
+            // решётки шёл КАЖДЫЙ кадр, пока даталинк пуст; цель кэшируется,
+            // мёртвая в окне — рескан немедленно.
             Unit primary = AircraftOrders.SalvoPrimary(seg);
             if (primary == null)
-                primary = NearestTrackedAtAnchor(aircraft, seg);
+                primary = AnchorTarget(aircraft, seg);
             if (primary == null)
                 return; // цели не разведаны — борт кружит у якоря, ждём даталинк
 
@@ -186,7 +189,29 @@ namespace SupremeNuclear
         }
 
         /// <summary>Залп по площади: ближайший разведанный (даталинк) враг у якоря —
-        /// вокруг него нативное распределение размажет залп по соседям.</summary>
+        /// вокруг него нативное распределение размажет залп по соседям.
+        /// Вызов — через кэш AnchorTarget (не каждый кадр).</summary>
+        private const float AnchorScanSec = 0.5f;
+
+        private struct AnchorScan
+        {
+            public float At;
+            public Unit Target;
+        }
+
+        private static readonly Dictionary<Unit, AnchorScan> AnchorScans =
+            new Dictionary<Unit, AnchorScan>();
+
+        private static Unit AnchorTarget(Aircraft aircraft, AircraftOrders.OrderSegment seg)
+        {
+            if (AnchorScans.TryGetValue(aircraft, out AnchorScan s) &&
+                Time.unscaledTime - s.At < AnchorScanSec)
+                return s.Target != null && !s.Target.disabled ? s.Target : null;
+            Unit target = NearestTrackedAtAnchor(aircraft, seg);
+            AnchorScans[aircraft] = new AnchorScan { At = Time.unscaledTime, Target = target };
+            return target;
+        }
+
         private static Unit NearestTrackedAtAnchor(Aircraft aircraft, AircraftOrders.OrderSegment seg)
         {
             FactionHQ hq = aircraft.NetworkHQ;
@@ -227,13 +252,17 @@ namespace SupremeNuclear
                     (dead ??= new List<Unit>()).Add(kv.Key);
             if (dead != null)
                 foreach (Unit unit in dead)
+                {
                     Stations.Remove(unit);
+                    AnchorScans.Remove(unit);
+                }
         }
 
         /// <summary>Смена сцены: борта умершей сцены недействительны (инвариант №11).</summary>
         public static void Reset()
         {
             Stations.Clear();
+            AnchorScans.Clear();
         }
     }
 }

@@ -32,6 +32,20 @@ namespace SupremeNuclear.Tests
                 runs[0].key == "SAM" && runs[1].key == "JCK" && runs[2].key == "SAM");
             Check("Runs: пустой список", Util.Runs(new string[0], (a, b) => a == b).Count == 0);
 
+            // ---------- Util.FieldSetter: скомпилированный сеттер поля ----------
+            var holder = new FieldHolder();
+            System.Reflection.FieldInfo strField = typeof(FieldHolder).GetField("_text",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            System.Reflection.FieldInfo vecField = typeof(FieldHolder).GetField("_vec",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            Action<object, string> setStr = Util.FieldSetter<string>(strField);
+            Action<object, UnityEngine.Vector3> setVec = Util.FieldSetter<UnityEngine.Vector3>(vecField);
+            setStr(holder, "abc");
+            setVec(holder, new UnityEngine.Vector3(1f, 2f, 3f));
+            Check("FieldSetter: ссылочное и структурное поля",
+                holder.Text == "abc" && holder.Vec == new UnityEngine.Vector3(1f, 2f, 3f));
+            Check("FieldSetter: null поля → null", Util.FieldSetter<string>(null) == null);
+
             // ---------- Util.SegmentSteps: разбивка прямой трассы наземки (проверка на воду) ----------
             Check("SegmentSteps: нулевая/короткая дистанция — 1 шаг (сама цель)",
                 Util.SegmentSteps(0f, 150f, 24) == 1 && Util.SegmentSteps(5f, 150f, 24) == 1 &&
@@ -97,121 +111,80 @@ namespace SupremeNuclear.Tests
             Check("Bezier3: аффинная ограниченность — кривая в границах контролов", zBounded);
 
             // ---------- Util.Taxi*: геометрия КОЛЛЕКТОРА рулёжки (v0.100) ----------
-            // Порог (0,0,0), ось и farDir = +X, сторона ангара +Z: магистраль z=+50.
+            // Порог (0,0,0), ось взлёта farDir = +X: ангар сбоку (+Z), ворота к полосе.
             var thr = new UnityEngine.Vector3(0f, 0f, 0f);
             var axisX = new UnityEngine.Vector3(1f, 0f, 0f);
             var toSide = new UnityEngine.Vector3(0f, 0f, -1f); // ворота ангара к полосе
-            const float OFF = 50f, JMIN = 25f, GROW = 80f, MINF = 150f;
 
-            Util.TaxiCollectorPlan(thr, new UnityEngine.Vector3(240f, 0f, 110f), toSide,
-                axisX, axisX, OFF, JMIN, GROW, MINF, -1f,
-                out UnityEngine.Vector3 side1, out UnityEngine.Vector3 j1,
-                out System.Collections.Generic.List<UnityEngine.Vector3> c1, out float f1);
-            Check("Taxi: сторона магистрали — к ангару (+Z)",
-                side1.z > 0.99f);
-            Check("Taxi: стык под ангаром на магистрали (df=240, z=50)",
-                UnityEngine.Mathf.Abs(j1.x - 240f) < 0.01f && UnityEngine.Mathf.Abs(j1.z - 50f) < 0.01f);
-            Check("Taxi: создание — магистраль до max(240+80,150)=320",
-                UnityEngine.Mathf.Abs(f1 - 320f) < 0.01f);
-            float maxOff1 = 0f;
-            foreach (UnityEngine.Vector3 p in c1)
+            // ---------- Util.TaxiApproachPoints: «якоря и Безье» (v0.102.2) ----------
+            System.Func<UnityEngine.Vector3, UnityEngine.Vector3, System.Collections.Generic.List<UnityEngine.Vector3>> approach =
+                (s, f) => Util.TaxiApproachPoints(thr, s, f, axisX);
+
+            // Прямой выезд из ворот: первая точка — по направлению ворот
+            var a1 = approach(new UnityEngine.Vector3(240f, 0f, 110f), toSide);
+            UnityEngine.Vector3 stubDir = a1[0] - new UnityEngine.Vector3(240f, 0f, 110f);
+            Check("TaxiApproach: прямой выезд из ворот (первая точка вдоль fwd, ≥10 м)",
+                UnityEngine.Vector3.Dot(stubDir.normalized, toSide) > 0.99f &&
+                stubDir.magnitude >= 10f, "стаб " + stubDir.magnitude.ToString("F1") + " м");
+
+            // Выкат по оси: хвост полилинии (последняя точка + торец) вдоль оси взлёта
+            var poly1 = new System.Collections.Generic.List<UnityEngine.Vector3> { new UnityEngine.Vector3(240f, 0f, 110f) };
+            poly1.AddRange(a1); poly1.Add(thr);
+            UnityEngine.Vector3 tailDir = poly1[poly1.Count - 1] - poly1[poly1.Count - 2];
+            Check("TaxiApproach: выкат в торец вдоль оси взлёта (последняя нога ~farDir)",
+                UnityEngine.Vector3.Dot(tailDir.normalized, axisX) > 0.95f &&
+                UnityEngine.Mathf.Abs(poly1[poly1.Count - 2].z) < 1.5f);
+
+            // Ангар ВДОЛЬ полосы: якорь выката ЗА порогом (прямая по оси до торца)
+            Check("TaxiApproach: ангар вдоль полосы — якорь за порогом на оси",
+                poly1[poly1.Count - 2].x < -30f && poly1[poly1.Count - 2].x > -95f,
+                "x " + poly1[poly1.Count - 2].x.ToString("F0"));
+
+            // Гладкость на значимых сегментах (≥15 м): поворот ≤30° по всему
+            // набору позиций/ориентаций — «просто плавная линия», без изломов
+            // (коллектор v0.100 и складки v0.100.0 отвергнуты плейтестами).
+            UnityEngine.Vector3[][] smoothCases =
             {
-                maxOff1 = UnityEngine.Mathf.Max(maxOff1, UnityEngine.Mathf.Sqrt(
-                    Util.DistSqToSegmentXZ(new UnityEngine.Vector2(p.x, p.z),
-                        new UnityEngine.Vector2(240f, 110f), new UnityEngine.Vector2(j1.x, j1.z))));
-            }
-            Check("Taxi: перпендикулярные ворота — коннектор почти прямая (<2 м от хорды)",
-                maxOff1 < 2f, "макс " + maxOff1.ToString("F2") + " м");
-            bool latOk1 = true;
-            foreach (UnityEngine.Vector3 p in c1)
-                latOk1 &= p.z >= OFF - 0.5f;
-            Check("Taxi: коннектор не подходит к полосе ближе магистрали (z ≥ 50)", latOk1);
-
-            Util.TaxiCollectorPlan(thr, new UnityEngine.Vector3(-150f, 0f, 120f), toSide,
-                axisX, axisX, OFF, JMIN, GROW, MINF, -1f,
-                out _, out UnityEngine.Vector3 j2, out _, out float f2);
-            Check("Taxi: ангар за порогом — стык клампится на JMIN=25",
-                UnityEngine.Mathf.Abs(j2.x - JMIN) < 0.01f);
-            Check("Taxi: дальность при создании ≥ MinFar",
-                UnityEngine.Mathf.Abs(f2 - MINF) < 0.01f);
-
-            Util.TaxiCollectorPlan(thr, new UnityEngine.Vector3(400f, 0f, 110f), toSide,
-                axisX, axisX, OFF, JMIN, GROW, MINF, 320f,
-                out _, out UnityEngine.Vector3 j3, out _, out float f3);
-            Check("Taxi: дальний ангар растит магистраль (400+80=480)",
-                UnityEngine.Mathf.Abs(j3.x - 400f) < 0.01f && UnityEngine.Mathf.Abs(f3 - 480f) < 0.01f);
-            Util.TaxiCollectorPlan(thr, new UnityEngine.Vector3(150f, 0f, 110f), toSide,
-                axisX, axisX, OFF, JMIN, GROW, MINF, 480f,
-                out _, out _, out _, out float f4);
-            Check("Taxi: ближний ангар внутри — магистраль не ужимается (480)",
-                UnityEngine.Mathf.Abs(f4 - 480f) < 0.01f);
-
-            // Непересечение коннекторов грида: каждый живёт в своём коридоре df
-            // (±40 м вокруг ангара) — при шаге грида 160 м коридоры не пересекаются.
-            bool corridorsOk = true;
-            for (float hx = 80f; hx <= 560f; hx += 160f)
-            {
-                Util.TaxiCollectorPlan(thr, new UnityEngine.Vector3(hx, 0f, 110f), toSide,
-                    axisX, axisX, OFF, JMIN, GROW, MINF, -1f,
-                    out _, out _, out System.Collections.Generic.List<UnityEngine.Vector3> cc, out _);
-                float lo = hx, hi = UnityEngine.Mathf.Max(hx, JMIN);
-                foreach (UnityEngine.Vector3 p in cc)
-                {
-                    lo = UnityEngine.Mathf.Min(lo, p.x);
-                    hi = UnityEngine.Mathf.Max(hi, p.x);
-                }
-                corridorsOk &= hi - lo < 80f;
-            }
-            Check("Taxi: коннекторы грида в непересекающихся коридорах (<80 м при шаге 160)",
-                corridorsOk);
-
-            // Без складок при воротах «мимо стыка» (спиной/поперёк/диагональю):
-            // каждый шаг полилинии обязан продвигаться к стыку (проекция на
-            // хорду не убывает) — контроль по чистому fwd давал петлю
-            // («линия с изломами», плейтест v0.100.0).
-            bool noFolds = true;
-            UnityEngine.Vector3[][] foldCases =
-            {
-                new[] { new UnityEngine.Vector3(240f, 0f, 110f), new UnityEngine.Vector3(0f, 0f, 1f) },        // спиной к магистрали
-                new[] { new UnityEngine.Vector3(240f, 0f, 110f), new UnityEngine.Vector3(0.7071f, 0f, 0.7071f) }, // диагональю от стыка
-                new[] { new UnityEngine.Vector3(240f, 0f, 60f), new UnityEngine.Vector3(0.7071f, 0f, 0.7071f) },   // вплотную к магистрали
-                new[] { new UnityEngine.Vector3(240f, 0f, 110f), new UnityEngine.Vector3(1f, 0f, 0f) },        // вдоль полосы
+                new[] { new UnityEngine.Vector3(240f, 0f, 110f), toSide },
+                new[] { new UnityEngine.Vector3(560f, 0f, 110f), toSide },
+                new[] { new UnityEngine.Vector3(-150f, 0f, 120f), toSide },
+                new[] { new UnityEngine.Vector3(240f, 0f, 200f), toSide },
+                new[] { new UnityEngine.Vector3(80f, 0f, 110f), toSide },
+                new[] { new UnityEngine.Vector3(240f, 0f, 110f), new UnityEngine.Vector3(1f, 0f, 0f) },      // вдоль полосы
+                new[] { new UnityEngine.Vector3(240f, 0f, 110f), new UnityEngine.Vector3(0f, 0f, 1f) },      // спиной
+                new[] { new UnityEngine.Vector3(240f, 0f, 110f), new UnityEngine.Vector3(0.7071f, 0f, 0.7071f) }, // диагональю
+                new[] { new UnityEngine.Vector3(-160f, 0f, 0f), new UnityEngine.Vector3(1f, 0f, 0f) },       // на оси за порогом
             };
-            foreach (UnityEngine.Vector3[] fc in foldCases)
+            float worstTurn = 0f;
+            foreach (UnityEngine.Vector3[] sc in smoothCases)
             {
-                Util.TaxiCollectorPlan(thr, fc[0], fc[1], axisX, axisX, OFF, JMIN, GROW, MINF, -1f,
-                    out _, out UnityEngine.Vector3 fj, out System.Collections.Generic.List<UnityEngine.Vector3> fcPts, out _);
-                UnityEngine.Vector2 fchord = new UnityEngine.Vector2(fj.x - fc[0].x, fj.z - fc[0].z).normalized;
-                var whole = new System.Collections.Generic.List<UnityEngine.Vector2> { new UnityEngine.Vector2(fc[0].x, fc[0].z) };
-                foreach (UnityEngine.Vector3 p in fcPts)
-                    whole.Add(new UnityEngine.Vector2(p.x, p.z));
-                whole.Add(new UnityEngine.Vector2(fj.x, fj.z));
-                for (int fi = 1; fi < whole.Count; fi++)
-                    noFolds &= UnityEngine.Vector2.Dot(whole[fi] - whole[fi - 1], fchord) >= -0.05f;
+                var pts = approach(sc[0], sc[1]);
+                var poly = new System.Collections.Generic.List<UnityEngine.Vector3> { sc[0] };
+                foreach (UnityEngine.Vector3 p in pts)
+                    if (UnityEngine.Vector3.Distance(p, poly[poly.Count - 1]) > 0.5f)
+                        poly.Add(p);
+                if ((thr - poly[poly.Count - 1]).sqrMagnitude > 0.25f)
+                    poly.Add(thr);
+                for (int i = 1; i < poly.Count - 1; i++)
+                {
+                    float l1 = UnityEngine.Vector3.Distance(poly[i], poly[i - 1]);
+                    float l2 = UnityEngine.Vector3.Distance(poly[i + 1], poly[i]);
+                    if (l1 < 15f || l2 < 15f)
+                        continue; // микровихляния тонут в 24-метровой полосе
+                    float segTurn = UnityEngine.Vector3.Angle(poly[i] - poly[i - 1], poly[i + 1] - poly[i]);
+                    worstTurn = UnityEngine.Mathf.Max(worstTurn, segTurn);
+                }
             }
-            Check("Taxi: ворота «мимо стыка» — коннектор без складок (монотонен к стыку)", noFolds);
+            Check("TaxiApproach: плавность — поворот ≤30° на сегментах ≥15 м",
+                worstTurn <= 30f, "макс " + worstTurn.ToString("F0") + "°");
 
-            var merge = Util.TaxiMergeSamples(thr, axisX, new UnityEngine.Vector3(0f, 0f, 1f), OFF);
-            bool mergeOk = merge.Count >= 2; // только внутренние точки: p1 и торец добавляет звущий
-            foreach (UnityEngine.Vector3 p in merge)
-                mergeOk &= p.x >= -50.1f && p.z >= -0.1f && p.z <= 50.1f;
-            Check("TaxiMerge: сэмплы только внутри коридора p1→торец (x≥−50, 0≤z≤50)",
-                mergeOk, merge.Count + " точек");
-            UnityEngine.Vector3 lastDir = thr - merge[merge.Count - 1];
-            Check("TaxiMerge: вход в торец вдоль оси (хорда последнего сэмпла ~farDir)",
-                UnityEngine.Vector3.Dot(lastDir.normalized, axisX) > 0.97f);
-
-            var lane = Util.TaxiLaneSamples(thr, axisX, new UnityEngine.Vector3(0f, 0f, 1f), OFF, -50f, 320f);
-            bool laneOk = UnityEngine.Mathf.Abs(lane[0].x + 50f) < 0.01f &&
-                          UnityEngine.Mathf.Abs(lane[lane.Count - 1].x - 320f) < 0.01f;
-            for (int li = 0; li < lane.Count; li++)
-            {
-                laneOk &= UnityEngine.Mathf.Abs(lane[li].z - 50f) < 0.01f;
-                if (li > 0)
-                    laneOk &= UnityEngine.Vector3.Distance(lane[li - 1], lane[li]) <= 15.01f;
-            }
-            Check("TaxiLane: оба конца включены, шаг ≤15 м, на магистрали z=50", laneOk,
-                lane.Count + " точек");
+            // Контроль старта не пробивает полосу: линия не опускается сильно
+            // ниже кромки (22.5) ДО зоны порога (x > 40)
+            bool edgeOk = true;
+            foreach (UnityEngine.Vector3 p in a1)
+                if (p.x > 40f && p.z < 12f)
+                    edgeOk = false;
+            Check("TaxiApproach: вне зоны порога не проваливается к оси (z ≥ 12 при x > 40)", edgeOk);
 
             // ---------- Util.RingPoints: кольцевой поиск воды для спуска корабля ----------
             var ring = Util.RingPoints(60f, 30f, 16, 400f);
@@ -924,6 +897,71 @@ namespace SupremeNuclear.Tests
                 fanTie.SequenceEqual(new[] { 0, 1 }), string.Join(",", fanTie));
             Check("Веер: без целей — null", Util.AssignBalanced(fanUnits, new List<UnityEngine.Vector3>()) == null);
 
+            // ---------- Util.AssignSpread: раздача пула КУЧКАМИ (Disperse стройки) ----------
+            var spreadUnits = new List<UnityEngine.Vector3>
+            {
+                new UnityEngine.Vector3(0f, 0f, 0f), new UnityEngine.Vector3(100f, 0f, 0f)
+            };
+            var spreadPoints = new List<UnityEngine.Vector3>
+            {
+                // два кластера: левый 3 точки, правый 2
+                new UnityEngine.Vector3(10f, 0f, 0f), new UnityEngine.Vector3(20f, 0f, 0f),
+                new UnityEngine.Vector3(30f, 0f, 0f),
+                new UnityEngine.Vector3(90f, 0f, 0f), new UnityEngine.Vector3(110f, 0f, 0f)
+            };
+            int[] spread = Util.AssignSpread(spreadUnits, spreadPoints);
+            Check("Кучки: кластеры делятся по сторонам (левый — первому, правый — второму)",
+                spread != null && spread.SequenceEqual(new[] { 0, 0, 0, 1, 1 }),
+                spread != null ? string.Join(",", spread) : "null");
+
+            // Баланс: 5 точек / 2 юнита — раздача 3+2, а не 4+1
+            int[] spreadCounts = new int[2];
+            foreach (int o in spread)
+                spreadCounts[o]++;
+            Check("Кучки: баланс ⌈M/N⌉/⌊M/N⌋ (3+2, не 4+1)",
+                spreadCounts[0] == 3 && spreadCounts[1] == 2,
+                spreadCounts[0] + "+" + spreadCounts[1]);
+
+            // Один исполнитель — всё ему
+            int[] spread1 = Util.AssignSpread(
+                new List<UnityEngine.Vector3> { new UnityEngine.Vector3(0f, 0f, 0f) },
+                spreadPoints);
+            Check("Кучки: единственный юнит забирает все точки",
+                spread1 != null && spread1.All(o => o == 0),
+                spread1 != null ? string.Join(",", spread1) : "null");
+
+            // Баланс при M>N: 4 точки / 3 юнита — 2+1+1, вторая точка первому
+            // достаётся БЛИЖАЙШАЯ к уже взятой (курсор маршрута движется)
+            int[] spread4 = Util.AssignSpread(
+                new List<UnityEngine.Vector3>
+                {
+                    new UnityEngine.Vector3(0f, 0f, 0f), new UnityEngine.Vector3(100f, 0f, 0f),
+                    new UnityEngine.Vector3(200f, 0f, 0f)
+                },
+                new List<UnityEngine.Vector3>
+                {
+                    new UnityEngine.Vector3(5f, 0f, 0f), new UnityEngine.Vector3(95f, 0f, 0f),
+                    new UnityEngine.Vector3(195f, 0f, 0f), new UnityEngine.Vector3(50f, 0f, 0f)
+                });
+            Check("Кучки: 4/3 — раздача 2+1+1, продолжение рядом с взятой",
+                spread4 != null && spread4.SequenceEqual(new[] { 0, 1, 2, 0 }),
+                spread4 != null ? string.Join(",", spread4) : "null");
+
+            // Детерминизм: эквидистантная точка — меньшему индексу юнита
+            int[] spreadTie = Util.AssignSpread(
+                new List<UnityEngine.Vector3>
+                {
+                    new UnityEngine.Vector3(-10f, 0f, 0f), new UnityEngine.Vector3(10f, 0f, 0f)
+                },
+                new List<UnityEngine.Vector3> { new UnityEngine.Vector3(0f, 0f, 0f) });
+            Check("Кучки: эквидистанта — детерминизм (меньший индекс юнита)",
+                spreadTie != null && spreadTie.SequenceEqual(new[] { 0 }),
+                spreadTie != null ? string.Join(",", spreadTie) : "null");
+            Check("Кучки: пустой пул — null",
+                Util.AssignSpread(spreadUnits, new List<UnityEngine.Vector3>()) == null);
+            Check("Кучки: без юнитов — null",
+                Util.AssignSpread(new List<UnityEngine.Vector3>(), spreadPoints) == null);
+
             // ---------- GroundOrders.DispersePick: точка группы в остатке очереди ----------
             var fanChain = new GroundOrders.Chain();
             foreach (int g in new[] { 7, 9, 7, 0 })
@@ -1172,6 +1210,16 @@ namespace SupremeNuclear.Tests
 
             Console.WriteLine(_failed == 0 ? "ВСЕ ТЕСТЫ ПРОЙДЕНЫ" : "ПРОВАЛОВ: " + _failed);
             return _failed == 0 ? 0 : 1;
+        }
+
+        /// <summary>Носитель приватных полей для проверки Util.FieldSetter.</summary>
+        private sealed class FieldHolder
+        {
+            private string _text;
+            private UnityEngine.Vector3 _vec;
+
+            public string Text => _text;
+            public UnityEngine.Vector3 Vec => _vec;
         }
     }
 }

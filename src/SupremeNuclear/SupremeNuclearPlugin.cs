@@ -47,6 +47,7 @@ namespace SupremeNuclear
                 SalvoService.Reset();   // выбор станций залпа — тоже
                 AirbaseReserve.Reset(); // резервы ангаров умершей сцены недействительны
                 AirbaseAccess.Reset(); // тумблеры посадки/взлёта умершей сцены недействительны
+                SortieService.Reset(); // слоты выката привязаны к базам сцены
                 SelectionService.ResetGroups();
                 RangeRings.Reset(); // кольца дальности: круги/буферы сцены
                 TaxiSurface.Reset(); // плиты дорисованных рулёжек умершей сцены
@@ -59,7 +60,6 @@ namespace SupremeNuclear
             gameObject.AddComponent<CommanderHud>();
             gameObject.AddComponent<SupcomUi>();
             gameObject.AddComponent<MinimapPanel>();
-            gameObject.AddComponent<EngineerFloat>(); // плавучесть инженеров (FixedUpdate, host)
 
             Log.Info($"{PluginInfo.Name} {PluginInfo.Version} загружен — {Settings.ToggleCommanderKey} в миссии включает режим командира");
         }

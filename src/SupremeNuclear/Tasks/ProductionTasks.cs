@@ -20,6 +20,9 @@ namespace SupremeNuclear
             public VehicleDepot Depot;          // фабрика «наземная»...
             public Hangar Hangar;               // ...или ангар (индивидуальная авиафабрия)
             public Building Dock;               // ...или верфь (флот, v0.92)
+            public BuildTasks.Task Site;        // ...или НЕДОСТРОЙ (v0.107): очередь копится
+                                                // до завершения стройки, затем AdoptSite
+                                                // переносит позиции на живую фабрику
             public VehicleDefinition GroundDef;
             public AircraftDefinition AirDef;
             public ShipDefinition NavalDef;
@@ -28,7 +31,8 @@ namespace SupremeNuclear
             public float Cost;
             public float Paid;
             public object Factory => Depot != null ? (object)Depot
-                : Hangar != null ? (object)Hangar : (object)Dock;
+                : Hangar != null ? (object)Hangar
+                : Dock != null ? (object)Dock : (object)Site;
             public UnitDefinition UnitDef => (UnitDefinition)GroundDef
                 ?? (UnitDefinition)AirDef ?? NavalDef;
             public float Progress01 => Cost > 0f ? Mathf.Clamp01(Paid / Cost) : 0f;
@@ -42,6 +46,11 @@ namespace SupremeNuclear
         }
 
         private static readonly List<QueueItem> Queue = new List<QueueItem>();
+
+        /// <summary>Переиспользуемый словарь занятых слотов оплаты тика (раньше —
+        /// new Dictionary на каждый кадр при непустой очереди).</summary>
+        private static readonly Dictionary<(object factory, UnitDefinition def), int> PaidSlotsMap =
+            new Dictionary<(object factory, UnitDefinition def), int>();
         private static readonly Dictionary<object, FactoryState> Factories =
             new Dictionary<object, FactoryState>();
 
@@ -460,6 +469,7 @@ namespace SupremeNuclear
             Rally.Clear();
             Routed.Clear();
             AirRallyWaits.Clear();
+            _siteAirCatalogs.Clear();
         }
 
         private static FactoryState StateOf(object factory)
@@ -580,6 +590,7 @@ namespace SupremeNuclear
                     Depot = anchor.Depot,
                     Hangar = anchor.Hangar,
                     Dock = anchor.Dock,
+                    Site = anchor.Site,
                     GroundDef = anchor.GroundDef,
                     AirDef = anchor.AirDef,
                     NavalDef = anchor.NavalDef,
@@ -610,10 +621,46 @@ namespace SupremeNuclear
             }
         }
 
+        /// <summary>Снять до count ПОСЛЕДНИХ позиций def у АЭРОДРОМА-агрегата
+        /// (панель вышки/авианосца): позиции живут пер-ангарно — снимаем с самого
+        /// ДЛИННОГО ангара, выравнивая очереди (зеркало «в самый свободный»
+        /// у EnqueueAirDistributed).</summary>
+        public static void RemoveTailAir(Airbase airbase, UnitDefinition def, int count)
+        {
+            if (!IsHost || airbase == null || def == null || count <= 0)
+                return;
+            while (count > 0)
+            {
+                Hangar best = null;
+                int bestCount = 0;
+                if (airbase.hangars != null)
+                    foreach (Hangar hangar in airbase.hangars)
+                    {
+                        if (hangar == null)
+                            continue;
+                        int n = 0;
+                        foreach (QueueItem item in Queue)
+                            if (item.Factory == (object)hangar && item.UnitDef == def)
+                                n++;
+                        if (n > bestCount)
+                        {
+                            bestCount = n;
+                            best = hangar;
+                        }
+                    }
+                if (best == null)
+                    return;
+                int take = Mathf.Min(count, bestCount);
+                RemoveTail(best, def, take);
+                count -= take;
+            }
+        }
+
         private static FactionHQ FactionOf(QueueItem item) =>
             item.Depot != null ? item.Depot.NetworkHQ
                 : item.Hangar != null ? item.Hangar?.attachedUnit?.NetworkHQ
-                : item.Dock?.NetworkHQ;
+                : item.Dock != null ? item.Dock?.NetworkHQ
+                : item.Site?.Faction;
 
         /// <summary>Заказ корабля на ВЕРФЬ (v0.92): каталог — весь флот
         /// Encyclopedia.ships; время — NavalProductionSecondsPerItem (корабли
@@ -630,6 +677,142 @@ namespace SupremeNuclear
                 Cost = def.value > 0f ? def.value : Settings.BuildDefaultCost,
             });
             Version++;
+        }
+
+        // Недострой-фабрика (v0.107): площадка производящего здания принимает
+        // заказы как готовая (SupCom: «достраивается — уже работает»), но ни
+        // оплаты, ни выпуска, пока стройка не завершена. Род позиции — по роду
+        // площадки: верфь — флот, ангар — авиация (лодаут запекаем по ближайшему
+        // своему аэродрому), депо — техника.
+
+        // Каталог ангара-НЕДОСТРОЯ: нативный GetAvailableAircraft читает
+        // attachedUnit — на префабе его нет; список availableAircraft сериализован
+        // инспектором (проверка поля — SelfCheck), у построенного ангара он тот же.
+        private static readonly System.Reflection.FieldInfo HangarAvailableField =
+            HarmonyLib.AccessTools.Field(typeof(Hangar), "availableAircraft");
+        private static readonly Dictionary<BuildingDefinition, AircraftDefinition[]> _siteAirCatalogs =
+            new Dictionary<BuildingDefinition, AircraftDefinition[]>();
+
+        /// <summary>Что будет строить ангар этого определения (данные префаба);
+        /// нет данных о префабе/поле — пустой каталог.</summary>
+        public static AircraftDefinition[] SiteAirCatalog(BuildingDefinition def)
+        {
+            if (def == null || def.unitPrefab == null || HangarAvailableField == null)
+                return System.Array.Empty<AircraftDefinition>();
+            if (_siteAirCatalogs.TryGetValue(def, out AircraftDefinition[] cached))
+                return cached;
+            Hangar prefabHangar = def.unitPrefab.GetComponent<Hangar>();
+            AircraftDefinition[] list = prefabHangar != null
+                ? HangarAvailableField.GetValue(prefabHangar) as AircraftDefinition[]
+                : null;
+            _siteAirCatalogs[def] = list ?? System.Array.Empty<AircraftDefinition>();
+            return _siteAirCatalogs[def];
+        }
+
+        /// <summary>Заказ в очередь НЕДОСТРОЯ (своей площадки): тип позиции — по
+        /// роду площадки. Оплата/выпуск стоят до завершения стройки; по готовности
+        /// позиции переезжают на живую фабрику (AdoptSite). false — не наш род
+        /// позиции/площадки или чужая площадка.</summary>
+        public static bool EnqueueSite(BuildTasks.Task site, UnitDefinition def)
+        {
+            if (!IsHost || def == null || !BuildTasks.IsActive(site))
+                return false;
+            // Только СВОЯ площадка: чужой недострой заказами не кормим (выделить
+            // можно любой призрак, оплата бы шла деньгами владельца).
+            if (!GameApi.TryGetLocalHQ(out FactionHQ local) || site.Faction != local)
+                return false;
+            var item = new QueueItem
+            {
+                Site = site,
+                Cost = def.value > 0f ? def.value : Settings.BuildDefaultCost,
+            };
+            if (site.IsDock && def is ShipDefinition naval)
+                item.NavalDef = naval;
+            else if (BuildTasks.IsHangarDefinition(site.Definition) && def is AircraftDefinition air)
+            {
+                item.AirDef = air;
+                BakeLoadout(item, BuildTasks.NearestOwnAirbase(
+                    site.Site.ToLocalPosition(), site.Faction, Settings.HangarAttachRadiusM));
+            }
+            else if (BuildTasks.IsProducingDefinition(site.Definition) &&
+                     !BuildTasks.IsHangarDefinition(site.Definition) &&
+                     def is VehicleDefinition ground)
+                item.GroundDef = ground;
+            else
+                return false;
+            Queue.Add(item);
+            Version++;
+            return true;
+        }
+
+        /// <summary>Площадка достроена: очередь недостроя, его Пауза/Цикл и ралли
+        /// переезжают на живую фабрику — она сразу начинает наливать головную
+        /// позицию. Спавн не удался (factory == null) или тип не фабрика —
+        /// накопленное умирает тихо: уплаченного за позиции нет, оплата не
+        /// начиналась. Род фабрики — по роду ПЛОЩАДКИ: корпус верфи — тот же
+        /// компонент VehicleDepot, что и депо, каст по объекту их бы перепутал.</summary>
+        public static void AdoptSite(BuildTasks.Task site, object factory)
+        {
+            if (site == null)
+                return;
+            VehicleDepot depot = null;
+            Hangar hangar = null;
+            Building dock = null;
+            if (site.IsDock)
+                dock = factory as Building;
+            else if (BuildTasks.IsHangarDefinition(site.Definition))
+                hangar = factory as Hangar;
+            else
+                depot = factory as VehicleDepot;
+            object key = depot != null ? (object)depot
+                : hangar != null ? (object)hangar
+                : dock != null ? (object)dock : null;
+            bool touched = false;
+            for (int i = Queue.Count - 1; i >= 0; i--)
+            {
+                QueueItem item = Queue[i];
+                if (item.Site != site)
+                    continue;
+                item.Site = null;
+                touched = true;
+                if (depot != null && item.GroundDef != null)
+                    item.Depot = depot;
+                else if (hangar != null && item.AirDef != null && CanBuild(hangar, item.AirDef))
+                    item.Hangar = hangar;   // реальный ангар строит тип — позиция жива
+                else if (dock != null && item.NavalDef != null)
+                    item.Dock = dock;
+                else
+                {
+                    Queue.RemoveAt(i);      // тип позиции фабрике не подходит
+                }
+            }
+            if (Factories.TryGetValue(site, out FactoryState state))
+            {
+                Factories.Remove(site);
+                if (key != null && !Factories.ContainsKey(key))
+                    Factories[key] = state; // Пауза/Цикл продолжают действовать
+                touched = true;
+            }
+            if (Rally.TryGetValue(site, out RallyRoute route))
+            {
+                Rally.Remove(site);
+                if (key != null && route.Count > 0 && !Rally.ContainsKey(key))
+                    Rally[key] = route;     // ралли достанется выпущенным войскам
+                touched = true;
+            }
+            if (touched)
+                Version++;
+        }
+
+        /// <summary>Состояние мёртвой площадки (снос/фракция погибла/спавн не
+        /// удался): ралли и Пауза/Цикл умирают вместе с ней (очередь чистит Tick).</summary>
+        private static void DropSiteState(BuildTasks.Task site)
+        {
+            bool touched = Rally.Remove(site);
+            if (Factories.Remove(site))
+                touched = true;
+            if (touched)
+                Version++;
         }
 
         /// <summary>Групповая пауза (мультивыделение фабрик): состояние УНИФИЦИРУЕТСЯ —
@@ -754,6 +937,81 @@ namespace SupremeNuclear
                 Version++;
         }
 
+        // ---------- редактирование точек ралли (драг/удаление, v0.108; §12-30) ----------
+        // Сигнатуры зеркальны GroupIdOf/CollectGroup/RemoveByGroupId сервисов приказов:
+        // точки ралли — тот же мир групповых вейпоинтов, «фабрика» вместо «юнита».
+
+        /// <summary>Группа клика точки ралли (0 — нет), зеркально GroupIdOf сервисов.</summary>
+        public static int RallyGroupIdOf(object factory, int index)
+        {
+            return Rally.TryGetValue(factory, out RallyRoute route) &&
+                   index >= 0 && index < route.Groups.Count
+                ? route.Groups[index]
+                : 0;
+        }
+
+        /// <summary>Члены группы точки ралли: ВСЕ фабрики, чей маршрут несёт этот
+        /// groupId (один клик задаёт одну точку каждой фабрике выделения — лента
+        /// дедупится в одну, вейпоинт правится там, где рисуется). Пары
+        /// (фабрика, индекс) — все точки с groupId (у фабрики их обычно одна).</summary>
+        public static void CollectRallyGroup(int groupId, List<object> factories, List<int> indices)
+        {
+            factories.Clear();
+            indices.Clear();
+            if (groupId == 0)
+                return;
+            foreach (KeyValuePair<object, RallyRoute> kv in Rally)
+                for (int i = 0; i < kv.Value.Groups.Count; i++)
+                    if (kv.Value.Groups[i] == groupId)
+                    {
+                        factories.Add(kv.Key);
+                        indices.Add(i);
+                    }
+        }
+
+        /// <summary>Переместить точку ралли (драг): y ложится на рельеф, зеркально
+        /// GroundOrders.SetQueuePoint. Спущенные по старой точке юниты сохраняют
+        /// свои цепочки — правится ИСТОЧНИК, будущие спуски идут в новое место.</summary>
+        public static void SetRallyPoint(object factory, int index, Vector3 world)
+        {
+            if (!Rally.TryGetValue(factory, out RallyRoute route) ||
+                index < 0 || index >= route.Points.Count)
+                return;
+            float y = GameApi.GroundY(world.x, world.z);
+            route.Points[index] = new Vector3(world.x, y, world.z).ToGlobalPosition();
+            Version++;
+        }
+
+        /// <summary>Удалить точку ралли (Ctrl+Shift+ПКМ). Маршрут может опустеть —
+        /// пустое ралли перестаёт действовать (CollectRallies пустые не отдаёт).</summary>
+        public static void RemoveRallyPoint(object factory, int index)
+        {
+            if (!Rally.TryGetValue(factory, out RallyRoute route) ||
+                index < 0 || index >= route.Points.Count)
+                return;
+            route.Points.RemoveAt(index);
+            route.Groups.RemoveAt(index);
+            Version++;
+        }
+
+        /// <summary>Удалить ВСЕ точки группы клика из маршрута фабрики (групповой
+        /// фан-аут удаления, зеркально RemoveByGroupId сервисов).</summary>
+        public static void RemoveRallyByGroupId(object factory, int groupId)
+        {
+            if (groupId == 0 || !Rally.TryGetValue(factory, out RallyRoute route))
+                return;
+            bool removed = false;
+            for (int i = route.Groups.Count - 1; i >= 0; i--)
+                if (route.Groups[i] == groupId)
+                {
+                    route.Groups.RemoveAt(i);
+                    route.Points.RemoveAt(i);
+                    removed = true;
+                }
+            if (removed)
+                Version++;
+        }
+
         /// <summary>Ключ состояния очереди фабрики для кэша панели.</summary>
         public static int KeyFor(object factory)
         {
@@ -789,14 +1047,16 @@ namespace SupremeNuclear
             if (Queue.Count == 0)
                 return;
             float dt = Time.deltaTime;
-            var paidSlots = new Dictionary<(object factory, UnitDefinition def), int>();
+            var paidSlots = PaidSlotsMap;
+            paidSlots.Clear();
 
             for (int i = 0; i < Queue.Count; )
             {
                 QueueItem item = Queue[i];
                 FactionHQ hq = FactionOf(item);
                 bool dead = hq == null ||
-                            (item.Depot == null && item.Hangar == null && item.Dock == null) ||
+                            (item.Depot == null && item.Hangar == null &&
+                             item.Dock == null && item.Site == null) ||
                             (item.Depot != null && item.Depot.disabled) ||
                             (item.Hangar != null && item.Hangar.Disabled) ||
                             (item.Dock != null && item.Dock.disabled);
@@ -805,6 +1065,24 @@ namespace SupremeNuclear
                     hq?.AddFunds(item.Paid); // фабрика умерла — возврат
                     Queue.RemoveAt(i);
                     Version++;
+                    continue;
+                }
+
+                // Недострой (v0.107): фабрики ещё нет — заказы только копятся,
+                // ни оплаты, ни выпуска. Площадку снесли/потеряли — позиции
+                // умирают (уплаченного нет: оплата не начиналась); успешная
+                // достройка переезжает на фабрику в AdoptSite ДО этого тика.
+                if (item.Site != null)
+                {
+                    if (!BuildTasks.IsActive(item.Site))
+                    {
+                        hq?.AddFunds(item.Paid);
+                        Queue.RemoveAt(i);
+                        Version++;
+                        DropSiteState(item.Site);
+                    }
+                    else
+                        i++;
                     continue;
                 }
 

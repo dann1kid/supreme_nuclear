@@ -10,6 +10,7 @@ namespace SupremeNuclear
         SequenceMove, // запись-движение общей очереди инженера
         GroundPoint, // точка цепочки наземки/флота
         AirPoint,    // точка плана авиации
+        RallyPoint,  // точка ралли-маршрута фабрики (владелец — фабрика, не юнит)
         EscortLink   // связь сопровождения (маркер — на ЦЕЛИ сопровождения)
     }
 
@@ -17,12 +18,14 @@ namespace SupremeNuclear
     /// раньше поиск существовал в двух расходящихся копиях — RouteEditor.TryGrab
     /// (захват для драга) и MoveOrderService.TryDeleteWaypoint (удаление). Теперь
     /// оба зовут этот скан; порядок приоритета один: площадки → движения очередей →
-    /// цепочки наземки → планы авиации. allUnits = режим видимости (Shift).</summary>
+    /// точки ралли фабрик → цепочки наземки → планы авиации → связи сопровождения.
+    /// allUnits = режим видимости (Shift).</summary>
     public readonly struct WaypointHit
     {
         public readonly WaypointKind Kind;
         public readonly Unit Owner;            // SequenceMove/GroundPoint/AirPoint
         public readonly BuildTasks.Task Task;  // BuildSite
+        public readonly object RallyFactory;   // RallyPoint: фабрика-владелец маршрута
         public readonly int Segment;           // AirPoint: индекс сегмента плана
         public readonly int Index;             // индекс точки в цепочке/очереди/сегменте
 
@@ -31,7 +34,18 @@ namespace SupremeNuclear
             Kind = kind;
             Owner = owner;
             Task = task;
+            RallyFactory = null;
             Segment = segment;
+            Index = index;
+        }
+
+        public WaypointHit(WaypointKind kind, object rallyFactory, int index)
+        {
+            Kind = kind;
+            Owner = null;
+            Task = null;
+            RallyFactory = rallyFactory;
+            Segment = 0;
             Index = index;
         }
     }
@@ -59,6 +73,29 @@ namespace SupremeNuclear
             new List<IReadOnlyList<AircraftOrders.OrderSegment>>();
         private static readonly List<Unit> CTargets = new List<Unit>();
         private static readonly HashSet<Unit> SeenEscortTargets = new HashSet<Unit>();
+        private static readonly List<object> RallyKeys = new List<object>();
+        // Владельцы сканируемого вида (выделение + allUnits-надстройка) — буферы
+        // переиспользуются: раньше скан копировал Selected трижды и вёл дедуп
+        // линейным Contains (§12-45в, v0.112).
+        private static readonly List<Unit> Owners = new List<Unit>();
+        private static readonly HashSet<Unit> OwnerSeen = new HashSet<Unit>();
+        private static readonly List<Unit> EngBuf = new List<Unit>();
+        // Наземный сбор — ОТДЕЛЬНО от CUnits: авиа-сбор из AccumulateGroupCentroids
+        // тогда живёт до §5/§6 без пересбора (раньше — второй CollectAll за скан).
+        private static readonly List<Unit> GUnits = new List<Unit>();
+        private static readonly List<IReadOnlyList<GlobalPosition>> GQueues =
+            new List<IReadOnlyList<GlobalPosition>>();
+        private static readonly List<int> GIdx = new List<int>();
+
+        /// <summary>Начать список владельцев с выделения (null отфильтрованы).</summary>
+        private static void OwnersFromSelection(CommanderModeController controller)
+        {
+            Owners.Clear();
+            OwnerSeen.Clear();
+            foreach (Unit u in controller.Selection.Selected)
+                if (u != null && OwnerSeen.Add(u))
+                    Owners.Add(u);
+        }
 
         private static void Accumulate(int gid, float x, float z)
         {
@@ -143,12 +180,15 @@ namespace SupremeNuclear
             }
 
             // 2. Записи-движения общих очередей инженеров.
-            var seqOwners = new List<Unit>(controller.Selection.Selected);
+            OwnersFromSelection(controller);
             if (allUnits)
-                foreach (Unit eng in BuildTasks.UnitsWithSequences())
-                    if (!seqOwners.Contains(eng))
-                        seqOwners.Add(eng);
-            foreach (Unit unit in seqOwners)
+            {
+                BuildTasks.UnitsWithSequences(EngBuf);
+                foreach (Unit eng in EngBuf)
+                    if (OwnerSeen.Add(eng))
+                        Owners.Add(eng);
+            }
+            foreach (Unit unit in Owners)
             {
                 var seq = BuildTasks.SequenceOf(unit);
                 if (seq == null)
@@ -162,19 +202,41 @@ namespace SupremeNuclear
                 }
             }
 
-            // 3. Цепочки наземки/флота.
-            var chainOwners = new List<Unit>(controller.Selection.Selected);
+            // 3. Точки ралли-маршрутов фабрик (v0.108, §12-30): зеркально отрисовке —
+            // ралли ВЫДЕЛЕННЫХ фабрик, allUnits (Shift) расширяет на все живые.
+            // Ралли — ИСТОЧНИК маршрутов спуска, копии точек живут в цепочках
+            // вышедших юнитов ниже по приоритету: драг/удаление здесь правит фабрику
+            // (будущие спуски), хвосты вышедших правятся их цепочками. Ключи-площадки
+            // (ралли недостроенной фабрики) не отдаются: их маркер не рисуется —
+            // вейпоинт управляется там, где рисуется.
+            RallyKeys.Clear();
+            ProductionTasks.CollectRallies(RallyKeys);
+            for (int ri = 0; ri < RallyKeys.Count; ri++)
+            {
+                object f = RallyKeys[ri];
+                if (!LiveRallyFactory(f) || (!allUnits && !FactorySelected(controller, f)))
+                    continue;
+                ProductionTasks.RallyRoute route = ProductionTasks.RallyOf(f);
+                for (int p = 0; p < route.Count; p++)
+                {
+                    // Пик — там, где рисуется маркер: на земле (CommanderHud.GroundVec).
+                    Vector3 l = route.Points[p].ToLocalPosition();
+                    Vector3 v = new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z);
+                    if (Near(cam, v, mouse, px))
+                        return new WaypointHit(WaypointKind.RallyPoint, f, p);
+                }
+            }
+
+            // 4. Цепочки наземки/флота.
+            OwnersFromSelection(controller);
             if (allUnits)
             {
-                var all = new List<Unit>();
-                var qs = new List<IReadOnlyList<GlobalPosition>>();
-                var ix = new List<int>();
-                GroundOrders.CollectAll(all, qs, ix);
-                for (int i = 0; i < all.Count; i++)
-                    if (ix[i] < qs[i].Count && !chainOwners.Contains(all[i]))
-                        chainOwners.Add(all[i]);
+                GroundOrders.CollectAll(GUnits, GQueues, GIdx);
+                for (int i = 0; i < GUnits.Count; i++)
+                    if (GIdx[i] < GQueues[i].Count && OwnerSeen.Add(GUnits[i]))
+                        Owners.Add(GUnits[i]);
             }
-            foreach (Unit unit in chainOwners)
+            foreach (Unit unit in Owners)
             {
                 if (unit == null || !GroundOrders.TryGetQueue(unit, out var queue, out _))
                     continue;
@@ -194,18 +256,16 @@ namespace SupremeNuclear
                 }
             }
 
-            // 4. Планы авиации.
-            var airOwners = new List<Unit>(controller.Selection.Selected);
+            // 5. Планы авиации. Авиа-сбор уже лежит в CUnits/CPlans с начала скана
+            // (AccumulateGroupCentroids; наземные цепочки выше шли по СВОИМ буферам
+            // GUnits — этот сбор не перезаписывался) — пересбор не нужен, раньше
+            // здесь был второй CollectAll за один скан.
+            OwnersFromSelection(controller);
             if (allUnits)
-            {
-                var allAir = new List<Unit>();
-                var allPlans = new List<IReadOnlyList<AircraftOrders.OrderSegment>>();
-                AircraftOrders.CollectAll(allAir, allPlans);
-                foreach (Unit a in allAir)
-                    if (!airOwners.Contains(a))
-                        airOwners.Add(a);
-            }
-            foreach (Unit unit in airOwners)
+                for (int i = 0; i < CUnits.Count; i++)
+                    if (OwnerSeen.Add(CUnits[i]))
+                        Owners.Add(CUnits[i]);
+            foreach (Unit unit in Owners)
             {
                 if (!(unit is Aircraft) || !AircraftOrders.TryGetPlan(unit, out var plan))
                     continue;
@@ -228,25 +288,11 @@ namespace SupremeNuclear
                     }
             }
 
-            // 5. Связи сопровождения: маркер рисуется на ЦЕЛИ — там же и пикается
+            // 6. Связи сопровождения: маркер рисуется на ЦЕЛИ — там же и пикается
             // (Ctrl+Shift+ПКМ снимает сопровождение у ВСЕХ её эскортировщиков,
             // наземка и авиация разом). Точки цепочек выше приоритетнее.
-            GroundOrders.CollectEscorts(CUnits, CTargets);
-            SeenEscortTargets.Clear();
-            for (int i = 0; i < CTargets.Count; i++)
-            {
-                Unit target = CTargets[i];
-                if (target == null || target.disabled)
-                    continue;
-                if (!SeenEscortTargets.Add(target))
-                    continue; // несколько эскортов одной цели — один маркер
-                Vector3 tp = target.transform.position;
-                tp.y = GameApi.GroundY(tp.x, tp.z);
-                if (Near(cam, tp, mouse, px))
-                    return new WaypointHit(WaypointKind.EscortLink, target, null, 0, 0);
-            }
-            // Авиа-эскорт без наземных связей: те же цели, отдельное хранилище планов.
-            AircraftOrders.CollectAll(CUnits, CPlans);
+            // Авиа-эскорт — из живого сбора CUnits/CPlans (см. §5); наземный сбор
+            // ниже перезаписывает CUnits — потому авиация идёт первой.
             SeenEscortTargets.Clear();
             for (int i = 0; i < CUnits.Count; i++)
             {
@@ -265,8 +311,64 @@ namespace SupremeNuclear
                         return new WaypointHit(WaypointKind.EscortLink, seg.Target, null, 0, 0);
                 }
             }
+            GroundOrders.CollectEscorts(CUnits, CTargets);
+            SeenEscortTargets.Clear();
+            for (int i = 0; i < CTargets.Count; i++)
+            {
+                Unit target = CTargets[i];
+                if (target == null || target.disabled)
+                    continue;
+                if (!SeenEscortTargets.Add(target))
+                    continue; // несколько эскортов одной цели — один маркер
+                Vector3 tp = target.transform.position;
+                tp.y = GameApi.GroundY(tp.x, tp.z);
+                if (Near(cam, tp, mouse, px))
+                    return new WaypointHit(WaypointKind.EscortLink, target, null, 0, 0);
+            }
 
             return new WaypointHit(WaypointKind.None, null, null, 0, 0);
+        }
+
+        /// <summary>Ключ ралли — ЖИВАЯ фабрика (маркер такого ралли рисуется)?
+        /// Зеркально CommanderHud.RallyAnchor: площадки-ключи (ралли недостроенных)
+        /// и мёртвые фабрики не рисуются — сканером не отдаются.</summary>
+        private static bool LiveRallyFactory(object factory)
+        {
+            switch (factory)
+            {
+                case VehicleDepot depot:
+                    return depot != null && !depot.disabled;
+                case Hangar hangar:
+                    return hangar != null && !hangar.Disabled;
+                case Building dock:
+                    return BuildTasks.IsDock(dock);
+                case Airbase airbase:
+                    return airbase != null;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>Фабрика ралли — в ВЫДЕЛЕНИИ? Ангар выделяется своим зданием
+        /// (attachedUnit), аэродром — отдельным SelectedAirbase; зеркало сбору
+        /// фабрик выделения в MoveOrderService.TrySetRallyForFactorySelection.</summary>
+        private static bool FactorySelected(CommanderModeController controller, object factory)
+        {
+            switch (factory)
+            {
+                case VehicleDepot depot:
+                    return controller.Selection.Selected.Contains(depot);
+                case Hangar hangar:
+                    Unit hu = hangar != null && !hangar.Disabled ? hangar.attachedUnit : null;
+                    return hu != null && controller.Selection.Selected.Contains(hu);
+                case Building dock:
+                    return BuildTasks.IsDock(dock) &&
+                           controller.Selection.Selected.Contains(dock);
+                case Airbase airbase:
+                    return controller.Selection.SelectedAirbase == airbase;
+                default:
+                    return false;
+            }
         }
 
         private static bool Near(Camera cam, Vector3 world, Vector2 mouse, float px)

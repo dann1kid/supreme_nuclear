@@ -116,9 +116,13 @@ namespace SupremeNuclear
         private Building _ctxDock;           // (представители: шаблон «Шаблон+», лодауты)
         private Airbase _ctxAirbase;         // ...или аэродром
         private Hangar _ctxHangar;           // ...или первый ангар выделения
+        private BuildTasks.Task _ctxSite;    // ...или выделенный недострой-фабрика (v0.107)
         /// <summary>ВСЕ фабрики выделения (депо + верфи + ангары): групповые
         /// Пауза/Цикл действуют на весь список, а не на представителя.</summary>
         private readonly List<object> _ctxFactories = new List<object>();
+        /// <summary>Буфер группы Пауза/Цикл контекста БАЗЫ (вышка/ромб/авианосец):
+        /// все ангарные фабрики её Airbase (v0.108) — как мультивыделение ангаров.</summary>
+        private readonly List<object> _ctxBaseFactories = new List<object>();
         private RectTransform _tierRoot;     // полоса выбора пула (тиры каталога)
         private readonly (Button btn, Image img, int tier)[] _tierButtons =
             new (Button, Image, int)[4];     // Все / T1 / T2 / T3
@@ -769,13 +773,13 @@ step = "arrows";
             ctxLayout.childForceExpandHeight = false;
             _pauseBtn = Button_(ctxGo.transform, "pause", Loc.Tr("Пауза"), () =>
             {
-                ProductionTasks.TogglePauseAll(_ctxFactories);
+                ProductionTasks.TogglePauseAll(PauseCycleTargets());
             }, 10);
             ((RectTransform)_pauseBtn.transform).sizeDelta = new Vector2(60f, 22f);
             _pauseBtn.gameObject.AddComponent<LayoutElement>().minHeight = 22f;
             _cycleBtn = Button_(ctxGo.transform, "cycle", Loc.Tr("Цикл"), () =>
             {
-                ProductionTasks.ToggleCycleAll(_ctxFactories);
+                ProductionTasks.ToggleCycleAll(PauseCycleTargets());
             }, 10);
             ((RectTransform)_cycleBtn.transform).sizeDelta = new Vector2(60f, 22f);
             _cycleBtn.gameObject.AddComponent<LayoutElement>().minHeight = 22f;
@@ -837,14 +841,35 @@ step = "arrows";
             }
         }
 
-        /// <summary>Фабрика-представитель выделения (первая: верфь/депо/ангар/аэродром):
-        /// очередь «Шаблон+» и аэродром редактора лодаутов. Пауза/Цикл идут мимо —
-        /// группой по _ctxFactories.</summary>
+        /// <summary>Фабрика-представитель выделения (первая: верфь/депо/ангар/
+        /// недострой-фабрика/аэродром): очередь «Шаблон+» и аэродром редактора
+        /// лодаутов. Пауза/Цикл идут мимо — группой по _ctxFactories.</summary>
         private object CtxFactory() =>
             _ctxDock != null ? (object)_ctxDock :
             _ctxDepot != null ? (object)_ctxDepot :
             _ctxHangar != null ? (object)_ctxHangar :
+            _ctxSite != null ? (object)_ctxSite :
             (object)_ctxAirbase;
+
+        /// <summary>Группа кнопок Пауза/Цикл (v0.108): выделенные фабрики; НО
+        /// контекст базы (вышка/ромб/АВИАНОСЕЦ) фабрик в выделении не имеет —
+        /// группой становятся ВСЕ ангарные фабрики её Airbase (как мультивыделение
+        /// всех ангаров базы). Выделенные ангары приоритетнее (подмножество).</summary>
+        private IReadOnlyList<object> PauseCycleTargets()
+        {
+            if (_ctxFactories.Count > 0)
+                return _ctxFactories;
+            if (_ctxAirbase != null && _ctxAirbase.hangars != null)
+            {
+                _ctxBaseFactories.Clear();
+                foreach (Hangar hangar in _ctxAirbase.hangars)
+                    if (hangar != null)
+                        _ctxBaseFactories.Add(hangar);
+                if (_ctxBaseFactories.Count > 0)
+                    return _ctxBaseFactories;
+            }
+            return _ctxFactories;
+        }
 
         private void SwitchTier(int tier)
         {
@@ -1512,6 +1537,21 @@ step = "arrows";
                 singleAir = null;
             bool showAir = hasAir;
             bool buildingsOnly = selCount > 0 && !hasAir && !hasGround;
+            // Авианосец-аэродром в выделении → кнопка-способность «Авиакрыло»
+            // (SupCom-паттерн «строительный модуль — отдельная сущность»);
+            // выделен ЕГО аэродром (ромб/кнопка) → обратная «Корабль» (v0.108).
+            Airbase carrierBase = null;
+            foreach (Unit unit in controller.Selection.Selected)
+                if (unit is Ship ship && carrierBase == null)
+                {
+                    Airbase shipBase = ship.GetAirbase(); // не-авианосцу вернёт null
+                    if (shipBase != null)
+                        carrierBase = shipBase;
+                }
+            Airbase backToShip = controller.Selection.Selected.Count == 0 &&
+                controller.Selection.SelectedAirbase != null &&
+                controller.Selection.SelectedAirbase.AttachedAirbase
+                    ? controller.Selection.SelectedAirbase : null;
             WeaponClass gateClasses = WeaponGateService.ClassesOf(controller.Selection.Selected);
             // Состав типов чипов входит в ключ пересборки (как gateClasses): смена
             // набора вооружения выделения перестраивает ряд чипов.
@@ -1521,10 +1561,15 @@ step = "arrows";
             int key = (showAir ? 1 : 0) | (hasGround ? 2 : 0) | (hasPlane ? 4 : 0) |
                       (hasMissileAir ? 8 : 0) | (singleAir != null ? 16 : 0) |
                       (buildingsOnly ? 32 : 0) | ((int)gateClasses << 6) | (typeKey << 12);
+            // Кнопки-переключатели: в ключ — ИД базы (смена корабля/базы перестраивает
+            // замыкание кнопки, иначе оно держало бы устаревшую ссылку).
+            key = key * 31 + (carrierBase != null ? carrierBase.GetInstanceID() : 0);
+            key = key * 31 + (backToShip != null ? backToShip.GetInstanceID() : 0);
             if (key != _cmdContextKey)
             {
                 _cmdContextKey = key;
-                BuildCommandButtons(controller, showAir, hasPlane, hasMissileAir, singleAir, buildingsOnly);
+                BuildCommandButtons(controller, showAir, hasPlane, hasMissileAir, singleAir, buildingsOnly,
+                    carrierBase, backToShip);
             }
 
             // Подсказка — ТОЛЬКО в активном спец-режиме (стройка/залп/веер/приказ):
@@ -1547,9 +1592,9 @@ step = "arrows";
             else if (pending == Loc.Tr("Залп"))
                 _modeHint.text = Util.FitLine(
                     Loc.Tr("Залп: ПКМ по цели/земле — залповый пуск · Shift+ПКМ по целям — доб. в залп"), 62);
-            else if (pending == Loc.Tr("Атака веером"))
+            else if (pending == Loc.Tr("Распределение"))
                 _modeHint.text = Util.FitLine(
-                    Loc.Tr("Веер: ПКМ по целям — накопить · ПКМ по земле — раздать группу"), 62);
+                    Loc.Tr("Распределение: ПКМ по целям — накопить · ПКМ по земле — раздать группу"), 62);
             else if (pending != null)
                 _modeHint.text = Util.FitLine(
                     Loc.F("{0}: ПКМ — вейпоинт (Shift — серия) · Esc — движение", pending), 62);
@@ -1697,7 +1742,8 @@ step = "arrows";
         /// статичным зданиям — только hold-fire. Карточка растёт вверх, панель
         /// свойств выделения поднимается за ней.</summary>
         private void BuildCommandButtons(CommanderModeController controller, bool showAir,
-            bool hasPlane, bool hasMissileAir, Aircraft singleAir, bool buildingsOnly)
+            bool hasPlane, bool hasMissileAir, Aircraft singleAir, bool buildingsOnly,
+            Airbase carrierBase = null, Airbase backToShip = null)
         {
             Transform grid = null;
             foreach (Transform child in _canvas.transform)
@@ -1726,9 +1772,9 @@ step = "arrows";
                 defs.Add(("cmd_attack", Loc.Tr("Атака (T)"), () => OrderModes.Pending = OrderMode.Attack));
                 if (showAir && hasMissileAir)
                     defs.Add(("cmd_salvo", Loc.Tr("Залп (V)"), () => OrderModes.Pending = OrderMode.Salvo));
-                defs.Add(("cmd_fan", Loc.Tr("Веер (R)"), () => controller.MoveOrders.ChargeFanAttack()));
+                defs.Add(("cmd_fan", Loc.Tr("Распределение (R)"), () => controller.MoveOrders.ChargeFanAttack()));
                 defs.Add(("cmd_stop", Loc.Tr("Стоп (S)"), () => controller.MoveOrders.CancelAll(controller.Selection.Selected)));
-                defs.Add(("cmd_disperse", Loc.Tr("Распределить (Alt+Shift+R)"), () =>
+                defs.Add(("cmd_disperse", Loc.Tr("Рассредоточить (Alt+Shift+R)"), () =>
                     controller.MoveOrders.IssueDisperseMove(controller.Selection.Selected)));
                 if (showAir)
                     defs.Add(("cmd_rtb", Loc.Tr("На базу (G)"), () =>
@@ -1741,6 +1787,32 @@ step = "arrows";
                 foreach (Unit unit in controller.Selection.Selected)
                     StanceService.Toggle(unit);
             }));
+            // СПОСОБНОСТЬ авианосца (SupCom: «модуль» отдельной кнопкой в приказах):
+            // переключиться на АВИАКРЫЛО — выделение заменяется аэродромом корабля;
+            // там каталог/очередь/резерв/тумблеры, ПКМ = ралли авиакрыла С ПОЛНЫМ
+            // Shift (дописать точку), Ctrl+ПКМ с корабля — тот же ралли на бегу.
+            if (carrierBase != null)
+                defs.Add(("cmd_airwing", Loc.Tr("Авиакрыло"), () =>
+                {
+                    SelectionService sel = controller.Selection;
+                    sel.Selected.Clear();
+                    sel.Inspected = null;
+                    sel.SelectedAirbase = carrierBase;
+                }));
+            // Обратное переключение — с аэродрома авианосца к КОРАБЛЮ.
+            if (backToShip != null)
+                defs.Add(("cmd_ship", Loc.Tr("Корабль"), () =>
+                {
+                    if (backToShip.TryGetAttachedUnit(out Unit ship) &&
+                        ship != null && !ship.disabled)
+                    {
+                        SelectionService sel = controller.Selection;
+                        sel.SelectedAirbase = null;
+                        sel.Inspected = null;
+                        sel.Selected.Clear();
+                        sel.Selected.Add(ship);
+                    }
+                }));
             if (showAir)
             {
                 defs.Add(("cmd_vlow", Loc.Tr("Свер-хнизко 75м"), () => controller.SetProfileUi(0)));
@@ -1982,6 +2054,16 @@ step = "arrows";
                         carrier = shipBase;
                 }
             }
+            // АВИАНОСЕЦ-АЭРОДРОМ — контекст производства (v0.108): панель корабля =
+            // панель его Airbase (палубная авиация: каталог юниона корабельных
+            // ангаров, очередь-агрегат, резерв РЕЗ, лодауты) — как у аэродрома,
+            // пока в выделении нет другой фабрики/инженера (тогда она приоритетнее).
+            // Второй путь и раньше открывал ромб аэродрома над кораблём
+            // (SelectedAirbase) — но выделение самого корпуса заказывало ничего.
+            if (carrier != null && airbase == null && depot == null && navalDock == null &&
+                hangars.Count == 0 && !hasEngineer)
+                airbase = carrier;
+
             if (airbase != null)
                 selHash = selHash * 31 + airbase.GetInstanceID();
 
@@ -1989,6 +2071,21 @@ step = "arrows";
             if (BuildTasks.SelectedTask != null && selected.Count == 0 && depot == null &&
                 navalDock == null && airbase == null && hangars.Count == 0)
                 _activeTab = TabProduction;
+
+            // Недострой-ФАБРИКА (депо/верфь/ангар) в контексте — работает как
+            // готовая (v0.107): каталог и очередь (заказы копятся, выпуск — по
+            // завершении стройки), групповые Пауза/Цикл; по готовности очередь
+            // переезжает на здание (ProductionTasks.AdoptSite).
+            BuildTasks.Task siteFactory = BuildTasks.IsFactorySite(BuildTasks.SelectedTask) &&
+                selected.Count == 0 && depot == null && navalDock == null &&
+                airbase == null && hangars.Count == 0
+                    ? BuildTasks.SelectedTask : null;
+            _ctxSite = siteFactory;
+            if (siteFactory != null)
+            {
+                selHash = selHash * 31 + siteFactory.Id.GetHashCode();
+                _ctxFactories.Add(siteFactory);
+            }
 
             // Автопереключение вкладки под выделение; ручной клик игрока уважаем,
             // пока выделение не сменилось (_manualTabForSel).
@@ -2012,25 +2109,33 @@ step = "arrows";
                 if (_tierButtons[i].img != null)
                     _tierButtons[i].img.color = i == _prodTier ? BtnActive : BtnBg;
 
-            // Деньги квантуем до сотен: перестройка только при реальных изменениях.
-            int fundsKey = (int)(hq.factionFunds / 100f);
+            // Деньги НЕ в ключе пересборки (§12-45а, v0.112): в каталоге «Производства»
+            // нет фонд-зависимого контента (цены статичны, платёжеспособность проверяется
+            // в момент клика), а квант в сотни заставлял ClearChildren+пересоздание всей
+            // ленты (плитки с замыканиями) на каждом тике дохода — регулярный GC-чурн.
+            // «Апгрейд» пересобирается только при ПЕРЕСЕЧЕНИИ цены апгрейда.
             int hash = 17 * 31 + _activeTab;
             hash = hash * 31 + selHash;
             if (_activeTab == TabProduction)
             {
-                hash = hash * 31 + fundsKey + _prodTier * 7 + (depot != null ? 1 : 0) +
+                hash = hash * 31 + _prodTier * 7 + (depot != null ? 1 : 0) +
                        (airbase != null ? 2 : 0) + (hasEngineer ? 4 : 0) +
-                       (navalDock != null ? 8 : 0) + (carrier != null ? 16 : 0);
+                       (navalDock != null ? 8 : 0) + (carrier != null ? 16 : 0) +
+                       (siteFactory != null ? 32 : 0);
                 if (airbase != null)
                     hash = hash * 31 + AirbaseReserve.Version; // плитки резерва ангара
                 // смена лодаута колесом — перестройка каталога (суффикс «·ЛN» на плитке)
                 hash = hash * 31 + ProductionTasks.LoadoutsVersion;
+                // прогресс недостроя-карточки (заголовок «… · 45%»/«выпуск по готовности»)
+                if (siteFactory != null)
+                    hash = hash * 31 + (int)(siteFactory.Progress01 * 20f);
             }
             else if (_activeTab == TabUpgrade)
             {
                 hash = hash * 31 + (extractor != null ? EconomyService.TierOf(extractor) : 0);
                 hash = hash * 31 + (EconomyService.Running ? 1 : 0);
-                hash = hash * 31 + fundsKey;
+                float upCost = extractor != null ? EconomyService.NextUpgradeCost(extractor) : -1f;
+                hash = hash * 31 + (upCost >= 0f && hq.factionFunds >= upCost ? 1 : 0);
             }
             // Нижняя строка видима ВСЕГДА (без прыжков высоты): пустая — просто пустая лента.
             // Высота панели — компакт v0.64.0 (12 отступ + 134 контент = 146).
@@ -2051,6 +2156,13 @@ step = "arrows";
             // изменении очереди любой из них (раньше хэшировалась одна — последняя).
             foreach (object factory in _ctxFactories)
                 queueKey = queueKey * 31 + ProductionTasks.KeyFor(factory) + 13;
+            // Очередь аэродрома (вышка/ромб/АВИАНОСЦА) — АГРЕГАТ его ангаров:
+            // заказы живут пер-ангарно, KeyFor(airbase) их не видел — строка
+            // вышки стояла пустой и не обновлялась. Ключуем каждый ангар базы.
+            if (airbase != null && airbase.hangars != null)
+                foreach (Hangar hangar in airbase.hangars)
+                    if (hangar != null)
+                        queueKey = queueKey * 31 + ProductionTasks.KeyFor(hangar) + 13;
             bool queueShown = _activeTab == TabProduction || _activeTab == TabTemplates;
             if (queueShown && queueKey != _queueHash)
             {
@@ -2061,9 +2173,12 @@ step = "arrows";
                     FillFactoryQueue(hangars[0]);
                 else if (hangars.Count > 1)
                     FillHangarsQueue(hangars);
+                else if (airbase != null)
+                    FillHangarsQueue(airbase.hangars, airbase); // агрегат ангаров базы
                 else
                     FillFactoryQueue(navalDock != null ? (object)navalDock
-                        : depot != null ? (object)depot : (object)airbase);
+                        : depot != null ? (object)depot
+                        : siteFactory != null ? (object)siteFactory : null);
             }
             if (!queueShown && _queueHash != 0)
             {
@@ -2101,18 +2216,20 @@ step = "arrows";
                 bool ctxOnFactory = _activeTab == TabProduction && _ctxFactories.Count > 0;
                 bool ctxOnAirbase = _activeTab == TabProduction && _ctxAirbase != null;
                 ctx.gameObject.SetActive(ctxOnFactory || ctxOnAirbase || _activeTab == TabTemplates);
+                // Пауза/Цикл — и контексту БАЗЫ (вышка/ромб/авианосец): группа —
+                // все ангарные фабрики базы (PauseCycleTargets), v0.108.
                 if (_pauseBtn != null)
-                    _pauseBtn.gameObject.SetActive(ctxOnFactory);
+                    _pauseBtn.gameObject.SetActive(ctxOnFactory || ctxOnAirbase);
                 if (_cycleBtn != null)
-                    _cycleBtn.gameObject.SetActive(ctxOnFactory);
+                    _cycleBtn.gameObject.SetActive(ctxOnFactory || ctxOnAirbase);
                 if (_tplBtn != null)
                     _tplBtn.gameObject.SetActive(ctxOnFactory || _activeTab == TabTemplates);
                 Image pi = _pauseBtn != null ? _pauseBtn.GetComponent<Image>() : null;
                 if (pi != null)
-                    pi.color = ProductionTasks.AllPaused(_ctxFactories) ? BtnActive : BtnBg;
+                    pi.color = ProductionTasks.AllPaused(PauseCycleTargets()) ? BtnActive : BtnBg;
                 Image ci = _cycleBtn != null ? _cycleBtn.GetComponent<Image>() : null;
                 if (ci != null)
-                    ci.color = ProductionTasks.AllCycling(_ctxFactories) ? BtnActive : BtnBg;
+                    ci.color = ProductionTasks.AllCycling(PauseCycleTargets()) ? BtnActive : BtnBg;
                 // Тумблеры аэродрома: видны при выделенном аэродроме, подсветка = закрыто.
                 if (_noLandBtn != null)
                 {
@@ -2405,11 +2522,14 @@ step = "arrows";
             fimg.raycastTarget = false;
         }
 
-                /// <summary>Очередь ГРУППЫ ангаров (агрегат): по типу — сумма позиций,
+        /// <summary>Очередь ГРУППЫ ангаров (агрегат): по типу — сумма позиций,
         /// полоса = максимальный прогресс среди наливаемых (показывает активность),
         /// бейдж ×N — всего позиций. ЛКМ — +1 каждому умеющему (Shift ×5),
-        /// ПКМ — −1 с конца одного ангара группы (Shift ×5).</summary>
-        private void FillHangarsQueue(List<Hangar> hangars)
+        /// ПКМ — −1 с конца одного ангара группы (Shift ×5).
+        /// distributed != null — режим ПАНЕЛИ АЭРОДРОМА (вышка/авианосец): клики
+        /// как у плитки каталога базы — ЛКМ «в самый свободный» ангар
+        /// (EnqueueAirDistributed, Shift ×5), ПКМ — снять с самого длинного.</summary>
+        private void FillHangarsQueue(List<Hangar> hangars, Airbase distributed = null)
         {
             ClearChildren(_strip2Content);
             var order = new List<UnitDefinition>();
@@ -2459,12 +2579,27 @@ step = "arrows";
                     {
                         if (!(d is AircraftDefinition ad))
                             return;
-                        foreach (Hangar hangar in hangars)
-                            if (ProductionTasks.CanBuild(hangar, ad))
-                                ProductionTasks.EnqueueAirSilent(hangar, ad);
+                        if (distributed != null)
+                        {
+                            // панель аэродрома: как плитка каталога — «в самый свободный»
+                            for (int k = 0; k < (RtsInput.Shift ? 5 : 1); k++)
+                                if (!ProductionTasks.EnqueueAirDistributed(distributed, ad))
+                                    break; // Notice уже показан
+                        }
+                        else
+                            foreach (Hangar hangar in hangars)
+                                if (ProductionTasks.CanBuild(hangar, ad))
+                                    ProductionTasks.EnqueueAirSilent(hangar, ad);
                     },
                     OnRight = () =>
                     {
+                        if (distributed != null)
+                        {
+                            // панель аэродрома: снимаем с самого ДЛИННОГО ангара —
+                            // зеркало «в самый свободный» при постановке
+                            ProductionTasks.RemoveTailAir(distributed, d, RtsInput.Shift ? 5 : 1);
+                            return;
+                        }
                         for (int i = hangars.Count - 1; i >= 0; i--)
                             if (ProductionTasks.CountFor(hangars[i]) > 0)
                             {
@@ -2546,11 +2681,18 @@ step = "arrows";
                 EmitRun();
         }
 
-        /// <summary>Карточка недостроя (выделен кликом по площадке): прогресс и действия.</summary>
+        /// <summary>Карточка недостроя (выделен кликом по площадке): прогресс и
+        /// действия; недострой-ФАБРИКА (депо/верфь/ангар, v0.107) — ПЛЮС каталог
+        /// своего рода и очередь как у готовой: заказы копятся, оплата и выпуск
+        /// начнутся по завершении стройки (нижняя строка — RefreshTabs).</summary>
         private void FillUnfinishedTab(BuildTasks.Task t)
         {
-            _contextTitle.text = Loc.F("Недострой: {0} · {1}",
-                t.Definition != null ? t.Definition.unitName : "?", t.Progress01.ToString("P0"));
+            bool factorySite = BuildTasks.IsFactorySite(t);
+            _contextTitle.text = factorySite
+                ? Loc.F("Недострой: {0} · {1} · выпуск по готовности",
+                    t.Label, t.Progress01.ToString("P0"))
+                : Loc.F("Недострой: {0} · {1}",
+                    t.Definition != null ? t.Definition.unitName : "?", t.Progress01.ToString("P0"));
             BuildTasks.Task task = t;
             AddItemButton(_strip1Content,
                 t.Definition != null ? t.Definition.friendlyIcon : null,
@@ -2560,6 +2702,82 @@ step = "arrows";
                     BuildTasks.Cancel(task);
                     BuildTasks.SelectedTask = null;
                 });
+            if (!factorySite)
+                return;
+
+            // Каталог = каталог ГОТОВОЙ фабрики этого рода (каталог верфи — весь
+            // флот, ангара — его собственный список с префаба, депо — PurchaseService).
+            if (task.IsDock && Encyclopedia.i != null && Encyclopedia.i.ships != null)
+            {
+                var defs = new List<ShipDefinition>();
+                foreach (ShipDefinition def in Encyclopedia.i.ships)
+                    if (def != null && def.unitPrefab != null &&
+                        def.unitPrefab.GetComponent<Ship>() != null && def.IsAllowed(false))
+                        defs.Add(def);
+                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                foreach (ShipDefinition def in defs)
+                {
+                    ShipDefinition d = def;
+                    Tile(_strip1Content, new TileSpec
+                    {
+                        Icon = IconOf(def),
+                        Caption = Catalog.ShortLabel(def.code, def.unitName),
+                        TypeBadge = TypeBadgeOf(def),
+                        Badge = def.value > 0f ? def.value.ToString("F0") : null,
+                        OnLeft = () => ProductionTasks.EnqueueSite(task, d),
+                        Def = def,
+                    });
+                }
+                return;
+            }
+            if (BuildTasks.IsHangarDefinition(task.Definition))
+            {
+                var defs = new List<AircraftDefinition>();
+                foreach (AircraftDefinition a in ProductionTasks.SiteAirCatalog(task.Definition))
+                    if (a != null)
+                        defs.Add(a);
+                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                foreach (AircraftDefinition def in defs)
+                {
+                    AircraftDefinition d = def;
+                    int li = ProductionTasks.LoadoutIndexOf(d);
+                    Tile(_strip1Content, new TileSpec
+                    {
+                        Icon = IconOf(def),
+                        Caption = Catalog.ShortLabel(def.code, def.unitName) +
+                                  (li > 0 ? Loc.Tr("·Л") + li : ""),
+                        TypeBadge = TypeBadgeOf(def),
+                        Badge = def.value > 0f ? def.value.ToString("F0") : null,
+                        OnLeft = () => ProductionTasks.EnqueueSite(task, d),
+                        Def = def,
+                        WheelLoadout = true,
+                    });
+                }
+                if (defs.Count == 0)
+                    AddItemButton(_strip1Content, null, Loc.Tr("нет работоспособных ангаров"), null);
+                return;
+            }
+            if (PurchaseService.Catalog != null)
+            {
+                var defs = new List<VehicleDefinition>();
+                foreach (VehicleDefinition def in PurchaseService.Catalog)
+                    if (def != null)
+                        defs.Add(def);
+                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                foreach (VehicleDefinition def in defs)
+                {
+                    VehicleDefinition d = def;
+                    Tile(_strip1Content, new TileSpec
+                    {
+                        Icon = IconOf(def),
+                        Caption = Catalog.ShortLabel(def.code, def.unitName),
+                        TypeBadge = TypeBadgeOf(def),
+                        Badge = def.value > 0f ? def.value.ToString("F0") : null,
+                        OnLeft = () => ProductionTasks.EnqueueSite(task, d),
+                        Def = def,
+                    });
+                }
+            }
         }
 
         /// <summary>Вкладка «Ш» — шаблоны (DESIGN 2.10): ВЕРХняя строка — сохранённые наборы
@@ -2587,6 +2805,8 @@ step = "arrows";
                 _contextTitle.text = Loc.Tr("Шаблон: очередь фабрики");
             else if (airbase != null)
                 _contextTitle.text = Loc.Tr("Шаблон: очередь аэродрома");
+            else if (BuildTasks.IsFactorySite(BuildTasks.SelectedTask))
+                _contextTitle.text = Loc.Tr("Шаблон: очередь фабрики");
             else
                 _contextTitle.text = Loc.Tr("Шаблоны");
 
@@ -2614,6 +2834,14 @@ step = "arrows";
                     else if (depot != null || airbase != null)
                     {
                         int n = OrderTemplates.Enqueue(t, depot != null ? (object)depot : (object)airbase);
+                        CommanderHud.Notice(Loc.F("{0}: в очередь {1}", t.name, n));
+                    }
+                    else if (BuildTasks.IsFactorySite(BuildTasks.SelectedTask))
+                    {
+                        // Недострой-фабрика: набор копится как у готовой (выпуск —
+                        // по завершении стройки).
+                        BuildTasks.Task site = BuildTasks.SelectedTask;
+                        int n = OrderTemplates.Enqueue(t, site);
                         CommanderHud.Notice(Loc.F("{0}: в очередь {1}", t.name, n));
                     }
                 });
@@ -2818,7 +3046,11 @@ step = "arrows";
 
             if (airbase != null && Encyclopedia.i != null && Encyclopedia.i.aircraft != null)
             {
-                _contextTitle.text = Loc.Tr("Аэродром — авиация (клик: в очередь; РЕЗ — выкат)") + tierName;
+                // Авианосец/LHA — attached-аэродром: тот же каталог (юнион
+                // корабельных ангаров), но заголовок честно называет корабль.
+                _contextTitle.text = (airbase.AttachedAirbase
+                    ? Loc.Tr("Авианосец — авиация (клик: в очередь; РЕЗ — выкат)")
+                    : Loc.Tr("Аэродром — авиация (клик: в очередь; РЕЗ — выкат)")) + tierName;
                 // Резерв ангаров (вернувшиеся «на базу» борта): выкат бесплатный,
                 // плитки ПЕРЕД каталогом, бейдж РЕЗ + счётчик.
                 var reserve = AirbaseReserve.Of(airbase);

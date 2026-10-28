@@ -157,6 +157,10 @@ namespace SupremeNuclear
             public bool RtbHandedOff;
             /// <summary>RTB: сел (на земле у аэродрома — идёт обслуживание).</summary>
             public bool RtbLanded;
+            /// <summary>RTB: сколько раз борт перекатывался «сесть у цели» после
+            /// посадки не у базы приказа (SortieService, лимит — не циклить
+            /// две близкие базы перехватом нативной посадки).</summary>
+            public int RtbRelaunches;
             /// <summary>RTB: секунды на земле у своего аэродрома до конца сервиса.</summary>
             public float ServiceT;
             /// <summary>RTB: перевооружение/заправка выполнены.</summary>
@@ -724,42 +728,80 @@ namespace SupremeNuclear
 
         /// <summary>Disperse Move (Alt+Shift+R): план борта := один сегмент прямого
         /// вектора к точке группы groupId (группы нет — к последней оставшейся
-        /// транспортной точке); профиль/скорость — исходного сегмента, остальной
-        /// план (включая очередь атак/RTB) заменяется. false — транспортных точек нет.</summary>
-        public static bool DisperseKeep(Unit aircraft, int groupId)
+        /// транспортной точке) и/или один Attack-сегмент назначенной цели
+        /// attackTarget (очередь атак борта := одна цель, v0.107); профиль/скорость —
+        /// исходных сегментов, якорь атаки — позиция цели, остальной план (включая
+        /// очередь атак/RTB) заменяется. keptPoint — оставлен вектор движения.
+        /// false — нечего оставить.</summary>
+        public static bool DisperseKeep(Unit aircraft, int groupId, Unit attackTarget, out bool keptPoint)
         {
+            keptPoint = false;
             if (!Plans.TryGetValue(aircraft, out List<OrderSegment> plan))
                 return false;
-            if (!TryDispersePoint(plan, groupId, out int s, out int p))
-            {
-                s = -1;
-                for (int i = plan.Count - 1; i >= 0 && s < 0; i--)
+            // Режим полёта исходной атаки снимаем ДО резки плана — назначенная
+            // цель наследует профиль/скорость выбора игрока, а не текущие дефолты.
+            OrderSegment attackSrc = null;
+            for (int i = 0; i < plan.Count; i++)
+                if (plan[i].Mode == AirOrderMode.Attack)
                 {
-                    OrderSegment seg = plan[i];
-                    if (seg.Mode != AirOrderMode.Transit && seg.Mode != AirOrderMode.AttackMove)
-                        continue;
-                    int from = i == 0 ? seg.Index : 0;
-                    if (seg.Points.Count > from)
+                    attackSrc = plan[i];
+                    break;
+                }
+
+            var keep = new List<OrderSegment>();
+            if (groupId != 0)
+            {
+                if (!TryDispersePoint(plan, groupId, out int s, out int p))
+                {
+                    s = -1;
+                    for (int i = plan.Count - 1; i >= 0 && s < 0; i--)
                     {
-                        s = i;
-                        p = seg.Points.Count - 1;
+                        OrderSegment seg = plan[i];
+                        if (seg.Mode != AirOrderMode.Transit && seg.Mode != AirOrderMode.AttackMove)
+                            continue;
+                        int from = i == 0 ? seg.Index : 0;
+                        if (seg.Points.Count > from)
+                        {
+                            s = i;
+                            p = seg.Points.Count - 1;
+                        }
                     }
                 }
-                if (s < 0)
-                    return false;
+                if (s >= 0)
+                {
+                    OrderSegment src = plan[s];
+                    var point = new OrderSegment
+                    {
+                        Mode = src.Mode,
+                        AltAgl = src.AltAgl,
+                        FollowTerrain = src.FollowTerrain,
+                        Speed = src.Speed
+                    };
+                    point.Points.Add(src.Points[p]);
+                    point.PointGroups.Add(src.PointGroups[p]);
+                    keep.Add(point);
+                    keptPoint = true;
+                }
             }
-            OrderSegment src = plan[s];
-            var keep = new OrderSegment
+            if (attackTarget != null && !attackTarget.disabled)
             {
-                Mode = src.Mode,
-                AltAgl = src.AltAgl,
-                FollowTerrain = src.FollowTerrain,
-                Speed = src.Speed
-            };
-            keep.Points.Add(src.Points[p]);
-            keep.PointGroups.Add(src.PointGroups[p]);
+                var seg = new OrderSegment
+                {
+                    Mode = AirOrderMode.Attack,
+                    Target = attackTarget,
+                    AltAgl = attackSrc != null ? attackSrc.AltAgl : EffectiveProfile.AltitudeAgl,
+                    FollowTerrain = attackSrc != null ? attackSrc.FollowTerrain : EffectiveProfile.FollowTerrain,
+                    Speed = attackSrc != null ? attackSrc.Speed : SpeedIndex
+                };
+                Vector3 tp = attackTarget.transform.position;
+                seg.Points.Add(new Vector3(tp.x, seg.AltAgl, tp.z).ToGlobalPosition());
+                seg.PointGroups.Add(0);
+                keep.Add(seg);
+            }
+            if (keep.Count == 0)
+                return false;
             Version++;
-            Plans[aircraft] = new List<OrderSegment> { keep };
+            Plans[aircraft] = keep;
             return true;
         }
 
@@ -832,6 +874,7 @@ namespace SupremeNuclear
         {
             Version++;
             Plans.Clear();
+            EnemyScans.Clear();
         }
 
         public static OrderSegment Step(Unit aircraft, Vector3 currentPosition)
@@ -1111,11 +1154,34 @@ namespace SupremeNuclear
             }
         }
 
+        /// <summary>Скан «рядом враг» для рулевых патчей (звали его 50 Гц на каждого
+        /// борта в attack-move/эскорте — полный обход реестра, рос квадратично,
+        /// §12-7/§12-18): теперь по нативной решётке BattlefieldGrid (как сканы
+        /// наземки) с троттлом ScanIntervalSec — решению «передать бой нативному AI»
+        /// хватает полусекундной свежести. Кэш переживает до конца окна и «врага
+        /// больше нет» (борта продолжают штатный тик до перевыгреба).</summary>
+        private const float ScanIntervalSec = 0.5f;
+
+        private struct EnemyScan
+        {
+            public float At;
+            public float Range;
+            public bool Found;
+        }
+
+        private static readonly Dictionary<Unit, EnemyScan> EnemyScans =
+            new Dictionary<Unit, EnemyScan>();
+
         public static bool EnemyNearby(Unit aircraft, FactionHQ localHq, float range = 9000f)
         {
+            if (EnemyScans.TryGetValue(aircraft, out EnemyScan s) &&
+                s.Range == range && Time.unscaledTime - s.At < ScanIntervalSec)
+                return s.Found;
+            bool found = false;
             Vector3 pos = aircraft.transform.position;
             float sq = range * range;
-            foreach (Unit unit in UnitRegistry.allUnits)
+            foreach (Unit unit in BattlefieldGrid.GetUnitsInRangeEnumerable(
+                         aircraft.GlobalPosition(), range))
             {
                 if (unit == null || unit.disabled || unit.NetworkHQ == null || unit.NetworkHQ == localHq)
                     continue;
@@ -1123,9 +1189,13 @@ namespace SupremeNuclear
                     continue;
                 Vector3 d = unit.transform.position - pos;
                 if (d.sqrMagnitude < sq)
-                    return true;
+                {
+                    found = true;
+                    break;
+                }
             }
-            return false;
+            EnemyScans[aircraft] = new EnemyScan { At = Time.unscaledTime, Range = range, Found = found };
+            return found;
         }
 
         public static void Prune()
@@ -1139,7 +1209,10 @@ namespace SupremeNuclear
             if (dead == null)
                 return;
             foreach (Unit unit in dead)
+            {
                 Plans.Remove(unit);
+                EnemyScans.Remove(unit);
+            }
         }
 
         private static float HorizontalDistance(Vector3 a, Vector3 b) =>

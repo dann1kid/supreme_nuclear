@@ -35,6 +35,12 @@ namespace SupremeNuclear
             /// Builders. Нет азимута — инженер идёт к ближней точке кольца.</summary>
             public readonly Dictionary<Unit, float> ApproachBearings = new Dictionary<Unit, float>();
             public bool ZoneBlocked; // зона не расчищена (кто-то из наземки/флота внутри)
+            /// <summary>Кэш скана зоны (троттл ZoneScanIntervalSec): найденный блокер
+            /// и время следующего скана. FindZoneBlocker — полный обход реестра, его
+            /// звали на каждую задачу каждый кадр; занятость зоны меняется секундами
+            /// (юниты едут) — полусекундной свежести достаточно (§12-перф).</summary>
+            public Unit ZoneBlockerCache;
+            public float NextZoneScanAt;
             public float Progress01 => Cost > 0f ? Mathf.Clamp01(Paid / Cost) : 0f;
             public string Label => IsRunway ? Loc.Tr("ВПП") : IsDock ? Loc.Tr("Верфь") : Definition?.unitName;
         }
@@ -132,7 +138,6 @@ namespace SupremeNuclear
             PlacingActive = false;
             PendingYawDeg = 0f;
             MainlineNodes.Clear();
-            TaxiCollector.Reset();
             Docks.Clear();
             _dockDefResolved = false;
             Consumed = false;
@@ -183,6 +188,18 @@ namespace SupremeNuclear
                                          (def.unitPrefab != null &&
                                           def.unitPrefab.GetComponent<VehicleDepot>() != null);
         }
+
+        /// <summary>Площадка — ФАБРИКА (депо/верфь/ангар): принимает очередь
+        /// производства как готовая, выпуск — по завершении стройки (v0.107,
+        /// ProductionTasks.EnqueueSite/AdoptSite). ВПП — НЕ фабрика: её
+        /// исполнители (ангары) строятся отдельно уже после аэродрома.</summary>
+        public static bool IsFactorySite(Task t) =>
+            t != null && (t.IsDock ||
+                (!t.IsRunway && t.Definition != null && IsProducingDefinition(t.Definition)));
+
+        /// <summary>Площадка ещё в реестре активных? Очередь ProductionTasks
+        /// так проверяет свои позиции недостроя каждый тик.</summary>
+        public static bool IsActive(Task t) => t != null && Active.Contains(t);
 
         /// <summary>Наклон депо под рельеф: сэмплы высот четырёх углов футпринта
         /// (в повороте yaw) → pitch/roll с клампом BuildTerrainTiltMaxDeg. Сэмплы —
@@ -366,84 +383,35 @@ namespace SupremeNuclear
             }
             _previewWasOk = true;
             points = new List<GlobalPosition> { exitPos.ToGlobalPosition(), start };
-            TaxiKind kind = ResolveTaxi(airbase, start, ref to,
-                out Vector3 axis, out Vector3 farDir, out bool existed, out float farM);            if (kind == TaxiKind.Native)
-            {
-                points.Add(to);
-                return true;
-            }
-            if (kind == TaxiKind.Direct)
-            {
-                points.AddRange(DirectPoints(start.ToLocalPosition(), to.ToLocalPosition(), fwd, farDir));
-                points.Add(to);
-                return true;
-            }
-            TaxiCollector.Plan plan = TaxiCollector.PlanFor(to, axis, farDir, start, fwd, existed, farM);
-            points.AddRange(plan.Connector);
-            points.Add(plan.Junction);
-            points.AddRange(plan.Route); // стык → магистраль → S-кривая → торец
+            points.AddRange(ApproachPoints(airbase, to, start, fwd));
+            points.Add(to);
             return true;
         }
 
-        /// <summary>Тип подключения ангара к аэродрому: нативный узел сети /
-        /// прямой тангенциальный подвод (почти на оси за порогом) / коллектор.</summary>
-        private enum TaxiKind { Native, Direct, Collector }
-
-        /// <summary>Разрешить подключение: у нативного аэродрома (есть своя
-        /// такси-сеть) — прямая дорога к её ближнему узлу; у своей ВПП —
-        /// КОЛЛЕКТОР стороны ангара (создаётся/растит), причём якорем служит
-        /// торец ПЕРВОГО ангара стороны, а не «ближайший» (одна магистраль на
-        /// сторону, v0.100); почти осевой ангар за порогом — Direct.
-        /// `to` на выходе — фактический конец дороги (узел/торец/якорь).</summary>
-        private static TaxiKind ResolveTaxi(Airbase airbase, GlobalPosition start,
-            ref GlobalPosition to, out Vector3 axis, out Vector3 farDir,
-            out bool existed, out float farM)
+        /// <summary>Точки подвода рулёжки МЕЖДУ start и целью (как построит
+        /// ConnectTaxiway): у своей ВПП — «якоря и Безье» (Util.TaxiApproachPoints:
+        /// прямой выезд из ворот → одно плавное Безье → выкат по оси в торец
+        /// «в сторону взлёта», v0.102.2 — канон игрока, коллектор v0.100
+        /// отвергнут); у нативного аэродрома — напрямую к ближнему узлу его
+        /// собственной сети.</summary>
+        private static List<GlobalPosition> ApproachPoints(Airbase airbase, GlobalPosition to,
+            GlobalPosition start, Vector3 fwd)
         {
-            axis = default;
-            farDir = default;
-            existed = false;
-            farM = -1f;
             Vector3 toLocal = to.ToLocalPosition();
-            if (MainlineOf(airbase).Count > 0 ||
-                !TryGetRunwayAxisAt(airbase, toLocal, out axis, out farDir))
-                return TaxiKind.Native;
-            Vector3 startLocal = start.ToLocalPosition();
-            if (TaxiCollector.TryGetAnchor(airbase, TaxiCollector.SideOf(toLocal, axis, startLocal),
-                    out GlobalPosition anchor, out farM))
+            if (MainlineOf(airbase).Count == 0 &&
+                TryGetRunwayAxisAt(airbase, toLocal, out Vector3 axis, out Vector3 farDir))
             {
-                to = anchor;
-                toLocal = anchor.ToLocalPosition();
-                if (!TryGetRunwayAxisAt(airbase, toLocal, out axis, out farDir))
-                    return TaxiKind.Native; // якорь потерял ось — прямое подключение
-                existed = true;
+                List<Vector3> pts = Util.TaxiApproachPoints(
+                    toLocal, start.ToLocalPosition(), fwd, farDir);
+                var result = new List<GlobalPosition>(pts.Count);
+                foreach (Vector3 p in pts)
+                    result.Add(p.ToGlobalPosition());
+                return result;
             }
-            Vector3 fromStart = startLocal - toLocal;
-            float lateral0 = Vector3.Dot(new Vector3(-axis.z, 0f, axis.x), fromStart);
-            if (Mathf.Abs(lateral0) < 12f && Vector3.Dot(fromStart, farDir) < 0f)
-                return TaxiKind.Direct;
-            return TaxiKind.Collector;
+            return new List<GlobalPosition>(); // нативный узел — прямая дорога
         }
 
         private const float DoorClearanceM = 10f; // старт дороги от ворот — не по зданию
-
-        /// <summary>Прямой тангенциальный подвод (ангар почти на оси за порогом):
-        /// одна Безье ворота → торец, касательная старта = направление выхода
-        /// ангара, финиша = ось ВПП. Ворота «спиной» к полосе — старт по оси:
-        /// контроль назад даёт складку на полилинии дороги (точки идут
-        /// назад-вперёд).</summary>
-        private static List<GlobalPosition> DirectPoints(Vector3 start, Vector3 to,
-            Vector3 exitFwd, Vector3 farDir)
-        {
-            var pts = new List<GlobalPosition>();
-            float chord = Vector3.Distance(start, to);
-            float d = Mathf.Clamp(chord * 0.35f, 30f, 200f);
-            Vector3 t1 = Vector3.Dot(exitFwd, farDir) < 0f ? farDir : exitFwd;
-            int n = Mathf.Max(3, Mathf.CeilToInt(chord * 1.3f / 15f));
-            for (int i = 1; i < n; i++)
-                pts.Add(Util.Bezier3(start, start + t1 * d, to - farDir * d, to,
-                    i / (float)n).ToGlobalPosition());
-            return pts;
-        }
 
         private static readonly System.Reflection.FieldInfo ServicePointsField =
             HarmonyLib.AccessTools.Field(typeof(Airbase), "servicePoints");
@@ -517,17 +485,17 @@ namespace SupremeNuclear
             return false;
         }
 
-        /// <summary>Подключить новый ангар к аэродрому (v0.100 — КОЛЛЕКТОР):
-        /// ResolveTaxi выбирает ветку — нативный узел сети / прямой подвод
-        /// (почти осевой ангар за порогом) / магистраль-коллектор стороны
-        /// (создаётся первым ангаром, растёт хвостами). Дорога коннектора
-        /// добавляется ПОСЛЕДНЕЙ и режет магистраль в точке стыка
-        /// (CheckIntersection), RegenerateNetwork склеивает концы в узлы —
-        /// выруливающий борт сразу в общем графе. Поверхность — грейдированная
-        /// лента от кромки апрона (padY — штифт старта: сход с плиты пандусом
-        /// ≤ MaxGrade, не обрывом юбки); перекрытия прижаты заподлицо
-        /// (TaxiSurface.TopAt). Хост-only; клиент сеть не синкает (руление AI —
-        /// серверная логика).</summary>
+        /// <summary>Подключить новый ангар к аэродрому: одна дорога
+        /// «выход ангара → подвод (ApproachPoints) → узел-торец/нативный узел»;
+        /// RegenerateNetwork склеивает концы в узлы в радиусе 10 м — все ангары
+        /// сходятся в узле торца, борт сразу в общем графе. Подвод у своей ВПП —
+        /// «якоря и Безье» v0.102.2 (канон игрока: прямой выезд из ворот →
+        /// одно плавное Безье → выкат по оси в торец в сторону взлёта; коллектор
+        /// v0.100 отвергнут плейтестом — «ломаная»). Поверхность — та же
+        /// полилиния грейдированной лентой от кромки апрона (padY — штифт
+        /// старта: сход с плиты пандусом ≤ MaxGrade, не обрывом юбки);
+        /// перекрытия прижаты заподлицо (TaxiSurface.TopAt). Хост-only; клиент
+        /// сеть не синкает (руление AI — серверная логика).</summary>
         private static void ConnectTaxiway(Airbase airbase, Building hangarBuilding,
             float padY = float.NaN)
         {
@@ -562,64 +530,34 @@ namespace SupremeNuclear
 
                 if (!TryPickConnectTarget(airbase, start, fwd, out GlobalPosition to))
                     return;
-                TaxiKind kind = ResolveTaxi(airbase, start, ref to,
-                    out Vector3 axis, out Vector3 farDir, out bool existed, out float farM);
+                List<GlobalPosition> approach = ApproachPoints(airbase, to, start, fwd);
 
-                // Дорога/полотно коннектора ангара; полотно стартует С КРОМКИ
-                // АПРОНА (габарит + 6 м, геометрия Pad) — пандус накрывает юбку
-                // плиты. Граф ведёт борта, а плиты-коллайдеры несут шасси — без
-                // них на грунте (пустыня) тяжёлый борт вязнет и его катапультирует.
+                // Дорога и полотно — одна полилиния: борт едет по точкам дороги
+                // между узлами, асфальт ложится под колёса там же. Лента
+                // стартует С КРОМКИ АПРОНА (габарит + 6 м, геометрия Pad) —
+                // пандус накрывает юбку плиты; граф ведёт борта, а плиты-
+                // коллайдеры несут шасси — без них на грунте (пустыня) тяжёлый
+                // борт вязнет и его катапультирует.
                 Vector3 padEdge = hangarBuilding.transform.position +
                     new Vector3(fwd.x, 0f, fwd.z).normalized *
                     (hangarBuilding.definition.length * 0.5f + 6f);
-                var roadPts = new List<GlobalPosition>();
-                var surface = new List<GlobalPosition> { padEdge.ToGlobalPosition(), start };
-                TaxiCollector.Plan plan = null;
-                if (kind == TaxiKind.Native)
-                {
-                    roadPts.Add(to);
-                    surface.Add(to);
-                }
-                else if (kind == TaxiKind.Direct)
-                {
-                    roadPts.AddRange(DirectPoints(start.ToLocalPosition(), to.ToLocalPosition(),
-                        fwd, farDir));
-                    roadPts.Add(to);
-                    surface.AddRange(roadPts); // срез полотна = торцевая линия полосы
-                }
-                else
-                {
-                    plan = TaxiCollector.PlanFor(to, axis, farDir, start, fwd, existed, farM);
-                    TaxiCollector.Apply(airbase, plan, net); // магистраль/хвост + реестр
-                    if (plan.Creates)
-                        TaxiSurface.Register(plan.Body, graded: true);
-                    else if (plan.Extension.Count >= 2)
-                        TaxiSurface.Register(plan.Extension, graded: true);
-                    roadPts.AddRange(plan.Connector);
-                    roadPts.Add(plan.Junction);
-                    surface.AddRange(plan.Connector);
-                    surface.Add(plan.ConnectorStripEnd); // срез по дальней кромке магистрали
-                }
-
                 var road = new Road();
                 road.AddPoint(start);
-                foreach (GlobalPosition p in roadPts)
+                foreach (GlobalPosition p in approach)
                     road.AddPoint(p);
+                road.AddPoint(to);
                 road.CalcLength();
                 net.roads.Add(road);
-                if (kind == TaxiKind.Collector)
-                    road.CheckIntersection(net); // Т-стык: магистраль режется в точке коннектора
                 net.RegenerateNetwork();
                 // Сервис-точка у выхода ангара: севший борт после пробега рулит
                 // по сети ОБРАТНО к апронам (TryGetNearestServicePoint), а не
                 // паркуется на полосе вечным препятствием.
                 AddServicePoint(airbase, start);
+                var surface = new List<GlobalPosition> { padEdge.ToGlobalPosition(), start };
+                surface.AddRange(approach);
+                surface.Add(to);
                 TaxiSurface.Register(surface, graded: true, startY: padY);
                 Log.Info("Build: рулёжка дорисована — " + airbase.name +
-                         (kind == TaxiKind.Collector
-                             ? " коллектор" + (plan.Creates ? " (создан" : " (расширена") +
-                               " до " + plan.NewFarM.ToString("F0") + " м)"
-                             : "") +
                          " (дорог " + net.roads.Count + ")");
             }
             catch (System.Exception e)
@@ -727,8 +665,8 @@ namespace SupremeNuclear
         /// <summary>Поставить площадку ВЕРФИ на воде (SupCom naval yard, v0.92):
         /// точка клика — дно под водой (глубина ≥ DockMinDepthM); по готовности —
         /// меш-платформа на уровне моря + корпус-депо (реестр верфей). Строят
-        /// инженеры; без плавучести инженер строит с кромки воды в радиусе
-        /// площадки (EngineerFloat ведёт его вплавь — см. Units/EngineerFloat).</summary>
+        /// инженеры: морской инженер (катер LC) доходит нативным ховером,
+        /// наземный — с кромки воды в радиусе площадки.</summary>
         public static bool TryPlaceDock(Vector3 waterPoint, List<Unit> selected, FactionHQ hq,
             float yawDeg = 0f)
         {
@@ -1063,6 +1001,13 @@ namespace SupremeNuclear
         /// <summary>Цепочка SupCom: закончив стройку, инженер едет к своей следующей
         /// задаче в очереди (площадки работают как вейпоинты).</summary>
         private static readonly Dictionary<Unit, float> PushedAt = new Dictionary<Unit, float>();
+
+        /// <summary>Троттл скана занятости зоны стройки (на задачу).</summary>
+        private const float ZoneScanIntervalSec = 0.5f;
+
+        /// <summary>Переиспользуемый фокус-словарь тика (раньше — new Dictionary
+        /// на каждый кадр; пересборка — на месте, логика не менялась).</summary>
+        private static readonly Dictionary<Unit, Task> FocusMap = new Dictionary<Unit, Task>();
         private static readonly Dictionary<Unit, float> ReRouteAt = new Dictionary<Unit, float>();
 
         // Диагностика застоя стройки (лог раз в 5 с, пока площадка не оплачена).
@@ -1093,10 +1038,17 @@ namespace SupremeNuclear
         public static List<Unit> UnitsWithSequences()
         {
             var list = new List<Unit>();
+            UnitsWithSequences(list);
+            return list;
+        }
+
+        /// <summary>Буфер-версия (событийные сканы без аллокаций): список очищается.</summary>
+        public static void UnitsWithSequences(List<Unit> list)
+        {
+            list.Clear();
             foreach (KeyValuePair<Unit, List<SeqEntry>> kv in Sequences)
                 if (kv.Key != null && !kv.Key.disabled && kv.Value.Count > 0)
                     list.Add(kv.Key);
-            return list;
         }
 
         /// <summary>Дописать движение в общую очередь инженера (shift+движение).
@@ -1166,6 +1118,135 @@ namespace SupremeNuclear
 
         public static bool HasSequence(Unit builder) =>
             Sequences.TryGetValue(builder, out List<SeqEntry> seq) && seq.Count > 0;
+
+        // == DISPERSE СТРОЙКИ (v0.108): скретчи раздачи (хоткей, не OnGUI).
+        private static readonly List<Unit> DisperseBuilders = new List<Unit>();
+        private static readonly List<Task> DispersePool = new List<Task>();
+        private static readonly List<Vector3> DisperseUnitPos = new List<Vector3>();
+        private static readonly List<Vector3> DisperseTaskPos = new List<Vector3>();
+        private static readonly List<Task> DisperseMine = new List<Task>();
+
+        /// <summary>Disperse стройки (Alt+Shift+R, запрос 2026-10-28): серия площадок
+        /// из очередей выделенных инженеров распределяется между ними КУЧКАМИ
+        /// (Util.AssignSpread: наименее загруженный берёт ближайшую к концу своего
+        /// маршрута) — каждый строит СВОЮ подвыборку, а не всю серию гурьбой.
+        /// Пул = Task-записи очередей выделенных (порядок серии, дедуп); строители
+        /// вне выделения остаются при своих задачах; Move-записи очередей остаются
+        /// владельцам (порядок сохраняется). Инженеру без очереди, получившему
+        /// площадки, заводится очередь в порядке серии. Сменившаяся голова —
+        /// выданный маршрут снимается (аванцер тут же выдаст новый подход);
+        /// затронутым задачам перевыдаётся веер строителей. Возвращает число
+        /// распределённых площадок.</summary>
+        public static int DisperseSequences(List<Unit> selected)
+        {
+            DisperseBuilders.Clear();
+            foreach (Unit b in selected)
+                if (b != null && !b.disabled && GameApi.IsEngineer(b))
+                    DisperseBuilders.Add(b);
+            if (DisperseBuilders.Count == 0)
+                return 0;
+
+            DispersePool.Clear();
+            foreach (Unit b in DisperseBuilders)
+            {
+                if (!Sequences.TryGetValue(b, out List<SeqEntry> seq))
+                    continue;
+                foreach (SeqEntry e in seq)
+                    if (e.Task != null && !e.IsStale && !DispersePool.Contains(e.Task))
+                        DispersePool.Add(e.Task);
+            }
+            if (DispersePool.Count == 0)
+                return 0;
+
+            DisperseUnitPos.Clear();
+            DisperseTaskPos.Clear();
+            foreach (Unit b in DisperseBuilders)
+                DisperseUnitPos.Add(b.transform.position);
+            foreach (Task t in DispersePool)
+                DisperseTaskPos.Add(t.Site.ToLocalPosition());
+            int[] owner = Util.AssignSpread(DisperseUnitPos, DisperseTaskPos);
+            if (owner == null)
+                return 0;
+
+            // Снять выделенных со ВСЕХ площадок пула и раздать по кучкам: в
+            // Builders каждой задачи — только выигравший её выделенный инженер
+            // (плюс не тронутые строители вне выделения).
+            foreach (Task t in DispersePool)
+                t.Builders.RemoveAll(b => DisperseBuilders.Contains(b));
+            var hasWork = new bool[DisperseBuilders.Count];
+            for (int k = 0; k < DispersePool.Count; k++)
+            {
+                DispersePool[k].Builders.Add(DisperseBuilders[owner[k]]);
+                hasWork[owner[k]] = true;
+            }
+
+            int withWork = 0;
+            foreach (bool has in hasWork)
+                if (has)
+                    withWork++;
+
+            // Очереди: Move-записи остаются владельцу, Task — только доставшиеся.
+            for (int i = 0; i < DisperseBuilders.Count; i++)
+            {
+                Unit b = DisperseBuilders[i];
+                DisperseMine.Clear();
+                for (int k = 0; k < DispersePool.Count; k++)
+                    if (owner[k] == i)
+                        DisperseMine.Add(DispersePool[k]);
+
+                if (!Sequences.TryGetValue(b, out List<SeqEntry> seq))
+                {
+                    // Очереди не было (инженер привлечён раздачей): завести
+                    // записями доставшихся площадок в порядке серии.
+                    if (DisperseMine.Count == 0)
+                        continue;
+                    seq = new List<SeqEntry>();
+                    foreach (Task t in DisperseMine)
+                        seq.Add(new SeqEntry { Task = t });
+                    Sequences[b] = seq;
+                    GroundOrders.Clear(b); // свободный приказ ведёт аванцер
+                    if (b is Ship sea)
+                        sea.SetHoldPosition(false);
+                    continue;
+                }
+
+                int write = 0;
+                for (int read = 0; read < seq.Count; read++)
+                {
+                    SeqEntry e = seq[read];
+                    if (e.Task == null || DisperseMine.Contains(e.Task))
+                        seq[write++] = e;
+                }
+                if (write == seq.Count)
+                    continue; // очередь не изменилась — голова и маршрут живы
+                seq.RemoveRange(write, seq.Count - write);
+                if (seq.Count == 0)
+                {
+                    Sequences.Remove(b);
+                    GroundOrders.Clear(b);
+                    if (b is Ship sea)
+                        sea.SetHoldPosition(false); // без площадок — с якоря
+                    continue;
+                }
+                if (!seq[0].Issued)
+                {
+                    // Голова сменилась: выданный маршрут мог вести к площадке,
+                    // ушедшей другому — снять цепочку, аванцер выдаст новую голову.
+                    GroundOrders.Clear(b);
+                    if (b is Ship sea)
+                        sea.SetHoldPosition(false);
+                }
+            }
+
+            foreach (Task t in DispersePool)
+                AssignApproachBearings(t); // состав строителей изменился — веер заново
+            Version++;
+            CommanderHud.Notice(Loc.F("Рассредоточение стройки: {0} {1} — {2} {3}",
+                withWork, Loc.Plural(withWork, "инженер", "инженера", "инженеров"),
+                DispersePool.Count, Loc.Plural(DispersePool.Count, "площадка", "площадки", "площадок")));
+            Log.Info($"Build: disperse — {withWork} инженерам роздано {DispersePool.Count} площадок");
+            return DispersePool.Count;
+        }
 
         /// <summary>Цепочка юнита в GroundOrders — СЛУЖЕБНАЯ выданная голова
         /// (транспорт SetDestination): у инженера с живой очередью её не рисуем
@@ -1694,7 +1775,7 @@ namespace SupremeNuclear
             if (Active.Count == 0)
                 return;
             float dt = Time.deltaTime;
-            var focus = new Dictionary<Unit, Task>();
+            var focus = FocusMap; // Clear — при пересборке ниже (первая задача всегда собирает)
             bool focusBuilt = false;
             for (int i = Active.Count - 1; i >= 0; i--)
             {
@@ -1765,7 +1846,13 @@ namespace SupremeNuclear
                 }
                 // Зона стройки: пока внутри чужая наземка/флот (кроме строителей;
                 // авиация не считается) — стройка не начинается. Пассивных своих выпихиваем.
-                Unit blocker = FindZoneBlocker(t);
+                // Скан — раз в ZoneScanIntervalSec (кэш на задаче), не каждый кадр.
+                Unit blocker = t.ZoneBlockerCache;
+                if (Time.unscaledTime >= t.NextZoneScanAt)
+                {
+                    t.NextZoneScanAt = Time.unscaledTime + ZoneScanIntervalSec;
+                    t.ZoneBlockerCache = blocker = FindZoneBlocker(t);
+                }
                 t.ZoneBlocked = blocker != null;
                 if (t.ZoneBlocked && IsIdleFriendly(blocker, t.Faction) &&
                     TryPushOutOfZone(blocker, t))
@@ -1810,12 +1897,15 @@ namespace SupremeNuclear
 
                 if (t.Paid >= t.Cost - 0.01f)
                 {
+                    // Очередь недостроя-фабрики переезжает на живую фабрику
+                    // (null — спавн не удался: ProductionTasks чистит своё сам).
+                    // ВПП — не фабрика: очереди у неё не бывает.
                     if (t.IsRunway)
                         SpawnRunway(t);
                     else if (t.IsDock)
-                        SpawnDock(t);
+                        ProductionTasks.AdoptSite(t, SpawnDock(t));
                     else
-                        SpawnBuilding(t);
+                        ProductionTasks.AdoptSite(t, SpawnBuilding(t));
                     PushBuildersOut(t);
                     BuildGhosts.Hide(t);
                     StallDiagAt.Remove(t);
@@ -1886,14 +1976,14 @@ namespace SupremeNuclear
             }
         }
 
-        private static void SpawnBuilding(Task t)
+        private static object SpawnBuilding(Task t)
         {
             Spawner spawner = NetworkSceneSingleton<Spawner>.i;
             if (spawner == null)
             {
                 Log.Error("Build: Spawner недоступен — здание не создано, деньги возвращены");
                 t.Faction.AddFunds(t.Paid);
-                return;
+                return null;
             }
             Vector3 local = t.Site.ToLocalPosition();
             // Наклон (Pitch/Roll ≠ 0 — только у депо): здание снапится к рельефу,
@@ -1909,7 +1999,7 @@ namespace SupremeNuclear
                 {
                     Log.Warn("Build: аэродром потерян за время стройки ангара — возврат денег");
                     t.Faction.AddFunds(t.Paid);
-                    return;
+                    return null;
                 }
                 // Апрон строим ПЕРВЫМ и ПЛОСКИМ (МАКС рельефа площадки + юбки —
                 // v0.91.3, min зарывал верхний край плиты в бугор): здание ставится
@@ -1925,14 +2015,14 @@ namespace SupremeNuclear
                 {
                     Log.Error("Build: ангар не создан — возврат денег");
                     t.Faction.AddFunds(t.Paid);
-                    return;
+                    return null;
                 }
                 ConnectTaxiway(airbase, hangar, padY);
                 CommanderHud.Notice(Loc.F("Построено: {0} → {1}", t.Definition.unitName, airbase.name));
                 Log.Info($"Build: ангар {t.Definition.unitName} пристыкован к {airbase.name} " +
                          $"на ({local.x:F0},{local.z:F0}), поворот {t.YawDeg:F0}°, " +
                          $"полотно y={padY:F1}");
-                return;
+                return hangar.GetComponent<Hangar>(); // фабрика для AdoptSite
             }
             Vector3 pos2 = new Vector3(local.x, GameApi.GroundY(local.x, local.z), local.z) +
                            (Vector3)t.Definition.spawnOffset;
@@ -1945,10 +2035,11 @@ namespace SupremeNuclear
             {
                 Log.Error("Build: здание не создано — возврат денег");
                 t.Faction.AddFunds(t.Paid);
-                return;
+                return null;
             }
             CommanderHud.Notice(Loc.F("Построено: {0}", t.Definition.unitName));
             Log.Info($"Build: готово {t.Definition.unitName} на ({local.x:F0},{local.z:F0}) за {t.Paid:F0}");
+            return unit;
         }
 
         /// <summary>ВПП готова: нативный SpawnCustomAirbase — новый аэродром со своей
@@ -1968,6 +2059,9 @@ namespace SupremeNuclear
             Vector3 a = t.Site.ToLocalPosition();
             Vector3 b = t.RunwayEnd.ToLocalPosition();
             float len = new Vector2(b.x - a.x, b.z - a.z).magnitude;
+            Vector3 dir = len > 0.01f
+                ? new Vector3(b.x - a.x, 0f, b.z - a.z).normalized
+                : Vector3.forward;
 
             var saved = new SavedAirbase
             {
@@ -1984,6 +2078,27 @@ namespace SupremeNuclear
             // соседнему нативному аэропорту. Полдлины + дальность привязки ангаров
             // = вся территория аэродрома (и честный радиус захвата).
             saved.CaptureRange = len * 0.5f + Settings.HangarAttachRadiusM;
+            // Съезды с полосы: садящийся борт держит runway.landingList (а с ним
+            // IsAvailableForTakeoff = false для ВСЕХ взлетающих), пока не доедет
+            // до exit-точки. Без съездов FromSaved подставляет торцы — борт катится
+            // всю полосу до дальнего конца, запирая вылеты на пару минут с посадки.
+            // Точки на 1/3 и 2/3 в ОБОИХ направлениях (TryGetExitTaxiPoint матчит
+            // по dot(exitPoint.forward, курс борта), а FromSaved создаёт трансформы
+            // без поворота — доворачиваем после спавна), со сдвигом 12 м от осевой
+            // в правую по курсу сторону: после снятия с полосы борт встаёт у съезда
+            // (до парковки/сервиса) — со сдвигом он не лежит на линии разбега
+            // следующих; направления разведены по разным сторонам полосы.
+            Vector3 right = new Vector3(dir.z, 0f, -dir.x);
+            const float ExitSideM = 12f;
+            GlobalPosition[] exits = new GlobalPosition[4];
+            for (int i = 0; i < 2; i++)
+            {
+                float f = (i + 1) / 3f;
+                Vector3 p = a + dir * (len * f);
+                p.y = Mathf.Lerp(a.y, b.y, f);
+                exits[i] = (p + right * ExitSideM).ToGlobalPosition();     // курс a→b
+                exits[i + 2] = (p - right * ExitSideM).ToGlobalPosition(); // курс b→a
+            }
             saved.runways.Add(new SavedRunway
             {
                 Name = "SN-" + t.Id.Substring(0, 4),
@@ -1993,7 +2108,22 @@ namespace SupremeNuclear
                 Width = Settings.RunwayWidthM,
                 Start = a.ToGlobalPosition(),
                 End = b.ToGlobalPosition(),
+                exitPoints = exits,
             });
+            // Сервисные точки (парковка после посадки): без них ветка «к точке
+            // обслуживания» в SearchForAirbase даёт disembark ПРЯМО НА ПОЛОСЕ —
+            // севшие борта копятся на полотне и физически запирают выкат. Четыре
+            // точки у торцов, в стороне от полотна (за пределами «на полосе»
+            // нативного AircraftIsOnRunway ≈ 1.5 ширины).
+            float sideM = Settings.RunwayWidthM * 0.5f + 45f;
+            foreach (float f in new[] { 0.12f, 0.88f })
+            {
+                Vector3 p = a + dir * (len * f);
+                Vector3 s1 = p + right * sideM;
+                Vector3 s2 = p - right * sideM;
+                saved.ServicePoints.Add(new Vector3(s1.x, GameApi.GroundY(s1.x, s1.z), s1.z).ToGlobalPosition());
+                saved.ServicePoints.Add(new Vector3(s2.x, GameApi.GroundY(s2.x, s2.z), s2.z).ToGlobalPosition());
+            }
             mission.airbases.Add(saved);
             Airbase airbase = mission.SpawnCustomAirbase(saved, net.ServerObjectManager);
             if (airbase == null)
@@ -2003,6 +2133,21 @@ namespace SupremeNuclear
                 t.Faction.AddFunds(t.Paid);
                 return;
             }
+            // Доворот съездов: FromSaved создаёт exit-трансформы с единичной
+            // ориентацией (положение есть, поворота нет) — TryGetExitTaxiPoint
+            // матчит их по forward, без доворота «съезд не найден» почти всегда.
+            // Порядок соответствует exits выше: [0],[1] — курс a→b, [2],[3] — b→a.
+            if (airbase.runways != null && airbase.runways.Length > 0 &&
+                airbase.runways[0].exitPoints != null &&
+                airbase.runways[0].exitPoints.Length == 4)
+            {
+                Quaternion fwd = Quaternion.LookRotation(dir, Vector3.up);
+                Quaternion back = Quaternion.LookRotation(-dir, Vector3.up);
+                airbase.runways[0].exitPoints[0].rotation = fwd;
+                airbase.runways[0].exitPoints[1].rotation = fwd;
+                airbase.runways[0].exitPoints[2].rotation = back;
+                airbase.runways[0].exitPoints[3].rotation = back;
+            }
             // Поверхность полосы: непрозрачный меш-«тармак», ВЫРОВНЕННЫЙ терассой
             // (плоское сечение, лимит уклона, юбки-насыпи) — разбег по ровному.
             TaxiSurface.Register(saved.runways[0].Start, saved.runways[0].End,
@@ -2010,14 +2155,14 @@ namespace SupremeNuclear
             CommanderHud.Notice(Loc.F("Построено: ВПП {0} м — новый аэродром", len.ToString("F0")));
             Log.Info($"Build: ВПП-аэродром {saved.UniqueName} на " +
                      $"({saved.Center.ToLocalPosition().x:F0},{saved.Center.ToLocalPosition().z:F0}), " +
-                     $"длина {len:F0} м");
+                     $"длина {len:F0} м, съезды 1/3+2/3 (оба направления), 4 сервис-точки");
         }
 
         /// <summary>Верфь готова: меш-платформа на уровне моря (физика+визуал
         /// TaxiSurface) и корпус-депо сверху (SpawnFromUnitDefinitionInEditor,
         /// некапчуруемый, ренейм «Верфь»). Корпус попадает в реестр верфей —
         /// панели показывают ФЛОТ, ProductionTasks спускает корабли (NavalDock).</summary>
-        private static void SpawnDock(Task t)
+        private static object SpawnDock(Task t)
         {
             Spawner spawner = NetworkSceneSingleton<Spawner>.i;
             BuildingDefinition hull = t.Definition;
@@ -2025,7 +2170,7 @@ namespace SupremeNuclear
             {
                 Log.Error("Build: Верфь — Spawner/корпус недоступны, возврат денег");
                 t.Faction.AddFunds(t.Paid);
-                return;
+                return null;
             }
             Vector3 local = t.Site.ToLocalPosition();
             Quaternion rot = Quaternion.Euler(0f, t.YawDeg, 0f);
@@ -2039,13 +2184,14 @@ namespace SupremeNuclear
             {
                 Log.Error("Build: Верфь — корпус не создан, возврат денег");
                 t.Faction.AddFunds(t.Paid);
-                return;
+                return null;
             }
             unit.NetworkunitName = Loc.Tr("Верфь");
             Docks.Add(unit);
             CommanderHud.Notice(Loc.Tr("Построено: Верфь — флот в очередь"));
             Log.Info($"Build: Верфь на ({local.x:F0},{local.z:F0}), платформа " +
                      $"{sizeX:F0}×{sizeZ:F0}, палуба y={deckY:F1}");
+            return unit;
         }
 
         /// <summary>Активные задачи (маркеры площадок в HUD).</summary>

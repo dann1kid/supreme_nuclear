@@ -36,6 +36,17 @@ namespace SupremeNuclear
         public static void Notice(string text, float life = 3.5f) =>
             Notices.Add((text, Time.unscaledTime + life));
 
+        // Заголовок меняется только тумблером режима — строится один раз на
+        // состояние (Loc.F+конкат на КАЖДОМ OnGUI-событии, включая Layout-проходы,
+        // аллоцировали ~6 строк 2-4 раза за кадр бесконечно).
+        private static string _headerActive;
+        private static string _headerIdle;
+
+        private static string BuildHeader(bool active) =>
+            $"SUPREME NUCLEAR v{PluginInfo.Version}  |  " + Loc.F("Режим командира: {0}  |  {1} — переключить",
+                active ? "<color=lime>" + Loc.Tr("ВКЛ") + "</color>" : Loc.Tr("ВЫКЛ"),
+                Settings.ToggleCommanderKey);
+
         private void OnGUI()
         {
             if (!GameApi.InMission)
@@ -47,9 +58,7 @@ namespace SupremeNuclear
             bool active = controller != null && controller.IsActive;
 
             GUI.Label(new Rect(10f, 8f, 1100f, 22f),
-                $"SUPREME NUCLEAR v{PluginInfo.Version}  |  " + Loc.F("Режим командира: {0}  |  {1} — переключить",
-                    active ? "<color=lime>" + Loc.Tr("ВКЛ") + "</color>" : Loc.Tr("ВЫКЛ"),
-                    Settings.ToggleCommanderKey),
+                active ? _headerActive ??= BuildHeader(true) : _headerIdle ??= BuildHeader(false),
                 _label);
 
             if (active)
@@ -264,6 +273,8 @@ namespace SupremeNuclear
 
         /// <summary>SupCom-стиль: юниты-точки рисуются 2D-иконками. Свои — визорные маркеры,
         /// авиация — ориентированные по курсу силуэты, свои экстракторы — зелёные.</summary>
+        private static readonly HashSet<Unit> IconSelected = new HashSet<Unit>();
+
         private static void DrawStrategicIcons(CommanderModeController controller)
         {
             Camera cam = GameApi.MainCam;
@@ -271,7 +282,9 @@ namespace SupremeNuclear
                 return;
 
             float px = Settings.IconSizePx * (Screen.height / 1440f);
-            var selected = new HashSet<Unit>(controller.Selection.Selected);
+            var selected = IconSelected; // без new HashSet на каждый Repaint
+            selected.Clear();
+            selected.UnionWith(controller.Selection.Selected);
             int drawn = 0;
             foreach (Unit unit in UnitRegistry.allUnits)
             {
@@ -1030,6 +1043,9 @@ namespace SupremeNuclear
                         ? (Vector3?)dock.transform.position : null;
                 case Airbase airbase:
                     return airbase != null ? new Vector3?(airbase.transform.position) : null;
+                case BuildTasks.Task site:
+                    // Недострой-фабрика: якорь — сама площадка (v0.107).
+                    return new Vector3?(site.Site.ToLocalPosition());
                 default:
                     return null;
             }
@@ -1054,6 +1070,10 @@ namespace SupremeNuclear
         private static readonly List<Unit> EngSeqUnits = new List<Unit>();
         private static readonly List<IReadOnlyList<BuildTasks.SeqEntry>> EngSeqs =
             new List<IReadOnlyList<BuildTasks.SeqEntry>>();
+        // Скретч точек/цветов очередной инженерной цепочки (последний живой кусок
+        // долга §12-8: два new List на инженера на каждый Repaint).
+        private static readonly List<Vector3> EngPts = new List<Vector3>();
+        private static readonly List<Color> EngCols = new List<Color>();
         private static readonly HashSet<BuildTasks.Task> DrawnSites = new HashSet<BuildTasks.Task>();
         private static readonly HashSet<int> DrawnGroupMoves = new HashSet<int>();
         private static readonly HashSet<Unit> DrawnGroundTargets = new HashSet<Unit>();
@@ -1451,8 +1471,10 @@ namespace SupremeNuclear
                 IReadOnlyList<BuildTasks.SeqEntry> seq = EngSeqs[ei];
                 Vector3 prev = new Vector3(unit.transform.position.x, 0f, unit.transform.position.z);
                 prev.y = GameApi.GroundY(prev.x, prev.z);
-                var pts = new List<Vector3>(seq.Count);
-                var cols = new List<Color>(seq.Count);
+                var pts = EngPts;
+                var cols = EngCols;
+                pts.Clear();
+                cols.Clear();
                 foreach (var e in seq)
                 {
                     Vector3 lp = (e.Task != null ? e.Task.Site : e.Move).ToLocalPosition();
@@ -1526,6 +1548,10 @@ namespace SupremeNuclear
             RallySeenLens.Clear();
             if (selAirbase != null)
                 DrawFactoryRally(cam, selAirbase.transform.position, selAirbase, rallyColor, 0.85f);
+            // Недострой-фабрика: ралли площадки видно как у готовой (v0.107).
+            if (BuildTasks.IsFactorySite(BuildTasks.SelectedTask))
+                DrawFactoryRally(cam, BuildTasks.SelectedTask.Site.ToLocalPosition(),
+                    BuildTasks.SelectedTask, rallyColor, 0.85f);
             foreach (Unit unit in controller.Selection.Selected)
             {
                 if (unit == null)
@@ -1894,10 +1920,10 @@ namespace SupremeNuclear
                 FanNumbers[i] = (i + 1).ToString();
         }
 
-        /// <summary>Номера накопленных целей «Атаки веером» (заполняются один раз).</summary>
+        /// <summary>Номера накопленных целей «Распределения» (заполняются один раз).</summary>
         private static readonly string[] FanNumbers = new string[32];
 
-        /// <summary>Накопленные цели «Атаки веером» (режим R): пульсирующий фиолетовый
+        /// <summary>Накопленные цели «Распределения» (режим R): пульсирующий фиолетовый
         /// крест + порядковый номер (порядок кликов — приоритет ёмкости при раздаче).
         /// Мёртвые за время накопления пропускаются.</summary>
         private static void DrawFanTargets(CommanderModeController controller)

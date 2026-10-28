@@ -35,6 +35,12 @@ namespace SupremeNuclear
         private static readonly List<Unit> AirMembers = new List<Unit>();
         private static readonly List<int> AirSegs = new List<int>();
         private static readonly List<int> AirPts = new List<int>();
+        // Ралли: владелец точки — фабрика (депо/ангар/верфь/аэродром), не юнит;
+        // группа клика = все фабрики, получившие точку этим кликом.
+        private static readonly List<(object factory, int index, Vector3 orig)> GroupRally =
+            new List<(object, int, Vector3)>();
+        private static readonly List<object> RallyGroupFactories = new List<object>();
+        private static readonly List<int> RallyGroupIdx = new List<int>();
         private static Vector3 _grabWorld;
 
         /// <summary>Диагностика последней попытки захвата (строка F11).</summary>
@@ -80,7 +86,8 @@ namespace SupremeNuclear
             }
 
             Consumed = true;
-            if (RtsInput.LeftHeld && (_hit.Owner != null || _hit.Kind == WaypointKind.BuildSite))
+            if (RtsInput.LeftHeld && (_hit.Owner != null || _hit.Kind == WaypointKind.BuildSite ||
+                                       _hit.Kind == WaypointKind.RallyPoint))
             {
                 // Порог «клик vs драг» тот же, что у классификации на отпускании:
                 // пока курсор не сдвинулся на ClickPx — захват только взведён (клик по
@@ -122,6 +129,15 @@ namespace SupremeNuclear
                         for (int m = 0; m < Group.Count && m < GroupIndices.Count; m++)
                             GroundOrders.SetQueuePoint(GroupIndices[m].unit, GroupIndices[m].index,
                                 Group[m].orig + delta);
+                    }
+                    else if (GroupRally.Count > 1)
+                    {
+                        // Групповая точка ралли: один клик задаёт точку ВСЕМ фабрикам
+                        // выделения (лента дедупится в одну) — драг правит все копии
+                        // разом, общая дельта, у каждой фабрики свой индекс точки.
+                        Vector3 delta = snapped - _grabWorld;
+                        foreach ((object factory, int index, Vector3 orig) in GroupRally)
+                            ProductionTasks.SetRallyPoint(factory, index, orig + delta);
                     }
                     else
                         WaypointOps.Move(_hit, snapped); // одиночная точка любого вида
@@ -167,6 +183,7 @@ namespace SupremeNuclear
             Group.Clear();
             GroupIndices.Clear();
             GroupAir.Clear();
+            GroupRally.Clear();
         }
 
         /// <summary>Собрать группу для драга: групповая точка приказа = ВСЕ юниты
@@ -180,6 +197,10 @@ namespace SupremeNuclear
             GroupIndices.Clear(); // без очистки прошлый захват протухает: одиночный драг
             // получает чужие индексы, и SetQueuePoint молча уходит по guard'у
             GroupAir.Clear();
+            GroupRally.Clear(); // тот же класс бага: протухший ралли-захват перехватывал
+            // одиночный драг техники веткой GroupRally.Count > 1 — точка юнита не
+            // двигалась, а при следующем ралли-драге копии накапливались и тянули
+            // соседние точки маршрута
             _grabWorld = Vector3.zero;
             switch (_hit.Kind)
             {
@@ -301,6 +322,46 @@ namespace SupremeNuclear
                         }
                     }
                     return;
+                case WaypointKind.RallyPoint:
+                {
+                    // Ралли: группа клика — все фабрики, получившие эту точку одним
+                    // ПКМ (мультивыделение фабрик = общий маршрут); дельту считаем от
+                    // захваченной точки. Индивидуальной (groupId=0) у ралли не бывает
+                    // (клик всегда несёт NextGroupId), но фолбэк оставлен зеркально
+                    // остальным видам — одиночная точка через WaypointOps.Move.
+                    int gid = ProductionTasks.RallyGroupIdOf(_hit.RallyFactory, _hit.Index);
+                    bool anchored = false;
+                    if (gid != 0)
+                    {
+                        ProductionTasks.CollectRallyGroup(gid, RallyGroupFactories, RallyGroupIdx);
+                        for (int m = 0; m < RallyGroupFactories.Count; m++)
+                        {
+                            ProductionTasks.RallyRoute route =
+                                ProductionTasks.RallyOf(RallyGroupFactories[m]);
+                            if (route == null || RallyGroupIdx[m] >= route.Points.Count)
+                                continue;
+                            Vector3 w = route.Points[RallyGroupIdx[m]].ToLocalPosition();
+                            GroupRally.Add((RallyGroupFactories[m], RallyGroupIdx[m], w));
+                            if (ReferenceEquals(RallyGroupFactories[m], _hit.RallyFactory) &&
+                                RallyGroupIdx[m] == _hit.Index)
+                            {
+                                _grabWorld = w; // дельту считаем от захваченной точки
+                                anchored = true;
+                            }
+                        }
+                    }
+                    if (!anchored)
+                    {
+                        ProductionTasks.RallyRoute own = ProductionTasks.RallyOf(_hit.RallyFactory);
+                        if (own != null && _hit.Index < own.Points.Count)
+                        {
+                            Vector3 w = own.Points[_hit.Index].ToLocalPosition();
+                            GroupRally.Add((_hit.RallyFactory, _hit.Index, w));
+                            _grabWorld = w;
+                        }
+                    }
+                    return;
+                }
             }
         }
 
@@ -329,6 +390,7 @@ namespace SupremeNuclear
                 case WaypointKind.SequenceMove: return "очередь инженера";
                 case WaypointKind.GroundPoint: return "наземка";
                 case WaypointKind.AirPoint: return "авиация";
+                case WaypointKind.RallyPoint: return "ралли";
                 default: return "-";
             }
         }

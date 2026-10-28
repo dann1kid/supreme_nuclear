@@ -89,6 +89,7 @@ namespace SupremeNuclear
         public static float LandingHandoffM = 4000f;      // дистанция до аэродрома для передачи нативной посадке, м
         public static float AirbaseServiceRadiusM = 800f; // радиус обслуживания у аэродрома, м
         public static float AirbaseServiceSeconds = 20f;  // время перевооружения/заправки на земле, с
+        public static int AirbaseLaunchSlots = 1;         // самолётов одновременно в выкате с аэродрома
         public static float AirbaseRearmCost = 150f;      // цена обслуживания вылета
 
         // Стройка (Task-API v1)
@@ -107,14 +108,12 @@ namespace SupremeNuclear
         public static float BuildApproachMarginM = 15f;  // запас кольца остановки инженера от габарита здания, м
         public static float BuildPatrolAssistRadiusM = 500f; // радиус авто-достройки недостроев инженерами в патруле, м (0 — выкл)
 
-        // Флот: верфь-платформа и плавучий инженер (v0.92)
+        // Флот: верфь-платформа (v0.92)
         public static float DockCost = 800f;             // цена верфи (платформа + депо-корпус)
         public static float DockMinDepthM = 5f;          // мин. глубина под платформой, м
         public static float DockPlatformMarginM = 24f;   // запас платформы вокруг габарита корпуса, м
         public static float DockSpawnSearchM = 400f;     // радиус поиска воды для спуска корабля, м
         public static float NavalProductionSecondsPerItem = 45f; // производство корабля, с
-        public static float EngineerWaterSpeed = 6f;     // скорость инженера по воде, м/с
-        public static float EngineerFloatHeightM = 0.6f; // клиренс корпуса инженера над водой, м
 
         // Отладка
         public static bool ShowDebugOverlay = false;
@@ -260,7 +259,7 @@ namespace SupremeNuclear
             EscortStandoffM = config.Bind("Orders", "EscortStandoffM", 60f,
                 Loc.Tr("Сопровождение: дистанция следования от цели (плюс габариты юнитов), м")).Value;
             EscortAirDistM = config.Bind("Orders", "EscortAirDistM", 900f,
-                Loc.Tr("Сопровождение: смещение авиации от цели (сектор веера группы), м")).Value;
+                Loc.Tr("Сопровождение: смещение авиации от цели (распределение по секторам группы), м")).Value;
             EscortTrailSampleM = config.Bind("Orders", "EscortTrailSampleM", 25f,
                 Loc.Tr("Сопровождение: шаг следа цели (точки сплайна движения колонны), м")).Value;
             EscortTrailLengthM = config.Bind("Orders", "EscortTrailLengthM", 600f,
@@ -294,6 +293,9 @@ namespace SupremeNuclear
                 Loc.Tr("Радиус у аэродрома, в котором идёт перевооружение/заправка на земле, м")).Value;
             AirbaseServiceSeconds = config.Bind("Orders", "AirbaseServiceSeconds", 20f,
                 Loc.Tr("Время перевооружения/заправки борта на земле, с")).Value;
+            AirbaseLaunchSlots = config.Bind("Orders", "AirbaseLaunchSlots", 1,
+                new ConfigDescription(Loc.Tr("Сколько самолётов одновременно выкатывается с одного аэродрома (очередь выката; больше — быстрее, но борта толкаются на рулёжке)"),
+                    new AcceptableValueRange<int>(1, 4))).Value;
             AirbaseRearmCost = config.Bind("Orders", "AirbaseRearmCost", 150f,
                 Loc.Tr("Цена обслуживания вылета (перевооружение + заправка; интерим до логистики)")).Value;
 
@@ -335,10 +337,6 @@ namespace SupremeNuclear
                 Loc.Tr("Радиус поиска свободной воды для спуска корабля, м")).Value;
             NavalProductionSecondsPerItem = config.Bind("Naval", "ProductionSecondsPerItem", 45f,
                 Loc.Tr("Производство одного корабля на верфи, с")).Value;
-            EngineerWaterSpeed = config.Bind("Naval", "EngineerWaterSpeed", 6f,
-                Loc.Tr("Скорость инженера по воде (плавучесть), м/с")).Value;
-            EngineerFloatHeightM = config.Bind("Naval", "EngineerFloatHeightM", 0.6f,
-                Loc.Tr("Клиренс корпуса инженера над водой, м (слишком низко — игра топит технику)")).Value;
 
             ShowDebugOverlay = config.Bind("Debug", "ShowDebugOverlay", false).Value;
             DebugFunds = config.Bind("Debug", "Funds", 10000f,

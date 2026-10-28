@@ -18,6 +18,12 @@ namespace SupremeNuclear
     {
         private static bool Prefix(Turret __instance, Unit targetCandidate)
         {
+            // Быстрый выход: в мире нет ни стойки, ни гейтов — обе проверки ниже
+            // всё равно вернули бы true, а AssessTargetPriority натив зовёт сотни
+            // раз в секунду (турели × кандидаты), и GetAttachedUnit() каждого
+            // вызова не нужен (зеркало guard'а WeaponUseGatePatch.Allows).
+            if (!WeaponGateService.AnyRestrictions)
+                return true;
             Unit unit = __instance.GetAttachedUnit();
             if (StanceService.IsHoldFire(unit))
                 return false;
