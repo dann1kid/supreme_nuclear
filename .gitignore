@@ -1,0 +1,25 @@
+# Сборочные артефакты
+src/SupremeNuclear/bin/
+src/SupremeNuclear/obj/
+tests/bin/
+tests/obj/
+
+# Патч-скрипты одноразовые
+src/SupremeNuclear/_patch*.py
+_patch*.py
+
+# Временные скриншоты/кэш
+_*.png
+_shot*.png
+image.png
+
+# IDE
+.vs/
+.idea/
+*.user
+
+# Сессионные артефакты ZCode
+.zcode/
+
+# Релизные артефакты
+dist/

@@ -1,0 +1,945 @@
+# Архитектура Supreme Nuclear (as-built)
+
+**Версия кода:** 0.97.1 · **Дата среза:** 2026-10-27 · **Соответствует:** `src/SupremeNuclear/` целиком.
+
+Этот документ описывает, **как код устроен сейчас** (as-built). Гейм-дизайн — в [DESIGN.md](DESIGN.md);
+инструкция для пользователей — в [README.md](README.md). Перед любым изменением кода прочитай
+свои разделы здесь (минимум: §3 порядок тиков, §4 состояние, §7 инварианты, §10 рецепт твоей задачи).
+Реестр известных долгов — §12: оттуда берём работу, туда же добавляем новую.
+
+---
+
+## 1. Общая картина
+
+BepInEx-плагин (`net472`), который добавляет в Nuclear Option режим RTS-командира в духе SupCom.
+Три способа взаимодействия с игрой, в порядке предпочтения:
+
+1. **Композиция без патчей** — собственный `CameraBaseState`, обычные вызовы игрового API
+   (`UnitCommand.SetDestination`, `Airbase.TrySpawnAircraft`, ...). Основной путь.
+2. **Harmony-патчи** — реестр в §6; каждый guard-условием «нет условий мода → оригинал»
+   (Prefix возвращает `true`, Postfix не трогает результат без причины).
+3. **Reflection на приватные поля** — только там, где публичного API нет (поля пилота, порог
+   floating origin, запуск захвата здания). Все `FieldInfo`/`MethodInfo` кэшируются статически.
+
+```
+Nuclear Option (Assembly-CSharp)
+   ▲                                    ▲
+   │ Harmony (2 патча)                  │ прямой вызов API
+   │ FixedUpdate: руление авиации       │
+   │ AssessTargetPriority: hold-fire    │
+┌──┴────────────────────────────────────┴──────────────────────────┐
+│ SupremeNuclear.dll (BepInEx)                                     │
+│                                                                  │
+│  SupremeNuclearPlugin (точка входа)                              │
+│    ├─ CommanderModeController ← ЕДИНСТВЕННЫЙ оркестратор Update  │
+│    │    ├─ SelectionService   ├─ MoveOrderService                │
+│    │    └─ CommanderCameraState (тикается игрой из LateUpdate)   │
+│    ├─ CommanderHud  (IMGUI, OnGUI)   — мировой оверлей           │
+│    ├─ SupcomUi      (uGUI, Update)   — экранные панели           │
+│    └─ статические сервисы: EconomyService, GroundOrders,         │
+│       AircraftOrders, StanceService, PurchaseService,            │
+│       RouteEditor, RouteRibbonMesh, GameApi, RtsInput            │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Справочники вне мода: `decompiled/` — декомпилированный код игры (сверяться с API),
+`GroundControlRts/` — бета Ground Control 0.9.9.4, **только референс, код не копировать** (лицензия).
+
+---
+
+## 2. Каталог модулей
+
+| Путь | Класс | Ответственность | Природа |
+|---|---|---|---|
+| `SupremeNuclearPlugin.cs` | `SupremeNuclearPlugin` | Точка входа: лог, конфиг, SelfCheck, Harmony, `sceneLoaded`-хук, добавление компонентов | MonoBehaviour (BepInEx) |
+| `PluginInfo.cs` | `PluginInfo` | Guid/Name/Version — версия меняется здесь | константы |
+| `Core/Log.cs` | `Log` | Обёртка над BepInEx `ManualLogSource` | static |
+| `Core/Settings.cs` | `Settings` | Все настройки + `Bind(ConfigFile)`; значения по умолчанию и Bind-имена — только здесь | static |
+| `Core/Loc.cs` | `Loc` | Локализация (gettext: русская строка в коде = ключ): `Tr/F/Plural` — чистое ядро (тестируется), `Bootstrap` грузит `BepInEx/plugins/SupremeNuclear/Locales/*.json` (en — фолбэк, ru — идентичность без таблицы); язык — настройка `General.Language` (auto = язык системы), читается ДО `Bind` (`BindLanguage`); состояние конфигурационное — sceneLoaded не трогает | static |
+| `Core/GameApi.cs` | `GameApi` | Тонкие обёртки игрового API: границы карты, лучи в землю, `GroundY` (покадровый кэш-словарь ячеек 0.125 м — отрисовка маршрутов спрашивает его сотнями раз за кадр, а это физлуч с 9 км; v0.91.1 — лаги при большом числе вейпоинтов), HQ, размеры юнитов, монитор сдвигов origin, гейт видимости контактов (`TryGetContact`/`IsInspectableForeign`: ракеты — всегда, чужие — по свежести трека `StaleContactSec`); кэш `MapSettings` сбрасывается по сцене | static |
+| `Core/SelfCheck.cs` | `SelfCheck` | Проверки предположений об API игры (стартовые + активационные); провалы показываются панелью в HUD | static |
+| `Core/CommanderAudio.cs` | `CommanderAudio` | Гашение эффекта Доплера в режиме командира: `AudioSource.dopplerLevel` → 0 у активных источников сцены (`Suppress` на входе, `Restore` на выходе, дочист в `Tick` 2 Гц ловит новые источники; исходные значения хранятся и возвращаются, мёртвые прунятся) | static |
+| `Input/RtsInput.cs` | `RtsInput` | Весь пользовательский ввод: `Input.*` + защита от чата (`Typing`) + `PointerOverUi` + `WheelConsumedByUi` (одноразовый флаг кадра: колесо крутит лодаут над плиткой каталога — зум камеры подавлен); НЕ Rewired | static |
+| `CameraRts/CommanderCameraState.cs` | `CommanderCameraState` | Стратегическая камера: `CameraBaseState` без патчей; СКМ-драг (пининг якоря по горизонтальной плоскости через точку захвата — математически точная 1:1-петля без разрывов рельефа/крыш; поправка горизонтальная, в текущий и целевой фокус), зум-к-курсору, edge-scroll; наклон в покое — ТОЛЬКО кривая зума `Util.ZoomCurvePitch` (S-переход: у поверхности круто в землю → из космоса вид сверху, горизонта не видно); Space (зажать) — осмотр мышью вокруг точки (ручной угол в `_manualPitch` подмешивается через `_manualEase`), при отпускании yaw возвращается, наклон — к кривой; фокус хранится в `GlobalPosition` | класс (тикается игрой) |
+| `CommanderModeController.cs` | `CommanderModeController` | Вкл/выкл режима командира (F10) и **единственный** тик-оркестратор (см. §3) | MonoBehaviour |
+| `Selection/SelectionService.cs` | `SelectionService` | Клик/рамка/двойной клик по типу, группы управления 1–9; клик по АНГАРУ = сам ангар (индивидуальная фабрия, v0.88), даблклик по ангару = ВСЕ ангары аэродрома (группа под пакетный заказ), клик по НЕ-ангару аэродрома (вышка) = панель аэропорта; ЛКМ по ВИДИМОМУ чужому юниту/ракете — осмотр (`Inspected`: луч по телу → пик по иконке контакта, гейт как у вражеских иконок); рамка — КАСКАД: без Shift при наличии боевых (вооружённые мобильные) берёт только их, иначе всех движущихся (здания — только кликом); Shift-рамка добавляет всё в порядке инженеры → логистика → оборонительные здания → производящие → боевые (CategoryOf: «вооружённость» = GetMaxRange ≥ 1) | instance (внутри контроллера) + static `Groups` |
+| `Orders/OrderModes.cs` | `OrderModes` | Текущий «заряженный» приказ `Pending` + подписи | static |
+| `Orders/MoveOrderService.cs` | `MoveOrderService` | Точка выдачи всех приказов по ПКМ: пики врага (радиус притягивания `EnemyPickRadiusPx`, ракеты — ×2.5 и пикаются как цели перехвата), снап, формации, маркеры, отмена; «Атака веером» (R: ПКМ по врагам копит `FanTargets`, ПКМ по земле — раздача группы по целям `Util.AssignBalanced`: ближайшая цель с балансом N/M) и Disperse Move (Alt+Shift+R: очередь групповых вейпоинтов распределяется — юнит i получает группу i mod G, у каждого остаётся одна точка-прямой вектор; `GroundOrders/AircraftOrders.DisperseKeep`); СОПРОВОЖДЕНИЕ/АССИСТ (v0.97): ПКМ по СОЮЗНОМУ мобильному юниту в дефолтном режиме «Движение» — `TryPickFriendlyAt` (зеркало пика врага, свои видны всегда) → `TryIssueEscortOrders`: наземка/флот — веер секторов `FanBearingOffset` вокруг цели (`GroundOrders.SetEscort`), инженеры — `ClearFor` + SetEscort (новая связь = новая очередь), авиация — `SetEscort`/`EnqueueEscort` (Shift дописывает эскорт-сегмент в план; наземке Shift не кладёт связь в очередь — Notice, долг §12-36); цель из выделения исключается (сам себя не сопровождает) | instance (внутри контроллера) |
+| `Orders/GroundOrders.cs` | `GroundOrders` | Цепочки вейпоинтов наземки/флота поверх `UnitCommand.SetDestination`; выдаёт следующую точку при прибытии (90 м). Виды цепочек: Move / AttackMove (stop-and-fire: цель в дальности ПРИГОДНОГО по цели оружия (`CalcOpportunityThreat`, даталинк) → стоп, нативный огонь турелей → продолжение; корабли НЕ останавливаются — дерутся на ходу, «стоп» кораблю = циркуляция) / Attack (преследование: подход на `min(0.9×текущей, 0.8×дальности пригодного оружия)` — НИКОГДА не дальше текущей позиции (приказ «назад» уводил корабли от берега); групповой клик назначает каждому свой АЗИМУТ-СЕКТОР полукруга — `Chain.ApproachBearing` (мир-фикс. угол, держится при движении цели; NaN — живой азимут юнит→цель у одиночных/дозревших), раздача: `MoveOrderService.IssueAttackOrders` сортирует атакующих по азимутам и веерит `FanBearingOffset(i, N, FormationSpacing, PursueRange)` — маршруты не пересекаются, дальнобойные встают внешним кольцом; ракеты кончились → дальность пересчитывается и юнит сам подтягивается внутрь) / Patrol (v0.95: ЦИКЛ — последняя точка замыкается на первую; ноги как атака-движение; `SetPatrol`/`EnqueuePatrol` (Shift — дописать точку в цикл), снимок/возврат `TryGetPatrolSnapshot`/`RestorePatrol` — патруль-ассист стройки снимает цикл на время достройки, ПКМ по вейпоинту маршрута — `ConvertToPatrol`). Shift-смешанные очереди (v0.73.0) исполняются В ПОРЯДКЕ КЛИКОВ (точка → цель → точка), как планы авиации: каждая цель очереди (`TargetQueue`+`TargetAfter`) несёт позицию серии — сколько точек стояло в очереди на момент клика; дозревшая цель поднимается `PromoteDue` (как только точки до её позиции пройдены), после смерти цели — следующая дозревшая (серия) или продолжение маршрута с точки промоушена (`ResumeKind`). Производной точки подхода в Points НЕТ — очередь реальных точек на время атаки сохраняется и редактируется (`DrawStartIndex`=Index). Отрисовка смешанной очереди (v0.73.2) — ЕДИНАЯ лента В ПОРЯДКЕ КЛИКОВ: цели — узлы очереди на своей позиции серии (`TargetAfterOf`), лента течёт ЧЕРЕЗ цель (как планы авиации/SupCom); нога до цели и от неё — по одному разу на цель (`DrawnGroundTargets`/`DrawnTargetExits`, CommanderHud.DrawGroundChain), текущая погоня — яркая с пульсирующим крестом, ждущие — приглушённые со статичным; патруль — бирюзовая лента с ЗАМЫКАЮЩЕЙ ногой (последняя точка → первая, групповые магистрали дедуплицированы тем же PairKey; меш-режим — сабмеш 2, как у авиации) / Escort (v0.97: СОПРОВОЖДЕНИЕ — вейпоинт привязан к союзному юниту; `Chain.EscortTarget` отдельно от Target атак; `SetEscort`/снапшот `TryGetEscortSnapshot`/`RestoreEscort` для эскорт-ассиста, `CollectEscorts`/`CancelEscortOf` — отрисовка/скан/отмена; тик `TickEscort`: ДОГНАЛ цель (≤2.5×Standoff) → stop-and-fire защита (`NearestEngageableEnemy`, корабли дерутся на ходу) — не отстаём из-за боя; цель погибла → цепочка завершена; EnqueueAttack поверх эскорта — промоушен с `ResumeKind`=Escort и ВОЗВРАТОМ к живой цели; IsIdle=false всегда — из зоны стройки эскорт не выпихивают; v0.98 — ДВИЖЕНИЕ ПЛАВНО ПО СЛЕДУ ЦЕЛИ: якорь скользит по Catmull-Rom-сплайну breadcrumbs траектории цели (реестр `EscortTrails`: шаг `EscortTrailSampleM`=25 м, длина `EscortTrailLengthM`=600 м, GlobalPosition, чистка в Prune; `Util.TrailPointAt` — точка на дуге позади живой позиции цели + курс следа, чистая+тесты) — колонна идёт по траектории цели без рывков между перевыдачами; сектор веера переводится в систему следа (продольно 0.25..1×Standoff позади + боковое смещение перпендикуляром курсу); перевыдача >15 м; деградация в кольцо вокруг текущей позиции цели: следа нет/короче дуги, цель стоит >2 с (`EscortSettleSec`, охрана собирается вокруг), эскорт далеко — догоняет прямым вектором). `IsIdle` — «нет непройденных точек и целей» (патруль всегда занят: цикл не кончается; пуш из зоны стройки его не рвёт — патрульных не выпихиваем, долг §12-35). Каждая точка несёт groupId клика (0 — индивидуальный приказ): групповой вейпоинт — свойство ТОЧКИ, не выделения (маркер/лента/драг/удаление — на всю группу приказа) | static |
+| `Orders/RouteEditor.cs` | `RouteEditor` | Drag-редактирование вейпоинтов (ЛКМ по точке), снап постановки к юнитам; групповой драг — по groupId у ВСЕХ членов группы приказа (индексы точки у каждого свои), индивидуальная точка — только владелец. Захваченный вейпоинт хранится как `WaypointHit` (вид = `WaypointKind`, без перекодировок): поиск — `WaypointScanner.Scan`, одиночная запись — `WaypointOps.Move`, буферы групп — `CollectGroup`-примитивы сервисов | static |
+| `Orders/RouteRibbonMesh.cs` | `RouteRibbonMesh` | Меш-ленты маршрутов через `Graphics.DrawMesh` (эксперимент, по умолчанию ВЫКЛ — `RouteUseMesh=false`; углы скруглены `Util.RoundChainCorners` как в IMGUI-ленте); 6 сабмешей-цветов (…5 — сопровождение, v0.97; заодно починен Render: подавались только 4 из 5 — залп-лента не рисовалась) | static |
+| `Orders/WaypointScanner.cs` | `WaypointScanner` | ЕДИНЫЙ скан вейпоинтов под курсором (захват драга + удаление + конвертация в патруль; приоритет: площадки → движения очередей → цепочки → планы → связи сопровождения v0.97); площадка сканится и маркером, и ТЕЛОМ 3D-призрака (`BuildGhosts.ScreenContains`) под одним фильтром «свои»; авиаточки сканятся на ЗЕМЛЕ, где рисуется маркер (y=GroundY), а не с AGL-высотой; групповая точка пикается в ЦЕНТРОИДЕ формации (где маркер; v0.91.3 — решётка формации авиации 240 м делала маркеры недостижимыми для удаления/драга), якорь группового драга — тоже центроид; служебные точки не отдаются (`AircraftOrders.IsServicePoint`), служебная голова цепочки инженера пропускается (`BuildTasks.ChainIsIssuedHead`); связи сопровождения (EscortLink) пикаются на ЦЕЛИ (там же, где зелёный маркер; наземка+авиация одним проходом с дедубом целей); единый пик-радиус `PickPx` для всех операций — настройка `Orders → WaypointPickPx` (по умолчанию 24 px, меняет захват/удаление/конвертацию и hover-подсветку разом) | static |
+| `Orders/WaypointOps.cs` | `WaypointOps` | Фасад операций над вейпоинтами (консолидация v0.89): диспетчеризация по `WaypointKind` в одном месте на операцию — `DeleteAt` (Ctrl+Shift+ПКМ: одиночное удаление + групповой фан-аут по `CollectGroup`→`RemoveByGroupId`; EscortLink → `GroundOrders.CancelEscortOf`+`AircraftOrders.CancelEscortOf` — снять сопровождение цели у ВСЕХ эскортировщиков), `ConvertToPatrolAt` (ПКМ по вейпоинту: сегмент плана борта → патрульный цикл, маршрут наземки/флота ≥2 точки → цикл, v0.95), `Move` (одиночный драг, guard «начатая площадка не двигается»). Новый вид вейпоинта = `WaypointKind` в сканере + ветки здесь | static |
+| `Core/Util.cs` | `Util` | Чистые функции (серии `Runs` для стаков плиток; `GroupPrefixCentroids` — слияние групповых маршрутов; `RoundChainCorners` — скругление углов лент Безье-дугами) — тестируются | static |
+| `UiRts/Catalog.cs` | `Catalog` | Чистая логика плиток каталога: тир-фильтр (терцили по цене), короткие подписи (`code`/имя), бейджи типов наземки (VehicleType→ТНК/ЗРК/…), роль авиации из roleIdentity (И/У/М/ТР/РЛС), сводка вооружения группы (`WeaponTallyAccumulator` + домен-теги АА/АЗ/У/ПР/РЕБ/Я, `Util.RuPlural`), форматтеры SupCom-карточки определения (`FormatTipClass/Stats/WeaponRow`) — тестируется | static |
+| `Aviation/AircraftOrders.cs` | `AircraftOrders` | Планы полётов: сегменты (Transit/AttackMove/Patrol/Attack/Rtb/Escort v0.97), профили высот (AGL + огибание) с тогглом «вдоль рельефа» (`TerrainHug`: Profile/Always/Never поверх дефолта профиля, Alt+T, v0.94.0; вертолётам руление огибает всегда), продвижение по маршруту — радиус зачёта вейпоинта от скорости борта (`WaypointReachRadius`: ~4 с полёта, кламп 120–900 м, v0.96.0 — единые 900 м накрывали весь малый цикл вертолёта и он зависал на одной точке; патрульный курсор — `NextPatrolIndex`, россыпь целиком в радиусе → следующая цель самая дальняя точка); Attack — миссия вылета (цель + якорь подлёта, бой отдаётся нативному AI когда цель в зоне боя); Escort (v0.97) — СОЮЗНАЯ цель (`SetEscort`/`EnqueueEscort`, сегмент жив пока цель жива; якорь-точка служебная `IsServicePoint`; руление — точка = позиция цели + сектор веера `EscortBearing` на `EscortAirDistM`, вблизи — орбита как у атак; враг в дальности вооружения — нативный бой (патчи №1/№4 гейтят `EnemyNearby(EngageRadius)`, борт не уводит за собой дальше выстрела)); Rtb — вставляет/снимает SortieService (`ReturnToBase` G — терминальная замена плана, `EnqueueRtb` Shift+G v0.98 — RTB в хвост очереди, дубликат в хвосте — noop); точки несут groupId приказа — групповой драг/удаление по нему (планы бортов асинхронны, индексы сегментов/точек у каждого свои; стартовая точка — группа 0, индивидуальная) | static |
+| `Aviation/AircraftSteeringPatch.cs` | `AircraftSteeringPatch` | Harmony-Prefix руления борта с приказом (§6.1) | Harmony |
+| `Aviation/HeloSteeringPatch.cs` | `HeloSteeringPatch` | Harmony-Prefix руления вертолёта/тильтвинга с приказом (§6.4): тот же план (`AircraftOrders`), но вертолётная перегрузка `AutoAim(dest, AGL, …)` c followTerrain=true ВСЕГДА (v0.93.0 — фикс двойного вычитания высоты) | Harmony |
+| `Aviation/AircraftTargetPinPatch.cs` | `AircraftTargetPinPatch`, `HeloTargetPinPatch` | Harmony-Postfix пиннинга цели приказа и конуса атаки-движения — самолёты (§6.3) и вертолёты (§6.5), общее ядро выбора/вето | Harmony |
+| `Aviation/AnyNearAirbasePatch.cs` | `AnyNearAirbasePatch` | Harmony-Postfix выбора аэродрома (§6.7): среди накрывающих радиусом — ближайший К ПОЛОСЕ, а не первый из списка (борта из ангаров нашей ВПП уезжали к соседнему нативному аэропорту, v0.96.1) | Harmony |
+| `Aviation/SortieService.cs` | `SortieService` | Миссии вылетов (host): RTB при «сухих» станциях/низком топливе, передача нативной посадке у аэродрома (самолёты — `AILandingState`, вертолёты — вертикальная `AIHeloLandingState`), аэродромный сервис (перевооружение/заправка за деньги, интерим до логистики), возобновление вылета после взлёта; ТЕРМИНАЛЬНЫЙ RTB (команда «на базу», план [Rtb] без продолжения): самолёт паркуется на такси на время сервиса, вертолёт — нативно, после сервиса — ДЕСПАВН в резерв ангара (`AirbaseReserve`); `Launch()` — выкат из паркинга по новому приказу (самолёты — такси, вертолёты — вертикальный взлёт) | static |
+| `Aviation/AirbaseReserve.cs` | `AirbaseReserve` | Резерв ангаров аэродромов: вернувшиеся «на базу» борты после сервиса (деспавн) — невидимый инвентарь базы (тип × N, `Version` для кэша панели); выкат — `PurchaseService.DeployReserve` (нативный спавн из ангара, бесплатно, только со своего аэродрома); резерв теряется вместе с базой при захвате | static |
+| `Economy/EconomyService.cs` | `EconomyService` | Экономика v1 (host-only): спавн экстракторов на месторождениях, нативный захват, тиковый доход, апгрейд тиров | static |
+| `Economy/EconomyProfile.cs` | `EconomyProfile` | Баланс экономики из JSON + автосоздание образца | данные |
+| `Units/PurchaseService.cs` | `PurchaseService` | Покупки за `factionFunds`: техника через депо, авиация через аэродром (host-only) | static |
+| `Units/StanceService.cs` | `StanceService` | Стойка «не открывать огонь» (hold-fire) | static |
+| `Units/TurretHoldFirePatch.cs` | `TurretHoldFirePatch` | Harmony-Prefix hold-fire (§6.2) | Harmony |
+| `Tasks/BuildTasks.cs` | `BuildTasks` | Task-API v1: задачи постройки зданий (хост) — потоковая оплата, инженеры, спавн по готовности с поворотом и наклоном (`YawDeg` — удержание ЛКМ вращение; `PitchDeg`/`RollDeg` — наклон депо под рельеф `TerrainTilt`→`Util.FootprintTilt`, сэмплы 4 углов футпринта `GroundYNoUnits`, кламп `BuildTerrainTiltMaxDeg` (v0.95, 0=плоско); ангар наклона не имеет — стоит на плоском апроне `Pad`, верфь — на платформе у моря), серия — одному инженеру (`distribute`); режимы установки `Pending`/`PendingRunway`/`PendingDock` (§14); `IsProducingDefinition` — «производящее» (Hangar ИЛИ VehicleDepot на префабе): стрелка выхода/обратная связь вращения; ВЕРФЬ-задача (v0.92): площадка на воде (глубина ≥ DockMinDepthM, сайт на ур. моря), по готовности `TaxiSurface.WaterPad`-платформа + корпус-депо (`SpawnDock`, реестр `Docks`/`IsDock` — панели видят ФЛОТ, не технику); ангары — к своему аэродрому в радиусе + дорисовка рулёжки (`ConnectTaxiway`), привязка нативным `Spawner.SpawnBuilding(..., airbase, ...)`; ВПП-задача → `SpawnCustomAirbase` = новый аэродром (§14, этапы 2–3); ЭСКОРТ-АССИСТ (v0.97): инженер в сопровождении (`GroundOrders.KindOf`=Escort) вливается в стройку СВОЕЙ цели — задача = голова очереди цели (`TickEscortAssist`, host, троттл 0.5 с), связь снимается (снимок `TryGetEscortSnapshot`), по готовности/сносу — `RestoreEscort`; явный приказ (ClearFor) — без возврата; чужие недострои не трогаются (в отличие от патруль-ассиста) | static |
+| `Tasks/ProductionTasks.cs` | `ProductionTasks` | Очереди производства ИНДИВИДУАЛЬНЫХ фабрик (депо + ангар + ВЕРФЬ, v0.92): корабли — `EnqueueShip` (каталог `Encyclopedia.ships`, темп `NavalProductionSecondsPerItem`), спуск `NavalDock.TryLaunch`, ралли — по ссылке спавна (`DispatchShipByRally`); по одному потоку оплаты на фабрику (параллельность = число ангаров с заказами), спавн `hangar.TrySpawnAircraft` (полный оверлоад: лодаут позиции + топливо), `CanBuild(hangar, def)`-гейт, `EnqueueAirDistributed` — заказ с панели аэропорта/шаблонов «в самый свободный способный ангар»; пауза/цикл/ралли пер-фабрика, правка стаков плиток (`InsertAfter`/`RemoveTail` с возвратом); ЛОДАУТЫ заказов (v0.88–v0.90): липкий выбор пресета колесом (`CycleLoadout`/`SelectedLoadout`), «Свой» лодаут из редактора ОСНАЩЕНИЕ (`BeginEdit`/`SetStationMount`/`SetCustomFuel` — последний в цикле), легальность `LoadoutAllowed` (AllowedByHQ + WeaponChecker по аэродрому), варианты станций `MountOptionsFor` с взаимоисключениями (`StationConflicts`), хардпоинт-кэш `HardpointSetsOf` (WeaponManager на детёныше префаба), позиция запекает лодаут при постановке | static |
+| `Tasks/BuildGhosts.cs` | `BuildGhosts` | 3D-призраки площадок ПО МОДЕЛИ GC: меши префаба через `Graphics.DrawMesh` (без GameObject) + встроенный `Hidden/Internal-Colored` (полупрозрачный силуэт); тинты стройка/валидно/занято; подача из `Render()` в Update; поворот выходом (удержание ЛКМ) + жёлтая стрелка выхода ВСЕХ производящих (v0.95: ангар — `Hangar.GetSpawnTransform`, депо/корпус верфи — рефлексия приватного `VehicleDepot.spawnTransform` с кэшем FieldInfo, фолбэк — синтетический габарит +Z; стрелка лежит на поверхности max(земля, море)); призрак депо наклоняется под рельеф живьём (`BuildTasks.TerrainTilt` — тот же расчёт, что зафиксирует Place); призрак верфи (режим `PendingDock` и задача) — на уровне палубы (море, не дно: GroundY под водой даёт дно), пик тела верфи — тоже от палубы | static |
+| `Tasks/TaxiSurface.cs` | `TaxiSurface` | ПОВЕРХНОСТЬ дорисованных рулёжек/ВПП/апронов: ОДИН непрерывный MeshCollider-лента на кусок, шаг сэмплов 15 м — без швов (на стыках BoxCollider шасси ломалось); ВЫРАВНИВАНИЕ (v0.88, v0.91.3): `graded` — терраса = НАИМЕНЬШИЙ профиль НАД рельефом с уклоном ≤12% (max конусов `h[i]=max_j(terrain[j]+Lift−|i−j|·уклон)`, сэмпл сечения = max(ось,обе кромки); минимум/мин-кламп врезали полотно в дюны — скрин v0.91.2) + ЮБКИ-насыпи (кромка полотна опускается до рельефа); СТЫКОВКА (v0.92.0, v0.98.1): рулёжка ангара стартует С КРОМКИ апрона со `startY`-штифтом высоты `Pad`-полотна (сход с плиты — пандус ≤ MaxGrade, не обрыв юбки); грейдированная лента на КАЖДОЙ станции прижимается к высоте построенных лент (`TopAt` по всем трём сэмплам сечения — перекрытие с ВПП/другой рулёжкой никогда не ложится ниже, стык заподлицо по всей зоне; апроны `TopAt` не видит — им нужен явный штифт); рулёжки ангаров — всегда `graded`, заход на торец ВПП — КОЛЕНОМ перпендикулярно оси (`BuildTasks.TryKneePoint`, вылет `TaxiKneeM`=90 м на стороне ангара; дорога и полотно — одна полилиния, борт едет по точкам дороги между узлами); апрон `Pad` — плоский на MAX площадки, ВОЗВРАЩАЕТ высоту (ангар спавнится на полотне); слой Statics, материала нет = тармак для шасси; визуал — тот же меш DrawMesh + разметка + превью | static |
+| `Core/OrderTemplates.cs` | `OrderTemplates` | Персистентные шаблоны заказов (JSON в plugins/SupremeNuclear/Templates.json): снимок очереди фабрики → повторная постановка | static |
+| `Tasks/NavalDock.cs` | `NavalDock` | Спуск кораблей с верфи: кольцевой поиск воды от платформы (`Util.RingPoints`: ближние кольца раньше) + валидация (луч глубины под килем, 8 углов габарита против мели, `Physics.CheckBox` статики+корабли) + нативный `Spawner.SpawnShip`; нет воды — позиция очереди ждёт и повторяет (как занятый ангар). Хост-only | static |
+| `Units/EngineerFloat.cs` | `EngineerFloat` (MonoBehaviour, FixedUpdate) | Плавучий инженер (v0.92): игра топит наземку под водой (`underwater → Networkdisabled`), поэтому PD-пружина держит корпус на клиренсе `EngineerFloatHeightM` над морем + горизонтальная тяга к головной точке `GroundOrders` с потолком `EngineerWaterSpeed` (колёса сцепления в воде не дают); тяга включается УЖЕ НА СУШЕ, если головная точка приказа в воде (нативный водитель сам в воду не заводит — плейтест v0.92: «не заезжает»), и стаскивает машину с кромки; пружина/выравнивание — только ниже клиренса; вход/выход из плав-контура — в лог (диагностика). Хост-only | instance |
+| `Ui/CommanderHud.cs` | `CommanderHud` | IMGUI-оверлей: иконки, кольца/скобки выделения, красные скобки осмотра чужой цели, HP-полоски повреждённых, маршруты, маркеры приказов, notices, SelfCheck-панель, F11-debug | MonoBehaviour (OnGUI) |
+| `Ui/RangeRings.cs` | `RangeRings` | Кольца дальности выделенных юнитов (SupCom): атака-АС красное / атака-АА синее (макс. дальность РАЗРЕШЁННЫХ гейтом станций своего домена целей — effectiveness.antiSurface/antiAir > 0, порог домена как у MapToolTip игры) / разведка белое (радар+визуал детекторов юнита) / стройка охра (`BuildSiteRadiusM` инженеров); торпедных (зелёных) нет. РЕЖИМ «ОРУЖИЕ» (RangeRings.Weapons, чип под миникартой, v0.77): ВМЕСТО доменных колец атаки — кольца по КЛАССАМ вооружения (Пушки жёлтое / Рак.ВВ синее / Рак.АС красное / Бомбы+ЯЗ фиолетовое; `Catalog.ClassOf`, тоже только разрешённые гейтами станции) — визуализация гейтов: выключил класс — его кольцо исчезло. РЕНДЕР v0.79 — как в SupCom: НЕ текстура, а ВЕКТОРНАЯ ПОЛИЛИНИЯ в мире (ломаная 24..160 сегментов по ЭКРАНУ — хорда ~12 px; v0.91 убрал «шаг рельефа» из тесселяции: когда 12 px грубее ячейки кэша (общий план), детали рельефа между вершинами субпиксельны, а max(.., 2πR/CellM) держал 160 сегментов у больших колец — ×3 нагрузки на большую пачку; вблизи ломаная видна, честно как в SupCom), вершины проектируются в экран КАЖДЫЙ Repaint из живых позиций юнитов (идеальная прибитость к миру), рисуются ОДНИМ батчем GL.LINES (материал Internal-Colored как у силуэтов, пиксельная матрица GUI y-вниз, линия ~2 px двойным рядом вершин); «СКОЛЬЖЕНИЕ ПО ПОВЕРХНОСТИ» v0.81: вершины лежат на высоте ПОВЕРХНОСТИ (суша/вода) — кэш ячеек 40 м (`CellKey`/`Bilinear`, чистые, +2 теста), снятие ЛЕНИВОЕ бюджетом 400 физлучей/тик по периметрам колец БЛОКАМИ 3×3 ячейки (v0.89.1: одной полосы ячеек мало — билинейной вершине нужен квадрат 2×2 ПО ОБЕ СТОРОНЫ линии кольца, недостающие ячейки проваливали кольцо под землю; колонна движется — полоса набегает; кэш чистится по sceneLoaded); высота при ЗАПИСИ клампится морем (физлуч над водой бьёт в дно — поверхность = max(земля, море)); БАЗА ПЛОСКОСТИ v0.82 — уровень моря (`Datum.LocalSeaY`, не высота под юнитом: неснятый рельеф не подвешивает кольцо в воздухе; заодно сбор колец перестал рейкастить под каждым юнитом); ГИБРИД v0.90–v0.91: ПРОФИЛИ высот вершин для ВСЕХ колец (живут ПО ЮНИТУ, переживают пересборки списков; массивы из пула) — ВБЛИЗИ камеры (`RangeRings.ExactTerrainDist`, по умолчанию 4 км, 0=выкл) ТОЧНЫЕ высоты прямыми рейкастами по мешу (без сглаживания, как SupCom; пересъём ТОЛЬКО сдвинувшихся >2 м/изменившихся колец, атомарно, бюджет 600 лучей/тик — стоящая техника не жжёт лучи), ДАЛЬШЕ — билинейно из ячеистого кэша прямо на тике (без физики, обновляясь по `_heightsVersion` — ячейки под кольцом доснялись); ОТРИСОВКА читает только массивы профилей — словарь высот и физика в кадре не трогаются (v0.91: на большой пачке это были десятки тысяч словарных lookup'ов в кадр); профиль валиден при совпадении segs (зум сменился → тик кэша/профилей → снова); сегменты за камерой пропускаются, из-под окна миникарты вырезаются `ClipOutRect` (Liang-Barsky дополнение, чистая, +5 тестов); ОБЪЕДИНЕНИЕ v0.80: сегмент скрыт, если его точка НА ДУГЕ (середина хорды, вытянутая до радиуса) лежит строго ВНУТРИ чужого круга ТОГО ЖЕ класса (`ArcInsideOther` по снимку живых центров Snap*) — внутренние дуги пересечений не рисуются, виден только внешний контур «пятна»; строгое «<» — совпадающие кольца рисуют общий контур, вложенное гаснет. Сброс выделения/выключение режима СТИРАЕТ кольца (ClearAll в ранних выходах Tick). Заливки НЕТ (v0.72–0.78: CPU-маска с заливкой — мягко, лагало на заливке, удалена вместе с UnionBand/RasterDiscInto/ComposePixel/RangeRings.Fill/Resolution). Сбор кругов (станции/сенсоры) — 10 Гц из `CommanderHud.Update`, отрисовка каждый OnGUI (Repaint) | static |
+| `UiRts/SupcomUi.cs` | `SupcomUi` | uGUI-панели (SupCom-раскладка): экономика (лево-верх), свойства выделения + карточка осмотра чужой цели/ракеты + командная карта (лево-низ), панель-табы Производство/Список/Апгрейд (центр+право-низ); нижние панели открывает контекст выделения (выделение/аэродром/осмотр/недострой/режим стройки), но ЧИСТЫЙ осмотр (клик по врагу/ракете при пустом выделении) открывает только карточку свойств — командная карта и лента каталога скрыты (v0.89.1); плитки 48×48 (`Tile`/`TileSpec`: иконка — авиация силуэтом `mapIcon`, подпись `code`, бейдж типа, ×N/цена, прогресс) и наведение на плитку закупки: панель свойств переключается на карточку определения + окно «ОПИСАНИЕ» (опрос в Update, без uGUI-событий) | MonoBehaviour (uGUI) |
+| `UiRts/UiKit.cs` | `UiKit`, `FloatingWindow` | Строительные блоки uGUI: плавающее окно (drag/ресайз/закрытие/вкладка восстановления), скролл-список, прогресс-бар | static + MonoBehaviour |
+| `UiRts/MinimapPanel.cs` | `MinimapPanel` | Плавающая миникарта: фон `MapSettings.MapImage` (RawImage+uvRect) либо рельеф (высоты+горизонтали по сетке GroundY), иконки юнитов с развед-гейтом (спрайты как в IMGUI, растут с зумом, 10 Гц), ромбы аэродромов/месторождений, рамка обзора камеры (кламп в границы карты), зум колесом «в курсор»; ЛКМ — прыжок, ПКМ — приказ | MonoBehaviour (uGUI) |
+
+---
+
+## 3. Поток исполнения — кто когда тикает
+
+### 3.1 Точка входа
+
+`SupremeNuclearPlugin.Awake` (один раз при загрузке):
+`Log.Init` → `Loc.Bootstrap(Settings.BindLanguage(Config))` (язык и таблицы локалей — ДО
+основного `Bind`, описания настроек проходят через `Loc.Tr`) → `Settings.Bind` →
+`ModEnabled`? → `SelfCheck.RunStartup` → `_harmony.PatchAll()` →
+подписка на `sceneLoaded` → `AddComponent` × 3 (контроллер, CommanderHud, SupcomUi).
+
+`sceneLoaded` (каждая смена сцены) — полный сброс статического состояния:
+`GameApi.ResetSceneCache()`, `EconomyService.Reset()`, `BuildTasks.Reset()`,
+`BuildGhosts.Reset()`, `ProductionTasks.Reset()`, `AircraftOrders.Reset()`,
+`GroundOrders.Reset()`, `StanceService.Reset()`, `WeaponGateService.Reset()`,
+`DefenseService.Reset()`, `SalvoService.Reset()`, `AirbaseReserve.Reset()`,
+`SelectionService.ResetGroups()`, `RangeRings.Reset()`, `RouteRibbonMesh.Destroy()`,
+`CommanderAudio.Restore()` (страховка доплера при выходе без Deactivate),
+`OrderModes.Pending = None`. Новое статическое состояние
+добавляй сюда же (инвариант №11).
+
+### 3.2 `CommanderModeController.Update` — единственный оркестратор (порядок важен!)
+
+```
+если НЕ InMission            → Deactivate(silent) и return
+TickOriginShiftMonitor()     — всегда в миссии (диагностика F11)
+EconomyService.Tick()        — всегда в миссии (host: старт/доход)
+SortieService.Tick()         — всегда в миссии (host: миссии вылетов — RTB/сервис/повтор)
+SalvoService.Tick()          — всегда в миссии (host: залп-приказы — пуск ракетных станций)
+WeaponGateService.Tick()     — всегда в миссии (host: LastFiredTime-блок выключенных гейтом станций)
+RouteRibbonMesh.Tick()+Render() — всегда в миссии
+F10                          → Activate()/Deactivate()
+если НЕ IsActive             → return
+камера сменилась не нами      → Deactivate(silent) и return   (вселенение в кабину и т.п.)
+CommanderAudio.Tick()         — дочист доплера (новые источники: взлёт/ракеты), 2 Гц
+RouteEditor.Tick(this)       ← СТРОГО ДО Selection: Consumed гасит выделение на кадр драга
+BuildGhosts.Render()         — подача силуэтов площадок ДО рендера (DrawMesh из OnGUI мерцает!)
+режим установки здания (BuildTasks.NewFrame/Pending: ЛКМ — площадка, удержание ЛКМ —
+                              поворот выходом к курсору, ПКМ/Esc — отмена;
+                              без Shift — новая очередь, с Shift — серия)
+режим призраков шаблона (OrderTemplates.PendingTemplate: ЛКМ строит набор, ПКМ/Esc)
+Selection.Tick()             — ЛКМ: клик/рамка (пропускает кадр при Consumed)
+MoveOrders.Tick()            — ПКМ: ВЫДАЧА ПРИКАЗОВ (только по событию!)
+GroundOrders.Tick()          — продвижение цепочек наземки; GroundOrders.Prune()
+AircraftOrders.Prune(); StanceService.Prune(); DefenseService.Prune(); SalvoService.Prune(); WeaponGateService.Prune()
+TickControlGroups()          — Ctrl+1..9 назначить, 1..9 вызвать (без модификаторов), дабл-тап = камера
+Alt+1..4                     — профиль высоты (штамп + ApplyModesToCurrent головному сегменту)
+Shift+1..3                   — скоростной режим (самолёты); Alt+T — цикл «вдоль рельефа»
+                             (Profile/Always/Never, самолёты); Alt+D — цикл авто-защиты
+H                            — hold-fire выделенных; X — ручной сброс ловушек
+M/A/U/T/V/R/S/Esc (при выделении) — заряд режима приказа / стоп (V — залп,
+                              R — «Атака веером»: ПКМ по врагам копит цели, ПКМ по земле — раздача)
+Alt+Shift+R                  — Disperse Move: очередь вейпоинтов группы → прямые векторы (i mod G)
+```
+
+### 3.3 Остальные пути исполнения (вне Update контроллера)
+
+| Что | Кто вызывает | Частота |
+|---|---|---|
+| `CommanderCameraState.UpdateState/FixedUpdateState` | игра, `CameraStateManager` (LateUpdate) | каждый кадр в режиме командира |
+| `AircraftSteeringPatch.Prefix` | игра, `AIPilotCombatModes.FixedUpdateState` | физический тик (~50 Гц) на каждый AI-самолёт |
+| `HeloSteeringPatch.Prefix` | игра, `AIHeloCombatState.FixedUpdateState` | физический тик (~50 Гц) на каждый AI-вертолёт/тильтвинг |
+| `AircraftTargetPinPatch.Postfix` | игра, `AIPilotCombatModes.AssessHQTargets` (On5sCheck пилота) | раз в 5 с на каждый AI-самолёт в боевом состоянии |
+| `HeloTargetPinPatch.Postfix` | игра, `AIHeloCombatState.AssessHQTargets` (On5sCheck пилота) | раз в 5 с на каждый AI-вертолёт в боевом состоянии |
+| `TurretHoldFirePatch.Prefix` | игра, `Turret.AssessTargetPriority` | по потребности игры |
+| `CommanderHud.OnGUI` | Unity | **2+ раза за кадр** (Layout/Repaint-события) |
+| `EngineerFloat.FixedUpdate` | Unity (phys) | каждый физический тик в миссии (скан пловцов 2 Гц; host-only; компонент из `SupremeNuclearPlugin.Awake`) |
+| `SupcomUi.Update` | Unity | каждый кадр, рефреш контента раз в 0.2 с |
+| `EconomyService.PayIncome` | внутренний таймер | раз в `tickSeconds` (5 c) |
+
+`Activate()`/`Deactivate()` контроллера и `EnterState`/`LeaveState` камеры строго парны —
+см. инвариант №9 (§7).
+
+---
+
+## 4. Владение состоянием
+
+Правило: **у каждого куска состояния один владелец**; чужое состояние меняем только через его API.
+Статическое состояние переживает смены сцен — проверяй очистку при добавлении нового.
+
+| Состояние | Природа | Пишут | Читают | Очистка |
+|---|---|---|---|---|
+| `SelectionService.Selected` (+`SelectedAirbase`) | instance | ClickSelect, BoxSelect, RecallGroup, SelectTypeStatic, Reset | все сервисы и оба UI | `Reset()` при входе/выходе; prune null/disabled в каждом `Tick()` |
+| `SelectionService.Inspected` | instance | ClickSelect (осмотр ЛКМ), RouteEditor (клик по площадке/мимо), Reset | SupcomUi (карточка осмотра), CommanderHud (скобки) | `Reset()`; в `Tick()` — цель погибла/ушла из разведки → null |
+| `SelectionService.Groups` | **static** | AssignGroup | RecallGroup (чистит null/disabled) | `ResetGroups()` по sceneLoaded |
+| `OrderModes.Pending` | static | хоткеи, кнопки UI, MoveOrderService | MoveOrderService, SupcomUi | сброс при пустом выделении и по sceneLoaded |
+| `AircraftOrders.Plans` | **static** | Set/Enqueue/SetPatrol/Attack/EnqueueAttack/Salvo/SalvoArea/EnqueueSalvoTarget/Cancel/ConvertToPatrol/SetPoint/ApplyModesToCurrent/DropHeadSegment/InsertHeadSegment/Forget (голову плана трогает SortieService — только через эти API; SalvoFired ставит SalvoService) | Step, TryGetDestination, TryGetPlan, CollectAll, AircraftTargetPinPatch, SalvoService, SortieService | `Prune()` (disabled); `Reset()` по sceneLoaded |
+| `AircraftOrders.ProfileIndex`/`SpeedIndex` | static | Alt+1..4/Shift+1..3, кнопки UI, SetProfile/SetSpeed (+`ApplyModesToCurrent`) | MakeSegment/MakeAttackSegment/MakeSalvoSegment/Enqueue(CanAppend) | — (осознанно живут: предпочтение игрока) |
+| `DefenseService.Modes`/`NextPopAt` | **static** | Cycle/Set (Alt+D, панель), PopNow (X) | steering-патчи №1/№4 (ShouldEvadeNative/TickFlares), панель | Prune (disabled); `Reset()` по sceneLoaded ✔ |
+| `SalvoService.Stations` (whitelist станций залпа) | **static** | ToggleStation (чипы панели) | SalvoService.Tick, панель (подсветка чипов) | Prune (disabled); `Reset()` по sceneLoaded ✔ |
+| `AircraftOrders.Version`, `GroundOrders.Version` | static, монотонные | любое изменение планов/цепочек/точек (все мутации — через API сервисов; SortieService — `DropHeadSegment`/`InsertHeadSegment`) | RouteRibbonMesh, кэши кривых | никогда (только рост) |
+| `GroundOrders.Chains` (Points+Kind+Target) | **static** | Set/Enqueue/SetAttack/SetQueuePoint/Clear (статус stop-and-fire — Tick) | Tick, TryGetQueue, CollectAll, KindOf/TargetOf (UI) | Prune/Clear (disabled); `Reset()` по sceneLoaded |
+| `StanceService.HoldFire` | **static** | Toggle | TurretHoldFirePatch, CountHolding | Prune (disabled); `Reset()` по sceneLoaded |
+| `WeaponGateService.Blocked` (маска выключенных классов оружия, DESIGN §2.11) | **static** | ToggleForSelection (кнопки-гейты) | патч №2 (турель), №3/№5 (гейт-перевыбор станции), `SalvoService.IsSalvoStation`, `WeaponGateService.Tick` (блок `LastFiredTime`), SupcomUi (кнопки/подсветка) | Prune (disabled); `Reset()` по sceneLoaded |
+| `AirbaseReserve.Reserve` (+`Version`) | **static** | Add (SortieService: деспавн терминального RTB), TryTake (DeployReserve) | панель аэродрома (SupcomUi, плитки «РЕЗ ×N»; `Version` в хэше контекста) | Prune (мёртвые базы); `Reset()` по sceneLoaded ✔ |
+| `ProductionTasks._loadoutIndex`/`_presets`/`_custom`/`_customFuel` (+`LoadoutsVersion`) | **static** | CycleLoadout (колесо), редактор ОСНАЩЕНИЕ (BeginEdit/SetStationMount/SetCustomFuel/SelectLoadoutIndex), UsablePresets/SelectedLoadout/LoadoutAllowed/MountOptionsFor | SupcomUi (карточка/бейдж/хэш каталога/окно ОСНАЩЕНИЕ), EnqueueAirSilent/DeployReserve (запечённый лодаут) | осознанно живут: предпочтение игрока (как ProfileIndex), ключи — immutable определения |
+| `BuildTasks.Docks` (реестр построенных верфей) | **static** | `SpawnDock` (завершение стройки верфи) | `BuildTasks.IsDock` (SupcomUi: панель ФЛОТ вместо техники; ProductionTasks: цикл-восстановление) | `Reset()` по sceneLoaded ✔ (в составе BuildTasks.Reset) |
+| `MoveOrderService.Markers` | instance | IssuePending | CommanderHud.DrawOrderMarkers | PruneMarkers (2.5 с) |
+| `MoveOrderService.LastDestinations` | instance | IssueFormationOrders, CancelAll | задел на будущее | PruneMarkers (disabled) |
+| `MoveOrderService.FanTargets` (цели «Атаки веером») | instance | ChargeFanAttack (R/кнопка, с очисткой), Tick (ПКМ по врагу в режиме — добавление), IssueFanAttack (очищает) | IssueFanAttack, CommanderHud.DrawFanTargets | заряд режима и выдача; мёртвые прунятся при выдаче/отрисовке |
+| `EconomyService.Extractors`/`_profile` | static | TryStart, TryUpgrade, PayIncome | TierOf/Income*/UI | `Reset()` по sceneLoaded ✔ |
+| `RouteRibbonMesh._meshes/_mats` | static | Rebuild/EnsureMaterials | Render | `Destroy()` по sceneLoaded (донор умершей сцены недействителен) |
+| `RangeRings` (кольца дальности: круги с юнитами/маска/текстура экрана) | **static** | Tick из CommanderHud.Update при выделении: сбор кругов 10 Гц + покадровая растеризация по dirty-детекту | Draw (CommanderHud) | `Reset()` по sceneLoaded (круги держат юнитов — чистим; текстура экранная живёт) |
+| `Settings.RangeRingAttack/Air/Vision/Build/Weapons` (+удержанные записи конфига) | static + ConfigEntry | `SetRangeRing`/`SetRangeWeapons` (чипы MinimapPanel) | RangeRings, MinimapPanel | конфиг (единственный тоггл, пишущий Value записи напрямую — см. долг №25) |
+| `SupcomUi._selectionHash/_contextHash` | instance | RefreshRoster/RefreshContext | — | EnsureUi при пересборке канваса |
+| `CommanderHud.Notices` | static List | `Notice()` | OnGUI | само по истечении времени |
+
+`RouteEditor.Consumed`/`IsDragging` — семафор «ЛКМ занят редактором» на текущий кадр,
+читается `SelectionService.Tick()` **после** `RouteEditor.Tick()`.
+
+---
+
+## 5. Контракты с Nuclear Option (API-поверхность)
+
+Всё, к чему мод прикасается в игре. Меняются патчами игры — проверять при обновлении (риск в DESIGN §6).
+Новые предположения об API сопровождаются проверкой в `SelfCheck`.
+
+**Юниты и приказы**
+- `UnitCommand.SetDestination(GlobalPosition, playerCommand: true)` — единственный способ движения
+  наземки/флота; сеть (host/client) решается игрой сама.
+- **Прямой маршрут наземки** (патч §6.6): `PathfindingAgent.Pathfind` — натив строит путь только
+  по графу шоссе (Дейкстра по `RoadNetwork`; напрямую — лишь когда прямая короче расстояния
+  цель→дорога). Своему `GroundVehicle` мод кладёт одну прямую точку `Shortcut` (нативный режим
+  `NoRoadNearTarget`); прямая через воду (сэмплы `RaycastTerrain` против `Datum.LocalSeaY`,
+  разбивка — `Util.SegmentSteps`) отдаётся нативу: мосты знает только дорожный граф. Авиация
+  на рулёжке (`Airbase.GetTaxiNetwork`) и флот идут через тот же агент — фильтр `is GroundVehicle`.
+- `Unit`: `NetworkHQ`, `NetworkunitName`, `definition`, `persistentID`, `maxRadius`, `disabled`,
+  `GetComponent<UnitCommand>()`; типы: `GroundVehicle`, `Ship`, `Aircraft`, `Building`, `VehicleDepot`, `Missile`.
+- `UnitDefinition`: `friendlyIcon`, `hostileIcon`, `mapIcon`, `mapOrient`, `unitName`, `value`, `jsonKey`;
+  `VehicleDefinition.spawnOffset`; `AircraftDefinition.aircraftParameters.GetRandomLiveryForFaction(faction)`.
+- `UnitRegistry.allUnits` — итерация всех юнитов (иконки, пики, сканы). Не аллоцировать на кадр.
+
+**Авиация**
+- `aircraft.autopilot.AutoAim(dest, aimVelocity, ignoreCollisions, runwayAlign, effort, bankAllowed,
+  followTerrain, altitudeHold, targetVelocity)` — игровой автопилот рулит, мы только даём точку
+  (САМОЛЁТЫ: altitudeHold при followTerrain=false — мировая Y; при followTerrain=true — AGL,
+  игровой `TerrainWaypoint` кладёт altitudeHold НАД рельефом впереди, v0.93.0 — раньше мировая Y
+  отдавалась и огибающим профилям, над холмами борт шёл выше профиля).
+- **Вертолёты/тильтвинги**: `AutopilotHelo`/`AutopilotTiltwing` перекрывают только 5-аргументную
+  перегрузку `AutoAim(dest, altitudeHold AGL, aimDir, targetVel, followTerrain)` — самолётная
+  9-аргументная для них НЕ годится; там же altitudeHold — высота НАД РЕЛЬЕФОМ, throttle вертолёту
+  не пишем (автопилот ведёт collective сам). followTerrain для вертолётов ВСЕГДА true (v0.93.0,
+  как у нативного AIHeloCombatState): при false автопилот считает высоту как «Y борта − Y точки −
+  altitudeHold», а точки планов уже несут AGL в мировой Y — профиль вычитался дважды, борт лез
+  к двойной высоте и болтался коллективом. Семейство борта определяется типом автопилота —
+  `GameApi.IsHeloFamily` (контекстность панели, SelfCheck-проба). Боевой AI — `AIHeloCombatState`
+  (свои `currentTarget/currentWeaponInfo/timeWithoutTarget`, своей tracking-поля нет); посадка —
+  вертикальная `AIHeloLandingState` (садится к ближайшему аэродрому, запрашивает точку сам).
+- `AIPilotCombatModes` (reflection-поля): `PilotBaseState.destination`, `.aircraft`, `.controlInputs`,
+  `AIPilotCombatModes.timeWithoutTarget` — сброс таймера «без цели», иначе AI уйдёт на возврат;
+  `currentTarget`/`currentTargetTracking`/`currentWeaponInfo`/`allowTargetAssessment` — пиннинг цели (§6.3).
+- **Целеуказание/даталинк**: `FactionHQ.TryGetKnownPosition(unit, out pos)` / `GetTrackingData(id)` —
+  цель видна, только если её держит трекинг фракции (сенсоры); огонь вне даталинка не открывается
+  (кроме точечных вооружений — бомбы/баллистика/артиллерия). `TrackingInfo`: `lastSpottedTime`
+  (свежесть контакта; живой < 4 с), `GetPosition()` — актуальная позиция под живым контактом,
+  иначе последняя известная (якорь вражеских иконок и пика осмотра).
+- **Ракеты/бомбы** (карточка осмотра): `Missile.GetWeaponInfo()/EngineOn()/GetSeekerType()/GetYield()/
+  GetThrustDuration()/targetID/GetRemainingBurnTime()`, `Unit.speed/radarAlt`,
+  `Vector3.GlobalY()` — проверки в SelfCheck (активационные). Цель ГСН показываем только
+  если она наша (RWR-принцип: чужие цели не подсматриваем).
+- **Боевой AI**: `CombatAI.AnalyzeTarget(station, unit, trackingInfo, …)` — совместимость станции
+  вооружения с целью (opportunity>0 = может бить); `weaponManager.currentWeaponStation`/`ClearTargetList`/
+  `AddTargetList` — назначение огневых целей; ракетный залп нативно распределяется по соседним целям.
+- **Вылеты/логистика**: `Unit.GetMaxRange()`, `Aircraft.GetFuelLevel()`, `WeaponStation.Ammo/FullAmmo/
+  GetAmmoTotal/Cargo/WeaponInfo.targetRequirements`; `Unit.RpcRearm(RearmEventArgs{Stations})` — сетевое
+  перевооружение (нативный `RequestRearm` закрыт для AI-бортов гвардой `Player != null`); `Aircraft.Refuel
+  (null)` — заправка; `Pilot.pilots[0].SwitchState(pilot.AILandingState)` — нативная автопосадка;
+  `FactionHQ.GetNearestAirbase(pos, RunwayQuery)`/`Airbase.center/GetRadius/CurrentHQ`.
+- `BattlefieldGrid.GetUnitsInRangeEnumerable(GlobalPosition, range)` — сетевой запрос юнитов в радиусе
+  (сканы наземки), дешевле ручного перебора `allUnits`.
+
+**Деньги и покупки (host-only!)**
+- `FactionHQ`: `factionFunds`, `AddFunds`, `faction`, `GetTrackingData(persistentID)` (разведка).
+- `VehicleDepot.TrySpawnVehicle(def)`; `Airbase.CanSpawnAircraft(def)` / `TrySpawnAircraft(...)`;
+  `Airbase.CurrentHQ`; `FactionRegistry.airbaseLookup`.
+- Полный оверлоад `TrySpawnAircraft(Player, AircraftDefinition, LiveryKey, Loadout, fuelLevel)`
+  (v0.88, лодауты заказов): пустой/`null` лодаут → игра берёт свой дефолт (`loadouts[1]`,
+  при `null` — случайный AI-комплект `SelectAIAircraftWeapons`); пресеты —
+  `AircraftParameters.StandardLoadouts` (Name/loadout/FuelRatio/disabled), состав —
+  `Loadout.weapons[i]` на `WeaponManager.hardpointSets[i]` (сериализованы на префабе:
+  счёт пилонов сета и `AllowedByHQ` работают по определению); легальность пилона на
+  аэродроме — `WeaponChecker.GetAvailableWeaponsNonAlloc`; `Hangar.parentAirbase`.
+- `Spawner.SpawnFromUnitDefinitionInEditor(def, GlobalPosition, rot, null, label)` — спавн экстракторов.
+- `Building.capturable`, `Networkairbase`; приватный `Building.CheckForCapture` (reflection) — запуск
+  нативного цикла захвата у заспавненного со стока здания.
+
+**Мир**
+- `Datum.origin`, `Datum.LocalSeaY`; `GlobalPosition` ↔ local через `ToGlobalPosition()/ToLocalPosition()`.
+- `PhysicsLayers.StaticsMask` — рельеф для лучей; `MapSettings.MapSize` — границы карты
+  (центр берётся с трансформа префаба, не с нуля!).
+- `FloatingOrigin.Instance` + приватное поле `threshold` (reflection): в режиме командира порог
+  поднимается до 1e9 (замораживаем сдвиги origin), при выходе — восстанавливается.
+
+**Состояние/сеть/камера**
+- `GameManager.gameState` (`SinglePlayer`/`Multiplayer` = InMission), `GameManager.GetLocalHQ`.
+- `NetworkManagerNuclearOption.i.Server.Active` — признак хоста (авторитет экономики/покупок).
+- `SceneSingleton<CameraStateManager>.i`: `SwitchState`, `mainCamera`, `freeState/cockpitState/
+  controlledState/TVState/chaseState`, `CheckOriginShift`, `allowInputs`, `windNoiseExternal`,
+  `cameraPivot`, `cameraVelocity`; `CameraBaseState` (4 виртуальных метода — наша камера).
+- `FlightHud.EnableCanvas(false)` — прячет кабину на входе в режим.
+- `InputFieldChecker.InsideInputField` — игрок печатает в чате (гасим ввод).
+- `Encyclopedia.i`: `vehicles`, `aircraft`, `buildings` — каталоги для покупок/спавна.
+
+---
+
+## 6. Реестр Harmony-патчей
+
+Добавление нового патча — крайняя мера; сначала композиция (§1). Каждый патч: guard-Prefix,
+возврат `true` = оригинал, запись сюда.
+
+| # | Цель | Тип | Файл | Условие перехвата | Откат |
+|---|---|---|---|---|---|
+| 1 | `AIPilotCombatModes.FixedUpdateState` | Prefix | `Aviation/AircraftSteeringPatch.cs` | у борта есть план (`AircraftOrders.TryGetDestination`); таймер `timeWithoutTarget` сбрасывается при ЛЮБОМ живом плане (возврат — только по топливу/боеприпасам через SortieService). **Авто-защита «Авто»** (DefenseService): ракетное предупреждение → `true` (нативное уклонение/контрмеры, v0.68.0). Attack: цель в зоне боя (даталинк + дальность × `AttackEngageFactor`) → `true` (нативный бой, цель запиннена §6.3), иначе мод ведёт подлёт к цели/якорю. AttackMove: рядом враг → `true`. Salvo: нативный бой НЕ включается — рулит мод, пуски делает SalvoService. Прочее: пишет `destination`, тротл скоростного режима сегмента (`ThrottleOf`), зовёт `AutoAim` (v0.93.0: огибающие профили получают AGL, «Средне/Высоко» — мировую Y точки, как раньше); режим «Ловушки» — `DefenseService.TickFlares` | без плана — `true`, штатный AI |
+| 2 | `Turret.AssessTargetPriority` | Prefix | `Units/TurretHoldFirePatch.cs` | юнит турели в стойке hold-fire (`StanceService.IsHoldFire`) ИЛИ станция турели в выключенном классе гейта (`WeaponGateService.BlockedOf`) — турель не берёт цель и не целится | иначе `true` |
+| 3 | `AIPilotCombatModes.AssessHQTargets` | **Postfix** | `Aviation/AircraftTargetPinPatch.cs` | оригинал ВСЕГДА отрабатывает; после — если `allowTargetAssessment` и нет залпа: Attack-сегмент → цель приказа становится `currentTarget` (станция — лучшая по `CombatAI.AnalyzeTarget`, даталинк-гейт: незатрекнутую не пинним); AttackMove → цель вне конуса вектора приказа (`AttackMoveConeDeg`) снимается. **Гейт вооружения (v0.71.0)**: ДО ветки приказа — натив выбрал станцию выключенного класса → перевыбор лучшей разрешённой по той же цели (`ApplyWeaponGates`), разрешённых нет → цель снимается (действует и на свободные борта — автоогонь) | без приказа и без гейта — ничего |
+| 4 | `AIHeloCombatState.FixedUpdateState` | Prefix | `Aviation/HeloSteeringPatch.cs` | вертолётный близнец №1: тот же план, тот же сброс `timeWithoutTarget`, авто-защита и логика атаки/attack-move/залпа; отличие — вызов вертолётной перегрузки `AutoAim(destination, AGL профиля, zero, zero, followTerrain: true ВСЕГДА)` (самолётная 9-аргументная не перекрыта `AutopilotHelo` и для вертолёта неверна; throttle не трогаем — автопилот ведёт сам, скоростные режимы вертолётам не назначаются; v0.93.0: followTerrain=false для вертолёта — семантическая ошибка, автопилот вычитал бы AGL из высоты дважды, борт лез к двойной высоте и болтался коллективом — вращение/тряска вертолётов с приказами) | без плана — `true`, штатный AI |
+| 5 | `AIHeloCombatState.AssessHQTargets` | **Postfix** | `Aviation/AircraftTargetPinPatch.cs` (`HeloTargetPinPatch`) | вертолётный близнец №3: общее ядро PinTarget/VetoOutsideCone; guards — залп и уход оригинала в транспортный режим (`currentState != instance`); tracking-поля у вертолётного состояния нет; тот же гейт-перевыбор (`ApplyWeaponGates`) | без приказа и без гейта — ничего |
+| 6 | `PathfindingAgent.Pathfind` | Prefix | `Orders/GroundPathfindPatch.cs` | свой `GroundVehicle` + `GroundDirectRouting` (v0.88.0): натив строит путь только по графу шоссе (заезд на трассу ради метров бездорожья, если цель ближе к дороге, чем прямая дистанция) — мод кладёт одну прямую точку `Shortcut` (нативный режим NoRoadNearTarget). Прямая, пересекающая воду (сэмплы `RaycastTerrain` против `Datum.LocalSeaY`, шаг — `GroundDirectWaterStepM`), отдаётся нативу: мосты знает только дорожный граф. Композиция отвергнута: приказы идут из десятка мест + натив перекомандовывает сам, а `Shortcut` не обновляет `targetPos` (нативный дедуп 10 м) — один прицельный патч покрывает все источники | иначе `true` |
+| 7 | `FactionHQ.AnyNearAirbase` | **Postfix** | `Aviation/AnyNearAirbasePatch.cs` | оригинал ВСЕГДА отрабатывает; после — среди аэродромов фракции, чей радиус (`SavedAirbase.CaptureRange`) накрывает точку, заменяет результат на БЛИЖАЙШИЙ К ПОЛОСЕ (метрика `Util.DistSqToSegmentXZ` до отрезка торцов, фолбэк — центр; та же, что `NearestOwnAirbase`). Причина (v0.96.1, плейтест «борта из ангаров нашей ВПП уезжают рулить к соседнему нативному аэропорту»): натив берёт ПЕРВЫЙ из несортированного `airbasesUnsorted` — при перекрытии радиусов рядом с нативным аэропортом побеждает всегда он, независимо от близости; вместе с этим `SpawnRunway` задаёт `CaptureRange = длина/2 + HangarAttachRadiusM` (дефолт 1000 м не накрывал ангары на торце длинной полосы). Все вызовы игры передают позицию борта (руление к взлёту, RTB, посадка, оверлей, цели, высадка пилота) — уточнение безопасно для каждого | оригинал не нашёл (`airbase == null`) — не трогаем |
+
+---
+
+## 7. Инварианты — не ломать
+
+Нарушение любого пункта ниже — источник «загадочных» багов. Проверяй по этому списку диф.
+
+1. **Floating origin.** Все долгоживущие мировые точки (приказы, планы, якоря) — только
+   `GlobalPosition`. Локальный `Vector3` протухает при сдвиге origin (порог 1024 м по оси).
+   Исключение — одноразовые вычисления в пределах кадра.
+2. **Host-only мутации.** Деньги (`AddFunds`), спавн, апгрейды — только при
+   `NetworkManagerNuclearOption.i.Server.Active`. Клиент выдаёт лишь приказы с
+   `playerCommand: true`. Иначе десинк/тишина в MP.
+3. **Guard-Prefix.** Harmony-Prefix обязан вернуть `true`, если мод не берёт управление.
+4. **Приказы — только по событию** (`RtsInput.RightDown` и т.п.). Ничего игрового — на каждый кадр.
+5. **Порядок тиков** (§3.2) фиксировать нельзя: `RouteEditor.Tick` строго до `Selection.Tick`
+   (иначе драг вейпоинта превратится в рамку выделения); оркестратор — только `CommanderModeController.Update`.
+6. **Ввод через `RtsInput`**, не `Input` напрямую — там `Typing`-защита от чата и `PointerOverUi`.
+7. **Кэши инвалидировать Version-счётчиками** (`AircraftOrders.Version`,
+   `GroundOrders.Version`), а не «по времени» или флагами. Драг/удаление вейпоинтов
+   бампит их через API сервисов (`SetPoint`/`SetQueuePoint`/`SetSequenceMove`/…).
+8. **OnGUI вызывается многократно за кадр** — никаких аллокаций/накопления состояния в нём
+   (текущие аллокации маршрутов — известный долг №9).
+9. **Парность Enter/Leave.** Камера: farClip, порог FloatingOrigin, TrackIR, облака — что изменил
+   на входе, восстанови на выходе (включая тихий выход при смене камеры игрой).
+   Звук: доплер источников гасится на входе в режим (`CommanderAudio.Suppress`) и
+   возвращается в `Deactivate` на любом пути выхода (+ страховка в sceneLoaded).
+10. **UI-разделение труда**: `CommanderHud` (IMGUI) — мировой оверлей (иконки/кольца/маршруты/маркеры)
+    + notices + debug; `SupcomUi` (uGUI) — экранные панели. Новый мировой маркер → CommanderHud,
+    новая панель/кнопка → SupcomUi.
+11. **Все балансные числа — в JSON** (`EconomyProfile`) или `Settings`, не в коде (принцип DESIGN §4).
+12. **Язык проекта — русский**: комментарии, логи, диагностика (SelfCheck, F11).
+    Игроковые строки (UI/Notice/описания настроек) — русским литералом-ключом через
+    `Loc.Tr/F/Plural`; перевод — `locales/<язык>.json` (en — фолбэк, ru файлом не нужен);
+    чекер ключей — в конвейере сборки. Правила — AGENTS «Правила локализации».
+13. **Каждое новое предположение об API игры** — проверка в `SelfCheck` (стартовая или активационная).
+
+---
+
+## 8. UI: два слоя и кто за что отвечает
+
+### CommanderHud (IMGUI, `Ui/CommanderHud.cs`)
+Рисует поверх экрана каждый OnGUI-вызов, только когда режим активен: рамка выделения;
+стратегические иконки (свои зелёные; чужие — ЛЮБЫЕ, включая здания и экстракторы, —
+только по данным разведки `GetTrackingData`: красные под наблюдением, серые тающие,
+без контакта скрыты; ромбы аэродромов: свой зелёный, чужой красный только под разведкой,
+иначе жёлтый «неизвестно»; ничейные месторождения жёлтые всегда — фича карты; ракеты обеих сторон);
+точечные элементы (иконки/ромбы/ракеты/месторождения/HP-полоски/скобки/кольца/маркеры
+приказов/вейпоинты) ГАСНУТ под окном миникарты (`UnderMinimapWindow` по маске
+`MinimapPanel.HudMaskRect` — IMGUI рисуется поверх uGUI и без маски штампуется на
+миникарту; ленты маршрутов и рамки площадок — непрерывная мировая геометрия, не гасим);
+кольца дальности выделения (`RangeRings`, v0.72.0, самый нижний слой оверлея — рисуются
+ДО иконок: атака/обзор/стройка, объединение пересечений SupCom, плоскость земли круга —
+лучи через пиксели, поэтому кольца честно перспективны и видны сквозь сопки, как ленты;
+под окно миникарты вырезаются четырьмя кусками UV);
+жёлтые пульсирующие маркеры незахваченных месторождений; кольца выделения
+(«пояс»: у кораблей/наземки/зданий — плоскость на середине высоты модели
+(`GameApi.RingBeltOffset`, кэш смещения — не мировой Y, чтобы не протухал при
+сдвиге FloatingOrigin), у авиации — по земле; точки кладутся равномерно по всей
+окружности, шаг растёт с радиусом до потолка 80 — фиксированный бюджет 26 точек
+обрезал дугу у крупных юнитов);
+скобки у крупных юнитов; красные скобки осмотра на инспектируемой чужой цели/ракете
+(якорь совпадает с иконкой контакта: протухший — на последней известной позиции); маршруты (ленты DrawChainRibbon: вся цепочка — одна непрерывная
+полоса, углы скруглены `Util.RoundChainCorners` (радиус `RouteCornerRadiusM` — нижний
+порог, эффективный радиус добирается до ~28px на экране, иначе на стратегическом зуме
+скругление невидимо; зажим 45% короткой ноги), адаптивная ширина, экраные квады
+расширены на полпикселя от центроида — стыки через разные GUI.matrix не щелятся, шеврон
+бежит вдоль всей цепочки; у авиации подряд идущие сегменты одного режима — один прогон,
+стык сегментов скруглён; вейпоинты;
+групповые участки — ГРУППОВАЯ ТОЧКА = СВОЙСТВО ТОЧКИ (groupId клика, не выделения):
+у всех юнитов с этим groupId — один маркер-центроид и общая лента (дедуп сегментов
+между юнитами), вход в группу — одна нога от центроида якорей её членов,
+индивидуальные точки (groupId=0) — личные ветки схождения/расхождения; то же для
+очередей инженеров (запись с groupId — маркер и сегменты один раз) и точек планов
+авиации (маркер один на приказ в центроиде группы бортов; лента группы — ОДНА
+магистраль SupCom (v0.91, зеркально наземке): узлы-центроиды формационных точек,
+вход — от центроида якорей членов, сегменты магистрали/входы/ноги атак и RTB —
+по одному разу на приказ, индивидуальные точки — личные ветки — раньше пачка
+бортов рисовала N параллельных цепочек по решётке формации; служебные точки — взлёт
+патруля, стоп-старт отмены (флаг `ServiceStart`) и якоря атаки/залпа/RTB — не
+рисуются и не сканируются (`AircraftOrders.IsServicePoint`); одиночные ноги
+движения — ОБЫЧНЫЕ вейпоинты: v0.90 дофиксила правило v0.61.2, которое прятало
+любую одиночную точку транзита как «стоп-старт» — маркер пропадал и точку нельзя
+было схватить/удалить); Shift-режим
+видимости рисует все очереди тем же слиянием — без россыпи вейпоинтов); маркеры приказов (кресты, тающие 2.5 с); notices; панель SelfCheck-провалов;
+F11-debug (fps, счётчики, origin-монитор).
+
+### SupcomUi (uGUI, `UiRts/SupcomUi.cs`) — раскладка в духе SupCom FA
+Canvas (`sortingOrder=30000`, `DontDestroyOnLoad`, пересобирается лениво через `EnsureUi`;
+referenceResolution делится на `Settings.UiScale` — глобальный масштаб панелей), обновление
+контента раз в 0.2 с, `canvas.enabled = режим активен`:
+- **лево-верх** — экономика (деньги/доход/мин, экстракторы);
+- **лево-низ** (снизу вверх) — командная карта с подсказкой режима (стандартные команды
+  движение/атака-движение/патруль/атака/стоп + индивидуальные: hold-fire всегда, профили
+  высоты — только когда в выделении есть авиация); **контекстность по ТИПАМ боевых единиц**
+  (v0.93.0): базовые приказы — только мобильным (авиация/наземка/флот; пустое выделение —
+  базовый набор без авиарядов), скоростные режимы и тоггл «вдоль рельефа» — при
+  самолётах в выделении
+  (`GameApi.IsHeloFamily`: вертолётам газ ведёт игра, огибание рельефа у них всегда), «Залп» и чипы станций — ракетоносцам
+  (`HasMissileStation`; чипы — только ракетные станции с их реальными индексами в
+  `_chipStations`), выделение из одних зданий — только hold-fire (+гейты); внизу карточки — **полоса гейтов
+  вооружения** v0.71.0: кнопка на каждый класс станций выделения (`Catalog.ClassOf`:
+  ЯД/Бомбы/Пушки/Рак.ВВ/Рак.АС), клик — тоггл всему выделению (`WeaponGateService.
+  ToggleForSelection`), подсветка зелёный/красный/жёлтый + живой префикс подписи
+  «+/−/±» (всем разрешён/выключен/вперемешку); секции подписаны заголовками
+  «ПРИКАЗЫ» и «РАЗРЕШЁННОЕ ВООРУЖЕНИЕ» (объясняемость зон); строка-подсказка
+  действий живёт ТОЛЬКО в активном спец-режиме (стройка/залп/веер/приказ) — в покое
+  её нет и «ПРИКАЗЫ» встаёт к верхнему краю (ApplyCommandLayout, v0.71.4); над ней — **панель свойств выделения**
+  (v0.71.4: заголовок зоны «ВЫДЕЛЕНИЕ», шапка имя/класс/HP(+топливо у авиации)
+  фиксирована, ТЕЛО КАРТОЧКИ ПОТОЧНОЕ — `FlowInfoBody` раздаёт позиции только
+  активным непустым строкам (пустые state/приказы группы не оставляют дыр), высота
+  панели поджимается под контент; один юнит: HP (подписан «HP …»)/скорость/высота/
+  топливо/состояние AI ПО-РУССКИ (`Catalog.RuPilotState`/`RuShipState`, v0.71.1;
+  неизвестное состояние — как есть; групповой «боезапас» клэмпится — энергостанции
+  дают долю &gt;1)/вооружение/текущий приказ; группа:
+  средние HP и боезапас, состав по родам + **сводка вооружения** v0.68 — станции живых
+  юнитов слиты по имени оружия (`WeaponTallyAccumulator`, чистая логика в `Catalog`):
+  домен-тег АА/АЗ/У/ПР/РЕБ (порог `effectiveness.antiAir/antiSurface/antiMissile > 0`
+  как у игры, ядерное — префикс «Я»), заряд/ёмкость группы `6/10`, носители по юнитам,
+  «пусто» у расстрелянных, грузовые/десантные станции — мимо; при &gt;8 типов последняя
+  строка «+ ещё N типов»; **осмотр** при пустом выделении — `Inspected`
+  (контекст только карточки свойств: командная карта и лента каталога не открываются):
+  чужой юнит — HP/скорость/высота только под живым наблюдением, протухший — имя/класс
+  и возраст контакта; ракета/бомба — скорость/высота, двигатель, ГСН, БЧ, «ЦЕЛЬ: …»
+  если ГСН держит наш юнит. Все строки панели — однострочные: перенос запрещён
+  (`Label singleLine`, горизонтальный Overflow), длинный текст обрезается «…»
+  (`Util.FitLine`, заголовок 36/строки 50 символов — иначе перенос наезжает на
+  соседние ряды и вылезает за подложку);
+- **центр+право-низ** — панель (фикс 146 px, обе строки всегда видны; компакт v0.64.0: плитки 48, ленты 52): колонка ВКЛАДОК
+  слева ($ производство, # список, ^ апгрейд, Ш шаблоны), за ней контекст-колонка
+  (Пауза/Цикл/Шаблон+), затем стрелки «◀◀ ◀ ▶ ▶▶» и две строки-ленты: верхняя —
+  каталог/шаблоны (тиры слева над ней), нижняя — очередь (стройки или фабрики).
+  Плитки 48×48 — ЕДИНЫЙ строитель `Tile(TileSpec)` (консолидация v0.48; компакт v0.64.0): иконка
+  (авиация — индивидуальный силуэт `mapIcon`, как на макрокамере/миникарте и в нативном
+  меню выбора борта; прочее — визор-маркер), короткая подпись юнита внизу (`code`,
+  иначе первое слово имени — `Catalog.ShortLabel`), бейдж типа слева-сверху с цветом
+  по классу (наземка из `VehicleType`: ТНК/ББМ/АРТ/ЗУ/ПЗРК/ЗРК/РЛС/ГРЗ…; авиация —
+  роль из `roleIdentity`: И/У/М, слабый боец — ТР или РЛС-ДРЛО), справа-сверху ×N
+  стака либо цена каталога. ОЧЕРЕДЬ ФАБРИКИ: наливаемые позиции (Paid>0 — при
+  параллельной оплате их несколько) рисуются КАЖДАЯ со своей полосой (ПКМ по такой —
+  отмена с возвратом), ждущий хвост — плиткой ×N (ЛКМ +1, ПКМ −1 с конца, Shift ×5 —
+  `ProductionTasks.InsertAfter/RemoveTail`); очередь стройки —
+  ЛКМ камера к площадке; ростер — ЛКМ подвыделение типа, набор зданий — ПКМ убрать.
+  **Наведение на плитку закупки** (мгновенно, `Settings.UiTooltips`, v0.87.0 —
+  панельная схема SupCom по плейтесту, плавающая карточка у курсора v0.85.x
+  убрана; задержка 0.35 с убрана по плейтесту — панельная схема не мигает при
+  проводе курсора): панель свойств выделения ПЕРЕКЛЮЧАЕТСЯ на карточку
+  ОПРЕДЕЛЕНИЯ — заголовок зоны «ЗАКУПКА» (обычно «ВЫДЕЛЕНИЕ»), имя, класс/роль · цена · оценка
+  времени (фабрика ~`ProductionSecondsPerItem`; стройка ~`BuildSecondsPerBuilder`
+  на инженера), строка ТТХ (обзор `visibleRange` / скорость `aircraftInfo.maxSpeed`
+  (фолбэк — `aircraftParameters`) / броня `armorTier` / экипаж `manpower`; только
+  ненулевые поля, ТТХ — ФАКТ-НА-СТРОКУ v0.90: скорость / обзор / броня·экипаж·масса
+  отдельными строками, `Catalog.TipStatRows` чистая + тесты), вооружение — у
+  авиации с выбором состав ВЫБРАННОГО ЛОДАУТА
+  (строка «лодаут: имя · бак NN% · колесо — смена · СКМ — правка» АКЦЕНТНЫМ
+  цветом — видно без чтения серых строк, топливо — когда отлично от полного,
+  заголовок блока «Вооружение лодаута»: КОЛЕСО над плиткой каталога авиации
+  циклит «Стандарт» → именованные пресеты `StandardLoadouts` → «Свой»
+  (если отредактирован), заряд пилона × пилонов сета `hardpointSets` с префаба
+  (WeaponManager сидит на ДЕТЁНЫШЕ префаба — GetComponentInChildren!);
+  недоступный на текущем аэродроме пресет подписан «· недоступен»; кадр
+  прокрутки/СКМ ПРИНАДЛЕЖИТ UI — `RtsInput.WheelConsumedByUi`/
+  `MiddleConsumedByUi` глушат зум/драг камеры даже там, где PointerOverUi
+  промахнулся), иначе дефолтная нагрузка префаба (`Weapon`-компоненты
+  несут сериализованные `info/ammo`; домен-тег АА/АЗ/У/ПР/РЕБ/Я + `shortName`
+  ×боезапас, до 8 строк — дальше «+ ещё N типов», `hideInDisplay` пропускается).
+  Плитка каталога помечает отступление от стандарта суффиксом подписи «·ЛN»
+  (перестройка каталога по `LoadoutsVersion` в хэше).
+  **СКМ по плитке каталога** — окно «ОСНАЩЕНИЕ» (редактор лодаута, v0.90,
+  FloatingWindow над панелью закупки): силуэт mapIcon + имя/класс/масса пустого,
+  пресеты-кнопки + «Свои N» (сколько создал игрок) с кнопками «+» (новый «Свой»-
+  клона текущего выбора) и «−» (удалить выбранный «Свой», v0.91), топливо-чипы
+  50/75/100% (для «Своего»; у
+  пресетов — авторское), СТАНЦИИ-кнопки «имя сета ×пилонов: оружие ×ammo» —
+  клик циклит легальные варианты (`MountOptionsFor`: weaponOptions ∩
+  WeaponChecker по аэродрому; PLUS неперечисленные в options ТЕКУЩИЙ/заводской
+  маунты — `AddUnlistedOption`/`DefaultMountOf`: внутренние пушки есть только в
+  дефолт-лодауте, иначе «пусто» — дверь в одну сторону, баг-репорт v0.94) +
+  «пусто», пропуская взаимоисключения
+  (`precludingHardpointSets` в обе стороны, `StationConflicts`); станция без
+  вариантов — надпись «нет вариантов», не кнопка; итог — масса
+  подвесок (ammo × massPerRound × пилонов) + легальность (ТОЛЬКО гейты игры
+  AllowedByHQ — restricted/ядерные квоты; склад обычного оружия игра при спавне
+  НЕ проверяет, WeaponChecker — фильтр планировщика); правки применяются
+  сразу и навсегда (сохранять нечего: правка при выбранном пресете рождает
+  НОВЫЙ «Свой»-клон, правка «Своего» — на месте; слоты идут после авторских
+  пресетов в цикле колеса; «выбрано: …» в шапке). Перерисовка окна — по LoadoutsVersion.
+  Описание определения — во ВТОРОМ окне «ОПИСАНИЕ» под панелью (перенос до 10 строк,
+  длиннее — подрезка «…», высота окна под контент). Стек левой колонки (снизу вверх):
+  командная карта → «ОПИСАНИЕ» (только при ховере) → панель свойств — раскладывает
+  `ApplyCommandLayout`. Вход/уход с плитки форсит немедленный рефреш
+  панели (`_infoHash=-1`, `_nextRefresh=0`), не дожидаясь 0.2-секундного цикла
+  (история: в v0.60.0–v0.85.0 карточка не показывалась никогда — сброс состояния
+  наведения в окне задержки перезапускал её таймер каждый кадр; исправлено v0.85.1,
+  задержка убрана совсем в v0.87.0).
+  Контент считается ОДИН раз на пару (определение, индекс лодаута) и
+  кэшируется в instance-словаре; опрос каждой плитки — `UpdateTileHover` каждый кадр
+  (`RectangleContainsScreenPoint` по плитке И её ленте-вьюпорту, снесённые плитки
+  выпадают по Unity fake-null; uGUI Enter/Exit-события игнорируются — правило №18).
+  Форматтеры строк — чистые в `Catalog` (`FormatTipClass/Stats/WeaponRow`, тестируются).
+  Вкладка «Ш»: верх — сохранённые шаблоны (персистентный JSON), низ — текущий
+  заказ/набор. Панели видимы только при выделении (контекст); панель НЕ растёт —
+  строки постоянны. Вкладка выбирается кликом (ручной выбор уважается, пока выделение
+  не сменилось) или автоматически: депо/аэродром → Производство, экстрактор → Апгрейд,
+  иное выделение → Список. Перестройка кэшируется хэшем (вкладка + состав + деньги
+  с шагом 100 + тир), `ForceUpdateCanvases` вызывается только если список прокручен.
+
+### MinimapPanel + UiKit (`UiRts/`)
+Плавающая миникарта в окне `FloatingWindow` (заголовок — перетащить, угол — ресайз, «×» —
+закрыть; закрытое окно возвращается вкладкой «+ Карта» у левого края; позиция/размер/
+видимость сохраняются в конфиг `UI.*`; ресайз за нижний-правый угол: нижний/правый края
+идут за мышью, верх/лево неподвижны — пивот окна левый-нижний, рост вниз компенсируется
+позицией, иначе вертикаль инвертирована). Окно строится не раньше 0.5 с после появления
+канваса и держится ЦЕЛИКОМ на нём (`FloatingWindow.ClampToParent`: драг/ресайз +
+самовосстановление 10 Гц) — в кадре создания канвас его rect в физических пикселях,
+CanvasScaler применится позже, и посчитанная по нему позиция «торчит уголком» за краем.
+Полоска под картой ДВЕ строки (v0.76): верх — слева «Рельеф» (фон карты), справа
+«Оружие» (режим колец по классам вооружения, v0.77 — доменные кольца атаки
+заменяются классовыми, чипы «Назем»/«Воздух» при этом призрачно приглушены;
+v0.79 чип «Заливка» убран вместе с заливкой — кольца всегда линии, как в SupCom);
+низ — четыре чипа-переключателя колец дальности
+«Назем/Воздух/Разведка/Стройка», каждый на четверть ширины полоски (цвет чипа =
+цвет колец — легенда; клик — `Settings.SetRangeRing` + SaveConfig, состояние колец
+читает `RangeRings`).
+Фон — готовый `MapSettings.MapImage` на `RawImage` (фолбэк — заливка), иконки юнитов с
+развед-гейтом как у IMGUI-иконок (обновление 10 Гц): спрайты визор-маркеров
+friendly/hostileIcon (свои зелёные, враги красные/серые по давности), авиация с
+mapOrient — ориентированный по курсу силуэт mapIcon (миникарта «север вверх», без
+поворота в кадр камеры); ракеты — мигающие квадраты, аэродромы/месторождения — ромбы.
+**Зум колесом при наведении на карту** («в курсор», `MinimapZoomMax`): окно обзора
+хранится в нормализованных координатах карты 0..1 (`_viewMin/_viewSize`), фон показывает
+под-прямоугольник через `RawImage.uvRect`, `RectMask2D` на слое иконок режет вылезающее,
+блипы вне окна гасятся (без churn — записи живут), ЛКМ/ПКМ через те же координаты;
+камера над uGUI не зумится (`PointerOverUi`) — двойного действия нет; при пересборке
+окна зум сбрасывается. Иконки/ромбы РАСТУТ с зумом (×1..`IconScaleMax`=4). **Режим
+«Рельеф»** (кнопка под картой, `MinimapRelief`): сетка высот 128×128 по `GameApi.GroundY`
+сэмплируется лениво порциями (512 рейкастов на тик 10 Гц, ~3 с на карту), из неё —
+текстура: море синей шкалой глубины, суша гипсометрической зелёно-буро-белой шкалой,
+горизонтали тёмной линией на смене высотного пояса (шаг 1/2/5×10^k от диапазона);
+текстура подменяет фон (тот же uvRect-зум), при пересборке окна/новой карте
+пересчитывается. Рамка текущего обзора камеры: углы трассируются в землю
+(рейкаст), луч выше горизонта ведётся по направлению до карты (`RayToMapEdge`), точки
+клампятся в границы карты — рамка обрезается о край миникарты и не замирает при
+взгляде вдаль. ЛКМ — прыжок камеры, ПКМ — приказ выделенным
+(`MoveOrderService.IssueAtWorld`), Shift — очередь. `UiKit` — общие строители
+(окно/скролл/прогресс-бар) — новые панели собирать из них. Родная карта игры
+(`DynamicMap`) скрывается на время режима командира (контроллер запоминает и возвращает
+состояние) — иначе дублируется с миникартой мода.
+
+### Горячие клавиши (сводка)
+F10 — режим · ЛКМ — выделение/рамка/драг вейпоинта (по видимому чужому юниту или ракете —
+осмотр в инфопанели) · ПКМ — приказ (Shift — очередь/серия; ПКМ по союзному юниту —
+сопровождение/ассист: боевые защищают цель, инженеры вливаются в её стройки, авиация
+сопровождает полётом; Ctrl+Shift+ПКМ по цели связи — снять сопровождение) ·
+Ctrl+Shift+ПКМ — удалить вейпоинт (Shift — искать по всем юнитам; клик комбинацией гасится ВСЕГДА —
+промах не проваливается в выдачу приказов, v0.91.3: раньше мимо вейпоинта ставился новый) ·
+Ctrl+K — уничтожить выделенное (свои юниты/здания — игровой урон, обломки; недострой — снос) ·
+СКМ — драг карты (тап — центрировать) · колесо — зум · Space (зажать) — осмотр мышью ·
+M/A/U/T/V — заряд режима приказа (движение/атака-движение/патруль — авиация и наземка/флот циклом, инженеры в патруле сами достраивают близлежащие недострои/атака/залп), R — «Атака
+веером» (ПКМ по врагам копит цели, ПКМ по земле — раздать группу по целям), S — стоп,
+H — hold-fire, X — сброс ловушек, G — борта на базу (терминальный RTB: посадка/
+обслуживание/паркинг до следующего приказа; Shift+G — RTB дописывается в хвост очереди
+`EnqueueRtb`, борт вернётся после отработки плана) · Alt+Shift+R — Disperse Move (очередь вейпоинтов
+группы распределяется прямыми векторами, FAF-стиль) ·
+Ctrl+1..9 / 1..9 (дабл-тап — камера) · Alt+1..4 — профиль высоты · Shift+1..3 — скорость ·
+Alt+T — «вдоль рельефа» (авто/огибать/напрямую, самолёты) ·
+Alt+D — цикл авто-защиты · Home — центр карты · F11 — debug · миникарта: ЛКМ — прыжок камеры,
+ПКМ — приказ, колесо при наведении — зум «в курсор».
+
+---
+
+## 9. Конфигурация, сборка, деплой
+
+- **Сборка — конвейер `python tools/build.py`**: полная пересборка с `-warnaserror` →
+  линт накопленных классов багов (двойной `Text`; `new GameObject` без `typeof(RectTransform)`
+  в UI-коде; застрявшая версия) → локали (`tools/check_locales.py`: ключи `Loc.*` в коде =
+  ключи каждого `locales/*.json`) → тесты чистой логики (`tests/SupremeNuclear.Tests`,
+  консольный раннер: серии `Util.Runs`, терцили `Catalog.ApplyTierFilter`, `Progress01`,
+  `EconomyProfile.Rate`, JSON-шаблоны, плюрализация `Util.RuPlural`/`Loc.Plural`,
+  локализация `Loc.Install/Tr/F`, сводка вооружения
+  `WeaponTallyAccumulator`/домен-теги, границы объединения `Util.UnionBand`) → проверка версии (исходник → bin DLL → игровой DLL
+  байтами), идентичности bin/деплой и локалей в игре. `--fast` — без чистки obj. Автодеплой `AfterTargets=Build` копирует DLL
+  и `locales/*.json` в `<GameDir>\BepInEx\plugins\SupremeNuclear\` (локали — в `Locales\`).
+  Опции: `-p:GameDir="..."`, `-p:Deploy=false`.
+- **Локали:** `locales/*.json` в репозитории (исходник правды) → деплой в
+  `BepInEx/plugins/SupremeNuclear/Locales/`; новая локаль = новый файл (AGENTS «Правила
+  локализации»); ru-локали файлом нет — русский это исходные ключи.
+- **Зависимости** — из папки игры: `Assembly-CSharp`, `Mirage`, `Newtonsoft.Json`, BepInEx-ядро,
+  модули UnityEngine (см. `.csproj`). NuGet — только reference-сборки net472.
+- **Конфиг игрока:** `BepInEx/config/com.supremenuclear.rts.cfg` (генерируется из `Settings.Bind`).
+  Добавил настройку — проверь, что Bind-имя осмысленно, дефолт в коде и в Bind совпадают.
+- **Профиль экономики:** `BepInEx/plugins/SupremeNuclear/Economy/<Profile>.json`;
+  отсутствующий файл создаётся-образец при первом запуске миссии (host).
+
+---
+
+## 10. Рецепты типовых изменений
+
+**Новый тип приказа** (пример: «load on transport» когда-нибудь):
+1. `OrderMode` enum + `OrderModes.Label`.
+2. Логика выдачи: кейс в `MoveOrderService.IssuePending` (авиация → новый `AirOrderMode` +
+   методы `AircraftOrders`; наземка → `GroundOrders`).
+3. Хоткей в `CommanderModeController.Update` (блок `M/A/U/T/V/S`) и кнопка в
+   `SupcomUi.BuildCommandButtons` — панель контекстная (v0.68.0, по типам — v0.93.0): кнопки
+   перестраиваются по контекст-ключу состава выделения; ряды авиации — при авиации, скорость —
+   при самолётах, залп/чипы — ракетоносцам, здания — hold-fire (+ `HighlightCommand`
+   в `RefreshCommands`).
+4. Отрисовка: цвет в `CommanderHud.ModeColor`, подмешивание в `SubmeshOf` (RouteRibbonMesh).
+5. Подсказка в `_modeHint` (`SupcomUi.RefreshCommands`).
+
+**Новый режим полёта (высота/скорость) или режим защиты:** профиль/режим в
+`AircraftOrders` (`Profiles`/`SpeedMode`, штамп в `MakeSegment*`, резка ног в `CanAppend`)
+или `DefenseService` → хоткей+кнопка → `ApplyModesToCurrent` для мгновенного применения
+к головному сегменту выделенных → при новом игровом API — SelfCheck.
+
+**Новая боевая механика с пуском/спавном (залп и т.п.):** host-only статический сервис
+(образец — `SalvoService.Tick`: CollectAll → готовность по даталинку → нативный путь
+пуска `LookForMissileTargets`→`Fire`), регистрация тика в §3.2 сразу после SortieService.
+
+**Новая настройка:** поле + дефолт в `Settings` → строка в `Bind` (секция/имя/описание по-русски)
+→ использование только через `Settings.X`.
+
+**Новый Harmony-патч:** попробуй обойтись без него (§1, §7.3) → guard-Prefix-класс →
+строка в реестр §6 → при экзотике — проверка в `SelfCheck`.
+
+**Новая покупка:** `PurchaseService.TryBuyX` (host-guard → деньги → игровой спавн-вызов →
+`AddFunds(-цена)` → Notice/Log) → строка-кнопка в `SupcomUi.RefreshContext`.
+
+**Новый класс атакуемой цели:** тип в фильтр `MoveOrderService.IsAttackable` (пик ПКМ),
+`AircraftOrders.EnemyNearby` (переключение боевого AI), `GroundOrders.NearestEnemyInWeaponRange`
+(stop-and-fire) — три места синхронно.
+
+**Изменение баланса:** только `EconomyProfile` JSON (доход/цены/тиры) или `Settings`
+(камера/иконки/формации). Код не трогать.
+
+**Новый мировой маркер/иконка** → `CommanderHud` (OnGUI, рисование примитивами `DrawRect` и др.).
+**Новая экранная панель** → `SupcomUi` (Build*, Refresh*, кэш по хэшу как у существующих).
+
+---
+
+## 11. Реализованность vs DESIGN.md
+
+| Шаг плана (DESIGN §4) | Статус | Заметки |
+|---|---|---|
+| 1. Каркас + камера | ✅ | strategic zoom, СКМ-драг, origin-фикс, edge-scroll |
+| 2. Выделение + приказы наземки | ✅ | клик/рамка/дабл-клик/группы; формации; цепочки; drag-редактор |
+| 7. Авиация (AircraftWaypoints-модель) | ✅ | сегменты, профили высот AGL, attack-move, патруль, attack, конвертация в патруль ПКМ по вейпоинту |
+| 7a. Приказы атаки (DESIGN §2.11) | ✅ v0.62.0 | пиннинг цели (§6.3), конус атаки-движения, подлёт по даталинку/якорю, миссия вылета (RTB → аэродромный сервис → повтор), наземные attack-move stop-and-fire и атака цели подходом |
+| 7b. Режимы полёта/авто-защита/залп (DESIGN §2.11a) | ✅ v0.68.0 | высота Alt+1..4 и скорость Shift+1..3 штампом на участок (+`ApplyModesToCurrent`); авто-защита Авто/Ловушки/Выкл в steering-патчах №1/№4; залп V по цели/площади/Shift-мультицели (SalvoService, нативное распределение), авто-RTB сухого борта; контекстная командная панель |
+| 7c. Веерная атака + Disperse Move (DESIGN §2.11a) | ✅ v0.70.0 | R «Атака веером»: ПКМ по врагам копит цели (маркеры-кресты с номерами), ПКМ по земле — раздача `Util.AssignBalanced` (ближайшая цель, ёмкость N/M, атакующих меньше целей — ближайшая свободная); Alt+Shift+R Disperse Move (FAF-стиль): очередь групповых вейпоинтов → по одной точке на юнита (группа i mod G), наземка и авиация независимо |
+| 3. Экономика v1 | ✅ с оговоркой | один ресурс `factionFunds` вместо массы+энергии; доход тиковый, апгрейд тиров; потоковая семантика (DESIGN 2.2) — не начата |
+| 4. Производство | ✅ v1 (v0.67.0 — параллельная оплата; v0.74.x — слоты по типу борта) | депо = фабрика с очередью (ProductionTasks: поток, пауза/цикл, отмена); авиация — очередь аэродрома, платит параллельно по ангарам, умеющим строить тип позиции (пулы вертолётных/самолётных площадок независимы; каталог аэродрома = юнион ангаров, неподдерживаемый тип заказать нельзя) |
+| 4a. Флот (верфь) | ✅ v0.92 | платформа-верфь на воде (SupCom naval yard), третья фабрика ProductionTasks (очередь/поток/пауза/цикл/ралли), спуск кольцами с валидацией воды, плавучий инженер (Jackknife, импульсы входа) и МОРЕСКОЙ инженер: OTB-31 LC — GameApi.IsEngineer верен и для катера (ShipType.LC), у площадки встаёт на нативный якорь SetHoldPosition (порог «остановился» 8 м/с), якорь снимается на всех выходах из задачи (PushBuildersOut/ClearFor/Cancel/мёртвая задача); палубная авиация (CV/LHA как аэродромы) — следующий этап |
+| 5. Стройка BuildTask | 🟡 v1 | Task-API v1 (§14): здания из Encyclopedia, инженер=TRUCK, потоковая оплата деньгами, площадка-маркер; строй-ассист — ✅ (N инженеров ускоряют с v0.35.1; патруль-ассист v0.95; эскорт-ассист v0.97; фабрики-очереди — см. шаг 4); ассист ПРОИЗВОДСТВА (инженер ускоряет фабрику) — вместе с потоковой экономикой (DESIGN §2.3a, `assistRate`) |
+| 6. AI-командир | ⬜ | |
+| 8. Командирский борт/связь/EMCON | ⬜ | |
+| 9. Генератор карт | ⬜ | разметка месторождений сейчас — авторазметка кольцами/JSON |
+| 10. Салваж, БЧ, MP-расширения | ⬜ | нативные warhead-гейты отключать будем на шаге БЧ (DESIGN 2.6) |
+| Сверх базового плана | ➕ | стойки hold-fire, меш-ленты (эксперим.), SelfCheck-панель, гашение доплера в режиме командира |
+
+---
+
+## 12. Реестр известных долгов
+
+Отсюда берём работу; сюда же записываем новые (с датой). Закрытые — помечаем ✅ с датой
+и версией, строку оставляем для истории.
+
+| # | Долг | Где | Суть | Статус |
+|---|---|---|---|---|
+| 1 | Панель апгрейда устаревает | `SupcomUi.RefreshContext` | ✅ закрыт 2026-10-26 (v0.31.1): хэш панели включает тир экстрактора, флаг Running и floor(factionFunds) — после апгрейда/трат кнопки перестраиваются, при Running=false панель экстра cleaned | ✅ |
+| 2 | Мёртвые в выделении | `SelectionService`, `MoveOrderService.CancelAll`, `CommanderModeController.Update` | ✅ закрыт 2026-10-26 (v0.31.1): prune null/disabled в `SelectionService.Tick`, null-guard в `CancelAll`, `Update` обёрнут в троттленный try/catch (без самоотключения) | ✅ |
+| 3 | Лог-спам экономики | `EconomyService.TryStart` | ✅ закрыт 2026-10-26 (v0.31.1): «ждём сцену» — один Info, дальше молчаливый ретрай; «не из чего спавнить» — один Error и `_gaveUp` до смены сцены; `EconomyEnabled` проверяется в Tick | ✅ |
+| 4 | Статическое состояние и сцены | `SupremeNuclearPlugin.sceneLoaded` | ✅ закрыт 2026-10-26 (v0.31.1): Reset() у AircraftOrders/GroundOrders/StanceService, ResetGroups() у SelectionService, RouteRibbonMesh.Destroy(), Pending=None | ✅ |
+| 5 | `RouteRibbonMesh` и конфиг | `RouteRibbonMesh.AppendSamples` | ✅ закрыт 2026-10-26 (v0.31.1): шаг берётся из `Settings.RouteSampleStepM` | ✅ |
+| 6 | Мёртвый код | CommanderHud, RouteRibbonMesh | ✅ закрыт 2026-10-26 (v0.31.1): удалены DotTexture/_dot, AppendTerrainSamples, DrawDotLine, пустая `int y`; `RouteRibbonMesh.Destroy()` подключён к sceneLoaded | ✅ |
+| 7 | `EnemyNearby` O(N) | `AircraftOrders.EnemyNearby` | на каждый FixedUpdate каждого борта в attack-move; расти будет квадратично — нужна сетка/кэш контактов | открыт |
+| 8 | OnGUI-аллокации | `CommanderHud.DrawAircraftRoutes` | списки на юнита на каждое OnGUI-событие (2+/кадр) — GC-давление. Смягчено v0.91.1: тяжёлая отрисовка HUD запертана на Repaint (по одному проходу на кадр вместо 2-4) + покадровый кэш `GroundY` (физлуч с 9 км не гоняется повторно на одинаковые координаты) — лаги при большом числе вейпоинтов ушли; сами аллокации остаются | открыт (смягчён) |
+| 9 | Таймер пересборки меша | `RouteRibbonMesh.Tick` | пересборка каждые 0.5 с всегда, даже без изменений (Version есть, но `\|\|` с таймером побеждает); на длинных картах — статтеры; меш по умолчанию выключен | открыт |
+| 10 | README обновлён | — | ✅ закрыт 2026-10-26 (документирование) | ✅ |
+| 11 | Тултипы UI | UiKit/панели | ✅ частично закрыт 2026-10-26 (v0.60.0): hover-карточка определения юнита на плитках каталога/очередей/ростера (`SupcomUi.UpdateTileHover`, опрос в Update — uGUI-события не нужны); расширена 2026-10-27 (v0.85.0) до SupCom-инфо. v0.60.0–v0.85.0 карточка НЕ ПОКАЗЫВАЛАСЬ вообще (HideTip сбрасывал `_hoverDef` в окне задержки — таймер перезапускался каждый кадр; плейтест v0.85.1, исправлено там же). v0.86.0 по плейтесту переработана в панельную схему SupCom: карточка у курсора убрана, наведение переключает панель свойств (заголовок «ЗАКУПКА») + второе окно «ОПИСАНИЕ» под ней. Общий тултип-слой UiKit для прочих элементов (кнопки/панели) — по-прежнему отложено до реального потребителя | ✅ (частично) |
+| 12 | Сериализация задач | `Tasks/BuildTasks.cs` | записи data-shaped, но записи в сейвы/MP-синхронизация не подключены (runtime-ссылки FactionHQ/Unit); сделать на этапе сейвов | открыт |
+| 13 | Инженер = TRUCK | `GameApi.IsEngineer` | временная роль грузовика до модовых определений юнитов; нет ассиста/ремонта/требований рельефа площадки | открыт (осознанно) |
+| 14 | Меш-ленты без слияния групп | `RouteRibbonMesh.CollectGround/CollectAir` | эксперим. меш-рендер (`RouteUseMesh=false`) рисует по ленте на юнита: групповые маршруты дают N параллельных лент формации; IMGUI-рендер слияет через `Util.GroupPrefixCentroids` (v0.59.0) — при включении меша перенести ту же логику | открыт (меш выключен) |
+| 15 | Приказ «Атака» не назначает цель | `AircraftTargetPinPatch`, `AircraftSteeringPatch` | ✅ закрыт 2026-10-26 (v0.62.0): пиннинг цели Postfix `AssessHQTarget` (§6.3) с подбором станции по `AnalyzeTarget` и даталинк-гейтом; подлёт к цели/якорю до входа в зону боя | ✅ |
+| 16 | Дефекты пика цели ПКМ | `MoveOrderService.TryPickEnemyAt` | ✅ закрыт 2026-10-26 (v0.62.0): `Building` в фильтре, единый радиус 16px, пик врага РАНЬШЕ конвертации вейпоинтов/недостроев, Shift — очередь атак (`EnqueueAttack`), наземка получает приказ атаки цели (`GroundOrders.SetAttack`), Attack/Rtb не конвертятся в патруль | ✅ |
+| 17 | AI-борта не перевооружается/не заправляется | `SortieService` (интерим) | ✅ интерим закрыт 2026-10-26 (v0.62.0): аэродромный сервис на земле (`RpcRearm` + `Refuel`, время/цена в Settings) в цикле миссии вылета. Остаётся ОТКРЫТОЙ экономика логистики (мини-игра командующего: доставка, электростанции, экстракторы) — DESIGN §3-7 | интерим ✅ / экономика открыта |
+| 18 | Сканы врагов O(N) на юнита | `GroundOrders.NearestEnemyInWeaponRange`, `AircraftOrders.EnemyNearby` | наземные сканы — по `BattlefieldGrid.GetUnitsInRangeEnumerable` (нативная сетка), но троттл 0.5 с/юнит и скан в `EnemyNearby` на каждый FixedUpdate борта в attack-move; рост квадратичный — тот же класс долга, что №7 (кэш контактов) | открыт (2026-10-26) |
+| 19 | Disperse Move не охватывает инженеров | `MoveOrderService.IssueDisperseMove` | очереди движений инженеров живут в `BuildTasks.Sequences` (общая очередь стройки) — распределение на них не действует; завести при появлении самостоятельных маршрутных очередей инженеров | открыт (2026-10-27, осознанно) |
+| 20 | Веер не комбинируется с залпом (V) | `MoveOrderService.IssueFanAttack` | раздача веера всегда выдаёт Attack-приказы (авиация — атака-вылет); залповые борта в смешанной группе идут обычной атакой — комбинировать при реальной потребности | открыт (2026-10-27, осознанно) |
+| 21 | Бомбовый залп | `SalvoService` | залп пускает только ракетные станции (`WeaponInfo.missile`): бомбам нужен расчёт точки сброса (нативный бомбовый заход) — бомбовозы в режиме «Залп» деградируют в атаку-движение; сделать «залповый бомбосброс» по образцу нативного `LookForBombingTargets` | открыт (2026-10-26, v0.68.0) |
+| 22 | Скоростные режимы вертолётов | `HeloSteeringPatch` | игра не даёт моду тротл на вертолётах (hover-контур сам считает газ); вертолётам доступны высоты, скорости — нет (зафиксировано DESIGN §2.11a); v0.93.0 — командная панель больше не предлагает скоростные режимы чисто вертолётному выделению (`GameApi.IsHeloFamily`); пересмотреть при появлении API скорости вертолёта | открыт осознанно (2026-10-26, v0.68.0; UI закрыт 2026-10-27, v0.93.0) |
+| 23 | Whitelist станций залпа не синхронизирован | `SalvoService.Stations` | выбор станций (чипы панели) — мод-local состояние хоста-командира; в MP клиент-командир не заложен (командирский режим сейчас хост-only), при появлении клиента — синхронизировать приказом | открыт (2026-10-26, v0.68.0) |
+| 24 | Гейты вооружения не синхронизированы | `WeaponGateService.Blocked` | маска выключенных классов — мод-local состояние хоста; тот же класс долга, что №23; enforcement хост-side: ручные пуски асов-людей идут мимо гейта (CmdLaunchMissile → LaunchMount без проверки Ready) | открыт (2026-10-27, v0.71.0; DESIGN §3-11) |
+| 25 | Рантайм-тогглы миникарты не персистятся | `Settings`/`MinimapPanel` | UI пишет статические копии (`Settings.MinimapRelief/X/Y/Size/Visible = …`) и зовёт `SaveConfig()` — но `ConfigFile.Save` пишет Value ЗАПИСЕЙ, которые никто не обновляет: тогглы/геометрия окна живут до перезапуска. Паттерн-эталон уже есть: `Settings.SetRangeRing` (удержанные записи `RangeRings.*`); перенести на него ключи `UI.*` | открыт (2026-10-27, обнаружен при v0.72.0) |
+| 26 | ~~Кольца атаки — один максимум на домен~~ ЗАКРЫТ | `RangeRings.CollectCircles` | v0.76 развёл по доменам (АС/АА); v0.77 — режим «Оружие» (RangeRings.Weapons): кольца по классам вооружения (Пушки/Рак.ВВ/Рак.АС/Бомбы+ЯЗ) с учётом гейтов — рабочий сценарий пользователя «выключил AGM → вылет из-за холма на пулемётах → включил AGM → снёс стационарные» | закрыт (2026-10-27, v0.77) |
+| 27 | Стаки очереди не разделяются по лодаутам | `SupcomUi.FillFactoryQueue`/`FillHangarsQueue`, `ProductionTasks.RemoveTail` | позиции очереди несут запечённый лодаут (v0.88), но плитки нижней ленты группируются ТОЛЬКО по определению: два стака одного борта в разных конфигурациях сливаются в один визуально (снятие хвоста снимает последние позиции независимо от лодаута); различать — группировать серии по (def, Loadout) при реальной потребности | открыт (2026-10-27, v0.88, осознанно) |
+| 28 | Удаление текущей точки не отменяет выданный SetDestination | `GroundOrders.RemovePoint` | юнит доезжает до УДАЛЁННОЙ точки: перевыдаётся следующая, когда цепочка пережила удаление, но уже выданная команда не отзывается; отменять сразу или игнорировать — вопрос UX (SupCom доезжает), решить по плейтесту | открыт (2026-10-27, v0.89.0) |
+| 29 | Двойное хранение головы очереди инженера | `BuildTasks.Sequences` (Issued) + `GroundOrders.Chains` | выданная голова живёт в двух хранилищах, парность поддерживается вручную (`SetSequenceMove`/`RemoveSequenceMove`/`RemoveByGroupId`/`MoveSite`/`AdoptChainTail`/`DetachRoute`) — регресс v0.80.1 уже был; с v0.89 все мутации вейпоинтов идут через фасад `WaypointOps`/сервисы (меньше точек забыть), полная унификация (одно хранилище) — отдельная задача | открыт (2026-10-27, v0.89.0, риск снижен) |
+| 30 | Ралли-маршруты — отдельный мир вейпоинтов | `ProductionTasks.Rally` | без groupId, без драга/удаления точек, вне `WaypointKind`/`WaypointOps`; отрисовка двумя почти идентичными блоками (аэродром/депо); свести к общей модели при появлении потребности редактировать ралли | открыт (2026-10-27, осознанно) |
+| 31 | Конвертация в патруль — пер-бортовая | `WaypointOps.ConvertToPatrolAt` | драг/удаление групповые (по groupId), а конвертация в патруль действует только на борта-владельца точки; групповая конвертация — открытый вопрос дизайна (DESIGN §2 молчит) | открыт (2026-10-27) |
+| 32 | Смена профиля посреди Shift-серии патруля создаёт недостижимый второй цикл | `AircraftOrders.Enqueue` (`SameFlightModes`) | патрульный сегмент вечен (DESIGN: цикл до последнего), но при несовпадении профиля высоты/скорости/рельефа с существующим циклом Enqueue молча ДОБАВЛЯЕТ второй патрульный сегмент — его вейпоинты рисуются, но никогда не выполняются (план за вечным первым); в группе расщепляет звено по бортам. Фикс-кандидат: перештамповывать профиль живого цикла или отказывать с Notice | открыт (2026-10-27, v0.96.0) |
+
+---
+
+| 33 | Верфь: корпус = модель депо | `BuildTasks.DockDefinition`/`SpawnDock` | в контенте нет пирса/крана (зонд v0.91.1) — верфь строится корпусом VehicleDepot на меш-платформе; при появлении модовых ассетов заменить модель, конвейер не меняется | открыт (2026-10-27, v0.92) |
+| 32 | Морской инженер vs плавучий грузовик | `GameApi.IsEngineer`, `Units/EngineerFloat.cs` | основной путь — OTB-31 LC как морской инженер (нативный ховер, якорь у площадки, без физики); Jackknife-пловец (пружина+тяга+импульсы входа VelocityChange) остаётся опцией — жизнеспособность подтяговых импульсов и клиренса EngineerFloatHeightM не подтверждены плейтестом | открыт (2026-10-27, v0.96) || 34 | Диагностика не локализуется | `SelfCheck`, F11-оверлей (`LastClickDebug`/`LastGrabDebug`), логи `Log.*` | осознанно только по-русски (инструмент разработчика); при выходе на англоязычную аудиторию — прогнать через Loc по мере жалоб; en-строки длиннее русских и чаще подрезаются `Util.FitLine` (36/50 симв.) — подрезки видны только в en | открыт (2026-10-27, v0.93, осознанно) |
+| 35 | Патруль-ассист и патруль наземки — хост-магистрали | `BuildTasks.TickPatrolAssist`, `GroundOrders` (Patrol) | (а) авто-достройка недостроев инженерами в патруле — host-only (оплата/спавн хостовые; на клиенте патруль просто ездит); (б) патрульный юнит НЕ считается «простаивающим» (`IsIdle`=false у цикла) — из зоны стройки его не выпихивают (`TryPushOutOfZone` сломал бы цикл GroundOrders.Set): патрульная колонна сквозь площадку ставит стройку на паузу, пока не пройдёт/её не отведут; (в) наземный патруль не синхронизируется как отдельный вид приказа (точки идут штатным SetDestination) | открыт (2026-10-27, v0.95, осознанно) |
+| 36 | Сопровождение: ограничения v0.97 | `GroundOrders` (Escort), `AircraftOrders` (Escort), `BuildTasks.TickEscortAssist` | (а) наземке сопровождение НЕ ставится в очередь (цепочка одна, Kind=Escort без точек; Shift+ПКМ — Notice) — авиации Shift работает (план-модель); (б) эскорт-ассист — host-only (как патруль-ассист: оплата/Builders хостовые, клиент просто следует); (в) ассист ПРОИЗВОДСТВА (фабрика/ангар как цель) нет — только стройки: у ассиста производства нет механизма ускорения очереди деньгами (появится с потоковой экономикой DESIGN §2.2); (г) скан врага авиа-эскортом (`EnemyNearby`) — на каждый FixedUpdate борта, тот же класс O(N)-долга, что №7/№18; (д) связи сопровождения не сериализуются в сейвы (как всё runtime-руление, №12-12) | открыт (2026-10-27, v0.97, осознанно) |
+
+---
+
+## 13. Справочные материалы
+
+- `decompiled/` — декомпилированный `Assembly-CSharp` игры: единственный источник правды об API
+  из §5. Перед использованием незнакомого вызова — свериться здесь.
+- `GroundControlRts/` — бета Ground Control 0.9.9.4: паттерны (депо-покупки, supply, патчи),
+  **код не копировать** (лицензия, DESIGN §6).
+- `DESIGN.md` — гейм-дизайн и план (v0.4): что и в каком порядке строим дальше.
+- Памятка по происхождению решений — комментарии в коде («GC патчил этот же метод» и т.п.).
+
+## 14. Task-API — слой задач (веха стройки, v1 от 2026-10-26)
+
+Ключевое архитектурное решение DESIGN §2.3: **вся стройка/производство — сериализуемые задачи**,
+общие для UI игрока, AI-командира, мультиплеера и сейвов. Приказы (`AircraftOrders`/`GroundOrders`)
+остаются runtime-рулением юнитов; задачи — отдельный слой НАД ними.
+
+### Модель (v1 — постройка зданий)
+- `BuildTasks.Task` — data-shaped запись: `Id` (GUID), `Definition` (jsonKey-совместимо), `Site`
+  (`GlobalPosition`), `Cost/Paid` (деньги), `Builders` (runtime-ссылки до этапа сейвов — долг §12-12).
+- Хранилище `Active` — host-only; `Version` инвалидирует кэши отрисовки (инвариант №7).
+- Потоковая оплата (семантика SupCom): пока ≥1 инженер в радиусе `BuildSiteRadiusM` — деньги
+  утекают со скоростью `Cost / BuildSecondsPerBuilder × N`; нет денег/инженеров — задача стоит.
+  Это ядро будущей потоковой экономики (mass/energy лягут в тот же механизм drain).
+- Завершение: `Spawner.SpawnFromUnitDefinitionInEditor` с фракцией задачи `t.Faction`
+  (v0.59.1: null-HQ делал здание нейтральным — не выделялось, и техника из такого
+  депо наследовала чужую фракцию); отмена — возврат уплаченного.
+- Инженер v1: `GameApi.IsEngineer` = TRUCK (долг §12-13: модовые определения позже).
+
+### Ввод/UI (этап A+B-срез)
+- Режим установки: клик позиции в каталоге «Производство» (виден при инженере в выделении) →
+  `BuildTasks.Pending` → призрак под курсором (CommanderHud) → ЛКМ по земле = площадка
+  (клик `Consumed` как у RouteEditor — выделение пропускает кадр), ПКМ/Esc — отмена.
+- Маркер площадки: рамка + заливка прогресса + имя/процент (CommanderHud.DrawBuildMarkers).
+- Инженеры автоматически едут к площадке (`GroundOrders.Set`).
+
+### Реализованные надстройки (v0.43–v0.58)
+- **Модель стройки SupCom** (описана юзером 2026-10-27; v0.87.2 — распределение по
+  одному из v0.87.1 ОТМЕНЕНО): каждая площадка назначается ВСЕМ ВЫДЕЛЕННЫМ инженерам —
+  пачка едет вместе и строит серию ПО ОЧЕРЕДИ (скорость = N инженеров на здании).
+  «Индивидуальность» = у каждого инженера СВОЯ очередь `Sequences`: заказ одному или
+  подмножеству исполняют ровно они. Прерывание: новая постановка/приказ без Shift —
+  новая очередь (инженеры снимаются со всех задач, площадки-недострои остаются);
+  Shift — дописать в конец очереди (движения/площадки вперемешку). Ассист: ПКМ по
+  недострою (`TryResume`) добавляет всех выделенных.
+- **ЕДИНАЯ ОЧЕРЕДЬ инженера по порядку кликов** (`Sequences`: записи Move/Task вперемешку,
+  аванцер выдаёт точки; групповые движения — общий groupId: драг/удаление на всю группу).
+  При появлении первой записи (постановка `Place`/достройка `TryResume`) хвост обычной
+  цепочки `GroundOrders` переезжает в очередь ЦЕЛИКОМ (с groupId точек), цепочке остаётся
+  одна текущая точка (v0.80.1: хвост в двух хранилищах давал задвоение маркеров и
+  повторный проезд маршрута после исчерпания цепочки). Драг выданной головы очереди
+  перевыдаёт точку в `GroundOrders` (`SetSequenceMove`+Issued, v0.80.2) — как `SetQueuePoint`.
+  Цепочка инженера с живой очередью — СЛУЖЕБНАЯ выданная голова (транспорт
+  `SetDestination`): НЕ рисуется (CommanderHud/RouteRibbonMesh) и НЕ сканируется
+  (WaypointScanner) — маршрут целиком рисует/сканирует проход очередей; оба прохода
+  рисовали одну и ту же голову дважды (v0.83.1). Удаление выданной головы очереди
+  (`RemoveSequenceMove`/`RemoveByGroupId`) сносит и её цепочку — юнит не доезжает
+  до удалённой точки.
+- **Недострой**: площадка БЕССРОЧНА и не зависит от строителей (SupCom-канон,
+  подтверждён плейтестом v0.83.2: недострой ждёт инженеров, те переключаются между
+  заданиями; v0.80.2 сносил задачу без строителей — отменён как противоречащий канону).
+  Сброс очереди инженера (`ClearFor`) снимает ЕГО с задач, площадки не трогает;
+  снос — Ctrl+K/кнопка/тело Ctrl+Shift; достройка — ПКМ по ПРИЗРАКУ/маркеру площадки
+  выделенными инженерами (`TryResume`: пик — тело 3D-призрака + маркер пик-радиусом +
+  у ВПП любая точка полосы сэмплами; без Shift — НОВАЯ очередь инженера, с Shift —
+  дописать; уплаченный прогресс сохраняется).
+- **Кольцевой подход вне габарита** (v0.95): радиус остановки строителя = полу-диагональ
+  футпринта (+ платформа верфи) + `BuildApproachMarginM`, зажатый в [25 м, 0.85×радиуса
+  оплаты] (`Util.BuildApproachRingM`, чистая); строители распределяются ВЕЕРОМ по
+  азимутам (`Task.ApproachBearings` + `FanBearingOffset`, пересчёт при каждом изменении
+  состава Builders) — окружают призрак сектором со стороны подъезда и останавливаются
+  у границы, а не въезжают в футпринт; ВПП — проекция на полосу + перпендикуляр наружу
+  (строить можно вдоль всей полосы), веер азимутов у ВПП не назначается. Стоп-затем-строй
+  (оплата при скорости ≤ 3 м/с), раздвиг площадок ≥ 60 м, зона застройки (блокеры — выталкивание).
+- **Патруль-ассист инженеров** (v0.95, SupCom): инженер в патрульном цикле, проезжая
+  в `BuildPatrolAssistRadiusM` от СВОЕГО недостроя, снимает патруль (снимок
+  `TryGetPatrolSnapshot`), строит (запись в общей очереди — аванцер ведёт/возвращает
+  к площадке, оплата через общий фокус-механизм) и по готовности/сносу площадки
+  возвращается в цикл (`RestorePatrol`); явный приказ игрока (`ClearFor`) снимает
+  инженера с задачи БЕЗ возврата патруля. Хост; троттл скана 0.5 с.
+- **Шаблоны** (вкладка «Ш»): персистентные JSON; наборы зданий с ОТНОСИТЕЛЬНЫМИ позициями;
+  инженером — призраки набора (занятое красным, пропускается), фабрикой — набор в конец очереди.
+- **Ctrl+K** — уничтожение выделенного (юниты/здания — игровой урон с обломками;
+  аэродром — убийство его зданий).
+- **3D-призраки** (модель GC): DrawMesh-силуэты (Built-in шейдер), тинты
+  стройка/валидно/занято; драг за тело (экран-прямоугольник от размеров определения);
+  начатые — выделить/снести, не переместить.
+- **Драг вейпоинтов/площадок** (v0.58.5): перемещение начинается только после порога
+  6 px (ClickPx) — клик без движения = выделение (недострой) и ничего не ездит;
+  промах луча по рельефу (курсор над небом) кадр пропускает — телепорта точки в
+  мировой ноль больше нет; площадки при драге НЕ снапятся к юнитам (юнит — блокер
+  зоны, не цель снапа). Захват разрешён и начатым площадкам (Paid>0) — перемещение
+  блокирует guard в драг-ветке.
+- **Общие правила управления вейпоинтами** (v0.61.2): вейпоинт управляется там, где
+  рисуется — авиаточки сканятся на земле (y=GroundY), не с AGL-высотой (раньше при
+  наклонной камере захват патруля промахивался на сотни пикселей); групповые
+  операции едины для всех типов приказов — по groupId клика (наземка: синхронные
+  индексы, инженеры: groupId записей, авиация: groupId точек плана — у каждого
+  борта свои сегмент/индекс, драг — общая дельта, удаление Ctrl+Shift+ПКМ — у всей
+  выделенной группы). Заодно устранён дубль выдачи авиации (IssueForTarget выдавал
+  точку ДО формационной решётки IssueFormationOrders, причём Transit вместо
+  AttackMove) — теперь авиация получает одну точку клика с правильным режимом.
+- **Групповая точка — свойство ТОЧКИ, не выделения** (v0.62.0): groupId есть у точек
+  всех трёх хранилищ (GroundOrders.PointGroups, BuildTasks.SeqEntry.GroupId,
+  AircraftOrders.PointGroups) из ОДНОГО счётчика. Драг/удаление групповой точки
+  действуют на ВСЕХ членов группы приказа (GroundOrders.CollectGroup /
+  BuildTasks.UnitsWithSequences / AircraftOrders.CollectGroup) — корректировать
+  можно, выделив любого члена группы или вообще не выделяя (Shift-режим).
+  Индивидуальные точки (groupId=0) — только у владельца. Рендер (CommanderHud)
+  слияет независимо от выделения: групповая точка — один маркер-центроид, сегменты
+  между соседними групповыми точками — дедуп между юнитами (магистраль рисует
+  первый), вход в группу — одна нога от центроида якорей членов, индивидуальные
+  точки — личные ветки схождения/расхождения. Настройка GroupWaypointSpreadM
+  упразднена (слияние по groupId, не по разбросу формации).
+- **Параллельная оплата аэродрома** (v0.67.0, доработано v0.74.x — слоты по типу
+  борта): слотов оплаты позиции = живые ангары, УМЕЮЩИЕ строить её тип
+  (`PaySlots` перебирает `Airbase.hangars` и `Hangar.GetAvailableAircraft`;
+  вертолётные и самолётные площадки — независимые пулы). Раньше аэродром платил
+  только головную позицию — 5 ангаров не ускоряли очередь; теперь до K позиций
+  наливаются одновременно (суммарный дрейн = min(очередь типа, K) × rate), выпуск
+  по-прежнему нативный `TrySpawnAircraft` в первый свободный ангар по приоритету.
+  Ключ слота = (аэродром, тип борта) — очереди разных типов наливаются параллельно;
+  депо — ключ без типа, строго один поток. Слот гейтит только оплату: выпуск
+  оплаченного не гейтится (ангары могли умереть после оплаты). v0.74.x заодно:
+  `EnqueueAir` отклоняет тип, который аэродром не строит (`CanBuild`, Notice),
+  а каталог вкладки «Производство» аэродрома = нативный юнион `GetAvailableAircraft`
+  (раньше показывал ВСЮ авиацию Encyclopedia — заказ нестроимого типа вешал
+  оплаченную позицию вечно). Самопроверка: SelfCheck(startup) —
+  `hangars`/`attachedUnit`/`GetAvailableAircraft`.
+- **Достройка ангаров к аэродрому** (v0.78.0, переработано v0.80.0 по плейтесту — этап 2
+  «мультифабрика»): 4 здания-ангара в `Encyclopedia.buildings` (SelfCheck-лог печатает их
+  ИМЕНА) строятся инженером как обычные здания. Гейт постановки один (`BuildTasks.Place`):
+  свой аэродром в радиусе `HangarAttachRadiusM` (600 м, `NearestOwnAirbase` по
+  `FactionRegistry.airbaseLookup`/`CurrentHQ`; RunwayQuery НЕ используется — пустой запрос
+  игра считает неподходящим). Бетон-гейт v0.78.0 УБРАН (пустынные аэропорты без апрона) —
+  вместо него по завершении стройки мод ДОРИСОВЫВАЕТ РУЛЁЖКУ: дорога «выход ангара →
+  ближний РОДНОЙ узел такси-сети (v0.83.0: снимок `MainlineNodes` до наших дорисовок —
+  иначе каждый новый ангар цеплялся к дороге предыдущего и ангары сцеплялись ЦЕПОЧКОЙ),
+  цель «за спиной» выхода штрафуется ×3 (не вести полосу через своё здание — баг
+  «коллайдер на крыше»), дорога стартует от ворот +10 м (`DoorClearanceM`); пустая
+  сеть — ближний торец ВПП. Вдоль дороги строится ПОВЕРХНОСТЬ (v0.81.0 `TaxiSurface`,
+  v0.85.0 — ПЕРЕДЕЛАНО на меш): ОДИН непрерывный MeshCollider-лента на кусок
+  (дорога/апрон-сетка) на слое Statics без материала — для шасси игры любой коллайдер
+  с материалом ≠ terrainMaterial = тармак (`LandingGear.onTarmac`), колёса не вязнут;
+  вершины на `GroundYNoUnits`+0.12 шагом 15 м, каждая кромка на СВОЁМ рельефе — лента
+  обтекает неровности. Стопка наклонённых BoxCollider (v0.81–0.84) на стыках давала
+  кромки/ступеньки — шасси ловило спайк сжатия и ЛОМАЛОСЬ (плейтест v0.84). Визуал —
+  «таксёвка» ГЕОМЕТРИЕЙ
+  (v0.83.0, без текстур; v0.85.1 асфальт НЕПРОЗРАЧНЫЙ — blend One/Zero + ZWrite,
+  очередь 2000, иначе грунт просвечивал сквозь «бетон»; разметка/превью — прозрачный
+  проход очередью 3000 поверх написанной глубины): белые кромки + жёлтый пунктир.
+  Плюс АПРОН ПОД ангаром (v0.82.0, `TaxiSurface.Pad`): сетка футпринт+12 м по YawDeg —
+  борт стоит на бетоне с первого колеса, грунта внутри коробки нет (боль GC-ангаров).
+  ПРЕВЬЮ маршрута (v0.83.0, чинено v0.84.0): на призраке установки ангара светло-голубая
+  полоса «выход → точка подключения» (`TryPreviewTaxiRoute` = тот же выбор цели,
+  `SetPreview` рисует без коллайдеров) — видно маршрут до постановки, площадку можно
+  двигать/крутить. v0.84.0: превью НЕ гейтится валидностью площадки (блокеры-инженеры
+  рядом прятали путь) + логирует причины отказа при переходе. КРЫША (v0.84.0):
+  коллайдеры зданий ловят StaticsMask-луч `GroundY` → под ангаром «рельеф» = крыша;
+  все высоты плит/апрона/превью берутся `GameApi.GroundYNoUnits` (верхний хит луча
+  БЕЗ юнитов, RaycastNonAlloc-буфер). ВЫХОД без spawnTransform (hardened-ангар):
+  синтетический «по габариту +Z» в `BuildGhosts.TryGetExit` (стрелка+превью) и тот же
+  фолбэк в `ConnectTaxiway` (иначе дорога шла от ЦЕНТРА здания — плита через ангар).
+  Спавн — нативный
+  `Spawner.SpawnBuilding(prefab, pos, rot, HQ, airbase, ...)` (SetAirbase-синк +
+  AddHangar-слот, `PaySlots` подхватывает сам); аэродром, потерянный за стройку, — возврат.
+  ПОВОРОТ площадки (v0.80.0, все здания): ЛКМ фиксирует точку → удержание крути выход
+  курсором (`PlacingActive/PlacingSite/PendingYawDeg` → `Task.YawDeg` → спавн с поворотом);
+  ангару по умолчанию — выходом к аэродрому; весь жест гасит выделение (Consumed каждый
+  кадр — рамка не стартует). ПРИЗРАК: стрелка ВЫХОДА ангара (жёлтая, от `Hangar.
+  GetSpawnTransform()` префаба, без кульинга) на режиме установки и на площадках; призрак
+  ангара краснеет и вне радиуса своего аэродрома. Плитки ангаров — бейдж «АНГ».
+  ВЫХОД/НАКЛОН ВСЕХ ПРОИЗВОДЯЩИХ (v0.95, юзер-запрос «как ангары»): стрелку и обратную
+  связь вращения получают депо и верфь — `IsProducingDefinition` (Hangar ИЛИ VehicleDepot);
+  выход депо — реальный `spawnTransform` (приватное поле, рефлексия с кэшем + проба
+  SelfCheck; техника игры выезжает именно из него, `MoveVehicleFromDepot` толкает по его
+  forward), фолбэк без поля — синтетический габарит +Z (как у hardened-ангара). НАКЛОН
+  под рельеф (депо на суше): `TerrainTilt` сэмплирует 4 угла футпринта в повороте yaw
+  (`GroundYNoUnits` — GroundY у соседа ловит его крышу), чистая `Util.FootprintTilt`
+  (+тесты) даёт pitch/roll со знаками `Quaternion.Euler(pitch, yaw, roll)` и клампом
+  `Build.TerrainTiltMaxDeg` (по умолчанию 15°, 0 — выключить); фиксируется в задаче
+  (`PitchDeg/RollDeg`) при постановке — рельеф под площадкой не меняется, протухнуть
+  не может; призрак установки наклоняется живьём тем же расчётом. Ангар НЕ наклоняется
+  (плоский апрон `Pad`), верфь НЕ наклоняется (платформа у моря). Верфь заодно получила
+  3D-призрак режима установки (ветка `PendingDock` в `Render`: корпус на уровне палубы,
+  стрелка выхода, тинт по глубине — гейт как в `TryPlaceDock`) — раньше в режиме была
+  только HUD-рамка; призрак-задача и пик тела верфи (`ScreenContains`) тоже подняты
+  со дна на уровень моря (GroundY под водой = дно).
+  Известное ограничение: рулёжка дорисовывается только на хосте (клиент сеть не синкает;
+  AI-руление — серверное).
+- **ПОСТРОЙКА ВПП = новый аэродром** (v0.87.0, этап 3): плитка «ВПП» в каталоге стройки
+  инженера (бейдж «АЭР», цена `RunwayCost`); установка ДРАГОМ — ЛКМ ставит первый
+  торец, протянуть курсором второй (`PendingRunway`/`PlacingRunwayEnd`), длина
+  клампится в [RunwayMinM, RunwayMaxM] (900–4000 м; короче — тяжёлым не хватит
+  разбега — нативный `Runway.IsSuitable` их не пустит). Призрак — широкая полоса
+  с белыми порогами (`TaxiSurface.SetRunwayPreview`, без физики). По готовности —
+  нативный `Mission.SpawnCustomAirbase(SavedAirbase, ServerObjectManager)` (рецепт
+  редактора миссий: SavedInMission + UniqueName + faction + `mission.airbases.Add`;
+  полоса реверсивная взлёт/посадка, аэродром ЗАХВАТЫВАЕМЫЙ — стратегический объект)
+  + меш-поверхность под полосу (`TaxiSurface.Register(a, b, width)`). НОВЫЙ аэродром
+  = СВОЯ очередь/грид ангаров — паттерн «несколько фабрик» SupCom на уровне
+  «полоса + её ангары» (решение по плейтесту: разделять очереди ПО-АНГАРАМ не
+  будем — микрошум; строишь ещё полосу — получаешь ещё фабрику). Привязка ангаров
+  к аэродрому считает дистанцию и до ОТРЕЗКОВ ВПП (`DistSqToSegment`) — у длинной
+  полосы ангары у торца далеко от «центра». SelfCheck(startup): SpawnCustomAirbase/
+  SavedRunway/SavedAirbase/ServerObjectManager пробы. ВАЖНО: миникарта/ромбы
+  аэродромов видят новый аэродром автоматически (FactionRegistry).
+
+### Что добавлять сюда дальше (этап B+)
+- `ProductionTask` (фабрики/очереди, DESIGN 2.3a) — РЕАЛИЗОВАН v0.36.0 в виде
+  `ProductionTasks` (депо-фабрики): очередь = список позиций, потоковая оплата головной
+  позиции, пауза/цикл (кнопки нижней панели 2.10), отмена кликом с возвратом,
+  выпуск нативным `TrySpawnVehicle`; нет денег — очередь стоит (SupCom).
+- Ассист (несколько инженеров на задачу — уже работает через `Builders`, добавить UI-назначение).
+- Тиры фабрик, шаблоны, «цикл» — по §2.10.
+- Сериализация в сейвы + MP-репликация (Mirage-сообщения) — когда появятся сейвы.
+- AI-командир потребляет ТОТ ЖЕ API (`Place/Cancel/Tick`) — поэтому API публичный и data-shaped.
