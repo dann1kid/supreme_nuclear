@@ -16,8 +16,8 @@
 2. Скачай `SupremeNuclear-<версия>.zip` из [релизов](../../releases) и распакуй в
    `Nuclear Option/BepInEx/plugins/` — должна получиться папка `SupremeNuclear`
    с DLL и `Locales/`.
-3. В игре: выйди из кабины → **F10** — режим командира. Горячие клавиши — спойлер
-   «Горячие клавиши» ниже.
+3. В игре: выйди из кабины → **F10** — режим командира. Управление — раздел
+   «Управление / Controls» ниже.
 
 Сборка из исходников — спойлер «Разработчику».
 
@@ -28,7 +28,8 @@ Box-select units, right-click to order (Shift queues), drag-edit waypoints on th
 build anywhere with engineers, run factories (vehicle depot / airbase / naval yard),
 raise your own runway, pick aircraft loadouts, run patrols, escorts, missile salvos
 and weapon gates. UI ships in English and Russian (`General.Language` in the BepInEx
-config). Controls/UX feedback is welcome — GitHub Issues (feedback template).
+config). Full controls — in the **Controls** section below (RU/EN).
+Controls/UX feedback is welcome — GitHub Issues (feedback template).
 
 ## Известные ограничения
 
@@ -271,8 +272,10 @@ Jackknife «барахтается» вплавь к площадке), гото
 
 </details>
 
+## Управление / Controls
+
 <details>
-<summary><b>Горячие клавиши</b></summary>
+<summary><b>Русский (RU)</b></summary>
 
 - **ЛКМ** — выделение/рамка/перетаскивание вейпоинтов (рамка без Shift: есть боевые
   юниты — выделятся только они, нет — все движущиеся; здания — кликом; Shift-рамка
@@ -294,6 +297,33 @@ Jackknife «барахтается» вплавь к площадке), гото
 Настройки: `BepInEx/config/com.supremenuclear.rts.cfg`.
 Баланс экономики: `BepInEx/plugins/SupremeNuclear/Economy/<профиль>.json` (образец
 создаётся сам).
+
+</details>
+
+<details>
+<summary><b>English (EN)</b></summary>
+
+- **LMB** — select / box-select / drag waypoints (plain box: if combat units are
+  present only they get selected, otherwise all mobile units; buildings — by click;
+  Shift-box adds everything, ordered engineers → logistics → defensive → production;
+  click a visible enemy unit or missile — inspect it in the info panel)
+- **RMB** — order (Shift — queue a series; on an allied unit — escort/assist)
+- **M / A / U / T / V / S** — order modes: move / attack-move / patrol / attack /
+  salvo / stop
+- **R** — spread attack (RMB over enemies queues targets, RMB over ground — assign
+  them); **Alt+Shift+R** — Disperse Move (split the group's waypoint queue into
+  direct vectors)
+- **G** — return to base; **H** — hold fire; **X** — drop countermeasures
+- **Ctrl+1..9 / 1..9** — control groups (double-tap — camera to group)
+- **Alt+1..4** — aircraft altitude profile; **Shift+1..3** — speed; **Alt+T** —
+  terrain following; **Alt+D** — cycle auto-defense
+- **MMB / wheel** — camera (drag / zoom to cursor); **Space (hold)** — free look;
+  **Home** — map center; **F10** — toggle commander mode; **F11** — debug overlay
+- Minimap: LMB — camera jump, RMB — order, wheel over it — zoom to cursor
+
+Settings: `BepInEx/config/com.supremenuclear.rts.cfg`.
+Economy balance: `BepInEx/plugins/SupremeNuclear/Economy/<profile>.json` (a sample
+is created automatically).
 
 </details>
 
