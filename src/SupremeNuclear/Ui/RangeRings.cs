@@ -120,18 +120,20 @@ namespace SupremeNuclear
         private static readonly Dictionary<Unit, Vector2> VisionCache = new Dictionary<Unit, Vector2>();
         private const float VisionCacheSec = 2f;
 
-        /// <summary>Дальность станции для кольца. У РАКЕТ targetRequirements.maxRange —
-        /// НОМИНАЛ требований станции, НЕ предел пуска: ИИ кораблей/наземки берёт цели
-        /// с релаксацией ×100 за горизонт (CombatAI.ChooseHQTarget, только ×0.5 к оценке
-        /// за пределами 1.2×номинала — диагностика 2026-10-30: AGM-48 на корабле
-        /// номинал 10 км, пуски много дальше). Истинной дальности полёта в данных игры
-        /// нет (у ракеты только кинематика: тяга/горение/топливо). Кольцо = оценка
-        /// номинал × коэффициент из настроек; 1 — как в подсказках самой игры.</summary>
-        private static float RangeOf(WeaponInfo wi)
+        /// <summary>Дальность станции для кольца. У КОРАБЕЛЬНЫХ ракет targetRequirements.
+        /// maxRange — НОМИНАЛ, НЕ предел пуска: ShipAI оценивает цели с релаксацией ×100
+        /// (ShipAI: AnalyzeTarget(..., 100f)) и пускает насколько ракета долетит —
+        /// диагностика 2026-10-30: AGM-48 на корабле номинал 10 км, пуски много дальше;
+        /// истинной дальности в данных игры нет (у ракеты только кинематика). Кольцо =
+        /// оценка номинал × коэффициент; 1 — как в подсказках самой игры. У авиации и
+        /// наземной ПВО пуски жёстко гейтятся номиналом (LookForMissileTargets InRange;
+        /// FireControl GetTargetsWithinRange(maxRange)) — множитель НЕ применяем, их
+        /// кольца честны и без него.</summary>
+        private static float RangeOf(WeaponInfo wi, Unit owner)
         {
             float mr = wi.targetRequirements.maxRange;
             float k = Settings.RangeRingMissileFactor;
-            if (wi.missile && k > 1f)
+            if (wi.missile && k > 1f && owner is Ship)
                 mr *= k;
             return mr;
         }
@@ -665,7 +667,7 @@ namespace SupremeNuclear
                         {
                             if (st == null || st.WeaponInfo == null || !WeaponGateService.IsAllowed(unit, st))
                                 continue;
-                            float mr = RangeOf(st.WeaponInfo);
+                            float mr = RangeOf(st.WeaponInfo, unit);
                             if (mr < 1f)
                                 continue;
                             switch (Catalog.ClassOf(st.WeaponInfo))
@@ -701,7 +703,7 @@ namespace SupremeNuclear
                         {
                             if (st == null || st.WeaponInfo == null || !WeaponGateService.IsAllowed(unit, st))
                                 continue;
-                            float mr = RangeOf(st.WeaponInfo);
+                            float mr = RangeOf(st.WeaponInfo, unit);
                             if (mr < 1f)
                                 continue;
                             var eff = st.WeaponInfo.effectiveness; // RoleIdentity-структура, не бывает null

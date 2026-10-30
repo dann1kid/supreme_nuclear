@@ -86,6 +86,14 @@ namespace SupremeNuclear
                     }
                     return true;
                 }
+                case WaypointKind.AttackTarget:
+                {
+                    // Снять приказ атаки по цели у ВСЕХ юнитов (приказ группы).
+                    int removed = GroundOrders.RemoveQueueTarget(hit.Owner, hit.Index);
+                    if (removed > 0)
+                        CommanderHud.Notice(Loc.F("Приказ атаки снят: юнитов — {0}", removed));
+                    return true;
+                }
                 case WaypointKind.EscortLink:
                 {
                     // Снять сопровождение цели у ВСЕХ эскортировщиков (наземка + авиация):
@@ -151,6 +159,11 @@ namespace SupremeNuclear
                     break;
                 case WaypointKind.RallyPoint:
                     ProductionTasks.SetRallyPoint(hit.RallyFactory, hit.Index, world);
+                    break;
+                case WaypointKind.AttackTarget:
+                    // Драг креста = ПЕРЕНАЦЕЛИТЬ приказ (канон Moho): ближайший враг
+                    // у точки бросания; врага нет — тихий no-op (невалидный дроп).
+                    GroundOrders.RetargetAt(hit.Owner, hit.Index, world);
                     break;
             }
         }

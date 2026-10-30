@@ -147,10 +147,18 @@ namespace SupremeNuclear
         // Групповые циклы патруля, уже нарисованные в этой сборке (дедуп — цикл
         // рисует один член группы, §12-51 для патруля).
         private static readonly HashSet<int> PatrolCyclesDrawn = new HashSet<int>();
+        // Групповой дедуп ЛИНЕЙНЫХ лент (как IMGUI DrawnGidLegs/DrawnGidEntries):
+        // вход в группу и магистраль между групповыми узлами рисует первый член.
+        private static readonly HashSet<int> MeshGidEntries = new HashSet<int>();
+        private static readonly HashSet<long> MeshGidLegs = new HashSet<long>();
+
+        private static long PairKeyM(int a, int b) => ((long)(uint)a << 32) | (uint)b;
 
         private static void CollectGround(List<RouteDraw> routes)
         {
             PatrolCyclesDrawn.Clear();
+            MeshGidEntries.Clear();
+            MeshGidLegs.Clear();
             var units = new List<Unit>();
             var queues = new List<IReadOnlyList<GlobalPosition>>();
             var indices = new List<int>();
@@ -211,21 +219,48 @@ namespace SupremeNuclear
                     AddSmoothedRoute(routes, 2, ChainPts);
                     continue;
                 }
-                // Линейная цепочка — ОДИН непрерывный путь (канон FA: кривая течёт
-                // через ВСЕ вейпоинты с митр-тангенсами, цвет меняется на границе
-                // приказов БЕЗ разрыва геометрии — пробеги-куски давали стыки
-                // «прямоугольниками»). Подмеш сегмента = вид точки, В КОТОРУЮ он
-                // входит (per-point, v0.114).
+                // Линейная цепочка — непрерывный путь с ГРУППОВЫМ ДЕДУПОМ (как IMGUI
+                // DrawnGidLegs/Entries): вход в группу и магистраль между соседними
+                // групповыми узлами рисует ПЕРВЫЙ встретивший член, индивидуальные
+                // ветки — каждый свой (граница гонки копий — §12-51 закрыт).
                 ChainPts.Clear();
                 ChainSubs.Clear();
-                ChainPts.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                Vector3 runStart = new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z);
+                int prevGid = 0;
+                bool firstLeg = true;
+                bool runOpen = false;
                 for (int q = GroundOrders.DrawStartIndex(unit); q < queues[i].Count; q++)
                 {
+                    int gid = GroundOrders.GroupIdOf(unit, q);
                     Vector3 l = queues[i][q].ToLocalPosition();
-                    ChainPts.Add(new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z));
-                    ChainSubs.Add(SubmeshOf(GroundOrders.KindOfPoint(unit, q)));
+                    Vector3 wp = new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z);
+                    bool drawLeg = firstLeg && gid != 0
+                        ? MeshGidEntries.Add(gid)
+                        : prevGid != 0 && gid != 0
+                            ? MeshGidLegs.Add(PairKeyM(prevGid, gid))
+                            : true;
+                    if (drawLeg)
+                    {
+                        if (!runOpen)
+                        {
+                            ChainPts.Clear();
+                            ChainSubs.Clear();
+                            ChainPts.Add(runStart);
+                            runOpen = true;
+                        }
+                        ChainPts.Add(wp);
+                        ChainSubs.Add(SubmeshOf(GroundOrders.KindOfPoint(unit, q)));
+                    }
+                    else if (runOpen && ChainPts.Count > 1)
+                    {
+                        AddSmoothedRoute(routes, ChainPts, ChainSubs, 0);
+                        runOpen = false;
+                    }
+                    runStart = wp; // пропущенная магистраль: следующий прогон от ОБЩЕГО узла
+                    prevGid = gid;
+                    firstLeg = false;
                 }
-                if (ChainPts.Count > 1)
+                if (runOpen && ChainPts.Count > 1)
                     AddSmoothedRoute(routes, ChainPts, ChainSubs, 0);
             }
 

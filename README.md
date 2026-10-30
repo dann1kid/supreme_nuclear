@@ -126,7 +126,10 @@ Shift+ПКМ по целям — серия: цели выполняются п�
 целей), патруль (авиация и наземка/флот: цикл точек, ноги с боем; инженеры в патруле
 сами достраивают близлежащие недострои и возвращаются в маршрут), залп, стоп;
 drag-редактирование вейпоинтов прямо на карте, снап постановки к юнитам;
-в смешанной Shift-серии у наземки/флота вид несёт КАЖДАЯ точка; палитра лент — как в
+патруль при обнаружении врага сам гонится за ним с «поводком» (дальше 500 м от
+точки отрыва — назад на маршрут); кресты целей перетаскиваются на другие цели
+(перенацеливание приказа), ПКМ по кресту — скоординированная атака (все выделенные
+бьют одновременно), Ctrl+Shift+ПКМ — снять приказ; в смешанной Shift-серии у наземки/флота вид несёт КАЖДАЯ точка; палитра лент — как в
 SupCom FA (движение/патруль — голубые, атака/атака-движение/залп — красные,
 эскорт/стройка — жёлтые, RTB — фиолетовые), маркеры-вейпоинты белые, вид приказа несёт
 форма (квадрат/ромб/двойная рамка); по боевым (атака-движение) и патрульным ногам бегут
@@ -403,7 +406,11 @@ Jackknife «барахтается» вплавь к площадке), гото
   charged — click a series of points/targets; **RMB/Esc cancels the charge**
   (like building placement: LMB — place, RMB — cancel)
 - **R** — distribution attack (LMB over enemies queues targets, LMB over ground —
-  assign them, RMB — cancel); **Alt+Shift+R** — Disperse Move (split the group's
+  assign them, RMB — cancel);
+- Patrols chase spotted enemies on a "leash" (beyond ~500 m from the break-off
+  point they return to the route); attack cross markers can be dragged onto other
+  targets (retarget the order), **RMB on a cross** — coordinated strike (all
+  selected units fire simultaneously), Ctrl+Shift+RMB — drop the attack order; **Alt+Shift+R** — Disperse Move (split the group's
   waypoint queue into
   direct vectors; a target series — one target per unit, an engineer build series —
   split into per-engineer batches)

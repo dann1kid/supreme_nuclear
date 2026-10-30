@@ -8,12 +8,28 @@ namespace SupremeNuclear
     public static class StanceService
     {
         private static readonly HashSet<Unit> HoldFire = new HashSet<Unit>();
+        // Скоординированная атака: временный запрет огня до времени залпа
+        // (поверх стойки; снимается сам — юзерскую HoldFire не трогает).
+        private static readonly HashSet<Unit> CoordHold = new HashSet<Unit>();
 
-        public static bool IsHoldFire(Unit unit) => unit != null && HoldFire.Contains(unit);
+        public static bool IsHoldFire(Unit unit) =>
+            unit != null && (HoldFire.Contains(unit) || CoordHold.Contains(unit));
 
         /// <summary>Есть ли в мире хоть один юнит в стойке — быстрый выход
         /// предохранителя WeaponUseGatePatch без обхода выделения.</summary>
-        public static bool AnyHolding => HoldFire.Count > 0;
+        public static bool AnyHolding => HoldFire.Count > 0 || CoordHold.Count > 0;
+
+        /// <summary>Временный запрет огня координации (снимается сам по таймеру
+        /// или с приказом; в пользовательскую стойку не пишется).</summary>
+        internal static void SetCoordHold(Unit unit, bool on)
+        {
+            if (unit == null)
+                return;
+            if (on)
+                CoordHold.Add(unit);
+            else
+                CoordHold.Remove(unit);
+        }
 
         public static bool Toggle(Unit unit)
         {
@@ -42,13 +58,23 @@ namespace SupremeNuclear
             foreach (Unit unit in HoldFire)
                 if (unit == null || unit.disabled)
                     (dead ??= new List<Unit>()).Add(unit);
-            if (dead == null)
-                return;
-            foreach (Unit unit in dead)
-                HoldFire.Remove(unit);
+            if (dead != null)
+                foreach (Unit unit in dead)
+                    HoldFire.Remove(unit);
+            dead = null;
+            foreach (Unit unit in CoordHold)
+                if (unit == null || unit.disabled)
+                    (dead ??= new List<Unit>()).Add(unit);
+            if (dead != null)
+                foreach (Unit unit in dead)
+                    CoordHold.Remove(unit);
         }
 
         /// <summary>Полный сброс (смена сцены).</summary>
-        public static void Reset() => HoldFire.Clear();
+        public static void Reset()
+        {
+            HoldFire.Clear();
+            CoordHold.Clear();
+        }
     }
 }

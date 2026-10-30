@@ -26,6 +26,9 @@ namespace SupremeNuclear
         /// ПКМ по земле — раздача группе. CommanderHud рисует маркеры, пока режим
         /// заряжен; чистится зарядом и выдачей.</summary>
         public readonly List<Unit> FanTargets = new List<Unit>();
+        // Скоординированная атака: участники и их ETA (переиспользуемые буферы).
+        private static readonly List<Unit> CoordUnits = new List<Unit>();
+        private static readonly List<float> CoordEtas = new List<float>();
 
         public MoveOrderService(CommanderModeController controller) => _controller = controller;
 
@@ -100,6 +103,12 @@ namespace SupremeNuclear
             // трактуется как «Движение». ===
             if (RtsInput.RightDown && !RtsInput.PointerOverUi)
             {
+                // ПКМ по кресту серии атак — СКООРДИНИРОВАННАЯ АТАКА (канон FAF:
+                // все бьют одновременно); раньше пика врага — крест и враг стоят
+                // в одной точке, разбор по пик-радиусу маркера приказа.
+                if (TryCoordinatedStrike())
+                    return;
+
                 // ПКМ прямо по врагу — атака (раньше правки вейпоинтов/недостроев:
                 // клик по цели не должен съедаться смежными экраными действиями).
                 GameApi.TryGetLocalHQ(out FactionHQ localHq);
@@ -138,6 +147,72 @@ namespace SupremeNuclear
                 IssuePending(_controller.Selection.Selected, RtsInput.Shift);
             }
             // Приказы выдаются ТОЛЬКО по событиям ввода — ничего на каждый кадр.
+        }
+
+        /// <summary>Скоординированная атака (канон FAF, ПКМ по кресту цели): все
+        /// ВЫДЕЛЕННЫЕ наземные/флот юниты с этой целью (текущая погоня или очередь
+        /// серии) бьют ОДНОВРЕМЕННО — время залпа = самое позднее ETA + 0.5 с;
+        /// прибывшие раньше держат огонь до него (GroundOrders.CoordStrike +
+        /// StanceService-оверлей, снимается сам). true — команда принята.</summary>
+        private bool TryCoordinatedStrike()
+        {
+            Camera cam = GameApi.MainCam;
+            if (cam == null)
+                return false;
+            WaypointHit hit = WaypointScanner.Scan(_controller, cam,
+                new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y),
+                WaypointScanner.PickPx, false);
+            if (hit.Kind != WaypointKind.AttackTarget)
+                return false;
+            var targets = GroundOrders.TargetQueueOf(hit.Owner);
+            if (targets == null || hit.Index >= targets.Count || targets[hit.Index] == null)
+                return false;
+            Unit goal = targets[hit.Index];
+            CoordUnits.Clear();
+            CoordEtas.Clear();
+            foreach (Unit unit in _controller.Selection.Selected)
+            {
+                if (unit == null || unit.disabled || !(unit is GroundVehicle || unit is Ship))
+                    continue;
+                bool has = GroundOrders.TargetOf(unit) == goal;
+                if (!has)
+                {
+                    var queue = GroundOrders.TargetQueueOf(unit);
+                    if (queue != null)
+                        for (int i = 0; i < queue.Count; i++)
+                            if (queue[i] == goal)
+                            {
+                                has = true;
+                                break;
+                            }
+                }
+                if (!has)
+                    continue;
+                Vector3 d = goal.transform.position - unit.transform.position;
+                float eta = new Vector2(d.x, d.z).magnitude / CoordSpeedOf(unit);
+                CoordUnits.Add(unit);
+                CoordEtas.Add(eta);
+            }
+            if (CoordUnits.Count == 0)
+                return false;
+            float volleyAt = Time.time + 0.5f;
+            for (int i = 0; i < CoordEtas.Count; i++)
+                volleyAt = Mathf.Max(volleyAt, Time.time + CoordEtas[i]);
+            for (int i = 0; i < CoordUnits.Count; i++)
+                GroundOrders.CoordStrike[CoordUnits[i]] = (goal, volleyAt);
+            CommanderHud.Notice(Loc.F("Скоординированная атака: юнитов — {0}, одновременный удар через ~{1:0} с",
+                CoordUnits.Count, volleyAt - Time.time));
+            return true;
+        }
+
+        /// <summary>Оценка скорости юнита для ETA координации: текущая (в движении)
+        /// либо типовая походная 10 м/с (стоящий разгонится — ETA с запасом вверх).</summary>
+        private static float CoordSpeedOf(Unit unit)
+        {
+            Vector3 v = unit.GetComponent<Rigidbody>() != null
+                ? unit.GetComponent<Rigidbody>().velocity
+                : Vector3.zero;
+            return Mathf.Max(new Vector2(v.x, v.z).magnitude, 10f);
         }
 
         /// <summary>Удаление вейпоинта под курсором (Ctrl+Shift+ПКМ): цепочки наземки,

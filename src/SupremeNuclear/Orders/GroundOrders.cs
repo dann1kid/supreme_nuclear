@@ -65,6 +65,15 @@ namespace SupremeNuclear
             /// «хвостом от точки» замыкает в цикл точки [LoopStart..end); 0 — цикл
             /// всех точек, как у патруля, выданного целиком).</summary>
             public int PatrolLoopStart;
+            /// <summary>Поводок патруля (Moho GuardReturnRadius): точка, откуда
+            /// патруль ОТОРВАЛСЯ на погоню; войдя в контакт, юнит отказывается от
+            /// погони дальше PatrolLeashM от неё и возвращается на маршрут.</summary>
+            public GlobalPosition PatrolLeashPoint;
+            public bool PatrolLeashSet;
+            /// <summary>Поводок «взведён»: юнит вошёл в дальность оружия — с этого
+            /// момента погоня дальше PatrolLeashM от якоря бросается (Moho: leash
+            /// armed once engaged).</summary>
+            public bool PatrolLeashArmed;
             /// <summary>Очередь целей атаки (Shift+ПКМ по целям): в атакующей цепочке
             /// [0] — текущая (Target). Каждая цель стоит на СВОЕЙ позиции серии:
             /// TargetAfter[i] — сколько точек было в очереди на момент клика цели
@@ -89,6 +98,12 @@ namespace SupremeNuclear
         }
 
         private static readonly Dictionary<Unit, Chain> Chains = new Dictionary<Unit, Chain>();
+
+        // Скоординированная атака (канон FAF: «в обратном порядке скорости» — все
+        // бьют одновременно): юнит в погоне за CoordTarget держит огонь/позицию
+        // до CoordUntil. Явный приказ/смена цели/смерть цели снимают удержание.
+        internal static readonly Dictionary<Unit, (Unit target, float until)> CoordStrike =
+            new Dictionary<Unit, (Unit, float)>();
 
         public static int Count => Chains.Count;
 
@@ -610,6 +625,16 @@ namespace SupremeNuclear
         {
             Version++;
             Chains.Remove(unit);
+            CoordStrike.Remove(unit);
+            StanceService.SetCoordHold(unit, false);
+        }
+
+        /// <summary>Сброс поводков погонь (сцена/явный стоп) — якоря протухают
+        /// вместе с координатами сцены.</summary>
+        public static void ResetLeashes()
+        {
+            foreach (KeyValuePair<Unit, Chain> kv in Chains)
+                kv.Value.PatrolLeashSet = false;
         }
 
         /// <summary>Полный сброс (смена сцены): цепочки умершей сцены недействительны.</summary>
@@ -619,6 +644,7 @@ namespace SupremeNuclear
             Chains.Clear();
             EscortTrails.Clear();
             EngageRanges.Clear();
+            CoordStrike.Clear();
         }
 
         public static void Tick()
@@ -651,11 +677,20 @@ namespace SupremeNuclear
                         (done ??= new List<Unit>()).Add(unit);
                     continue;
                 }
-                if (ch.Kind == GroundOrderKind.AttackMove || ch.Kind == GroundOrderKind.Patrol)
+                if (ch.Kind == GroundOrderKind.AttackMove)
                 {
                     TickStopAndFire(unit, ch, now);
                     if (ch.Holding)
                         continue; // стоят и стреляют — маршрут не продвигается
+                }
+                else if (ch.Kind == GroundOrderKind.Patrol)
+                {
+                    // ПОВОДОК патруля (канон Moho CUnitPatrolTask): заметив врага,
+                    // патруль ОТРЫВАЕТСЯ на погоню от точки отрыва; войдя в контакт,
+                    // дальше PatrolLeashM от якоря не гонится — возвращается на
+                    // маршрут (движение/атака-движение остались стоп-энд-файр).
+                    if (TickPatrolCombat(unit, ch, now))
+                        continue; // погоня поднята — её ведёт TickPursuit
                 }
 
                 if (ch.Index >= ch.Points.Count)
@@ -717,6 +752,30 @@ namespace SupremeNuclear
             return promoted;
         }
 
+        /// <summary>Бой патруля: скан (троттл 0.5 с); враг найден и погони нет —
+        /// ОТРЫВ от маршрута: якорь поводка = текущая позиция, промоушен в атаку
+        /// с ResumeKind=Patrol (по смерти цели/поводку TickPursuit вернёт цикл).
+        /// true — погоня поднята (тик маршрута не продолжается).</summary>
+        private static bool TickPatrolCombat(Unit unit, Chain ch, float now)
+        {
+            if (now < ch.NextScanAt)
+                return false;
+            ch.NextScanAt = now + ScanIntervalSec;
+            Unit enemy = NearestEngageableEnemy(unit);
+            if (enemy == null)
+                return false;
+            Version++;
+            ch.ResumeKind = GroundOrderKind.Patrol;
+            ch.PatrolLeashPoint = unit.transform.position.ToGlobalPosition();
+            ch.PatrolLeashSet = true;
+            ch.Kind = GroundOrderKind.Attack;
+            ch.Target = enemy;
+            ch.Holding = false;
+            ch.LastPoint = default;
+            IssuePursuit(unit, ch, PursueRange(unit, enemy), force: true);
+            return true;
+        }
+
         /// <summary>Stop-and-fire атака-движения: цель в дальности ПРИГОДНОГО вооружения
         /// (по даталинку) → стоп и нативный огонь турелей; цель ушла/уничтожена →
         /// продолжаем маршрут. Корабли не останавливаются (дерутся на ходу: нативный
@@ -754,6 +813,29 @@ namespace SupremeNuclear
         /// foreach по Chains бросает InvalidOperationException и обрывает тик группы).</summary>
         private static bool TickPursuit(Unit unit, Chain ch, float now)
         {
+            // Скоординированная атака: до времени залпа — запрет огня (позиция у
+            // дальности уже держит подход); время вышло/цель сменилась — снять.
+            if (CoordStrike.TryGetValue(unit, out var strike))
+            {
+                if (strike.target == null || strike.target.disabled || ch.Target != strike.target ||
+                    Time.time >= strike.until)
+                {
+                    CoordStrike.Remove(unit);
+                    StanceService.SetCoordHold(unit, false);
+                }
+                else
+                    StanceService.SetCoordHold(unit, true);
+            }
+            // Поводок патруля: вошли в контакт (engaged) и ушли от якоря отрыва
+            // дальше PatrolLeashM — погоню бросаем (цель «умерла» для нас).
+            if (ch.ResumeKind == GroundOrderKind.Patrol && ch.PatrolLeashSet && ch.PatrolLeashArmed)
+            {
+                Vector3 leash = ch.PatrolLeashPoint.ToLocalPosition();
+                Vector3 upL = unit.transform.position;
+                float dl = new Vector2(upL.x - leash.x, upL.z - leash.z).magnitude;
+                if (dl > Settings.PatrolLeashM)
+                    ch.Target = null;
+            }
             if (ch.Target == null || ch.Target.disabled)
             {
                 // Серия целей (Shift+ПКМ): мёртвая голова очереди уходит, следующая
@@ -781,9 +863,14 @@ namespace SupremeNuclear
                     // Атака на своей позиции серии закончилась — маршрут продолжается
                     // (точки, кликнутые ПОСЛЕ цели в Shift-серии) с видом ТОЧКИ,
                     // на которую вернулись (per-point: нога могла стать атакой-движением).
+                    // Погоня патруля возвращается в ЦИКЛ (Kind=Patrol), поводок снят.
                     ch.Kind = ch.ResumeKind == GroundOrderKind.Escort
                         ? ch.ResumeKind
-                        : LinearKindAt(ch, ch.Index);
+                        : ch.ResumeKind == GroundOrderKind.Patrol
+                            ? GroundOrderKind.Patrol
+                            : LinearKindAt(ch, ch.Index);
+                    ch.PatrolLeashSet = false;
+                    ch.PatrolLeashArmed = false;
                     ch.Target = null;
                     ch.Holding = false;
                     unit.GetComponent<UnitCommand>()?.SetDestination(ch.Points[ch.Index], playerCommand: true);
@@ -821,6 +908,7 @@ namespace SupremeNuclear
                 // сюда, нативная остановка на ней), огонь — нативные турели. Никаких
                 // «стоп»-приказов: кораблю они разворачивают циркуляцию.
                 ch.Holding = true;
+                ch.PatrolLeashArmed = ch.ResumeKind == GroundOrderKind.Patrol; // поводок взведён
                 return false;
             }
             ch.Holding = false;
@@ -941,6 +1029,103 @@ namespace SupremeNuclear
                 if (dist < bestDist)
                 {
                     bestDist = dist;
+                    best = enemy;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>Перенацелить приказ атаки: q-я цель очереди → ближайший враг у
+        /// точки бросания (драг креста, канон Moho: драг атак-приказа = ретаргет).
+        /// Фан-аут: та же цель заменяется у ВСЕХ юнитов (приказ группы). Врага рядом
+        /// нет — no-op. true — цель заменена.</summary>
+        public static bool RetargetAt(Unit owner, int q, Vector3 worldPoint)
+        {
+            if (!Chains.TryGetValue(owner, out Chain ch) ||
+                q < 0 || q >= ch.TargetQueue.Count)
+                return false;
+            Unit old = ch.TargetQueue[q];
+            Unit fresh = NearestEnemyAround(owner, worldPoint, 150f);
+            if (fresh == null || fresh == old)
+                return false;
+            Version++;
+            foreach (KeyValuePair<Unit, Chain> kv in Chains)
+            {
+                Chain c = kv.Value;
+                for (int i = c.TargetQueue.Count - 1; i >= 0; i--)
+                {
+                    if (c.TargetQueue[i] != old)
+                        continue;
+                    c.TargetQueue[i] = fresh;
+                    if (c.Kind == GroundOrderKind.Attack && c.Target == old)
+                    {
+                        c.Target = fresh;
+                        c.Holding = false;
+                        c.LastPoint = default;
+                        CoordStrike.Remove(kv.Key);
+                        StanceService.SetCoordHold(kv.Key, false);
+                        IssuePursuit(kv.Key, c, PursueRange(kv.Key, fresh), force: true);
+                    }
+                }
+            }
+            return true;
+        }
+
+        /// <summary>Снять приказ атаки по цели q-й записи очереди (Ctrl+Shift+ПКМ по
+        /// кресту): запись уходит у ВСЕХ юнитов с той же целью (группа); текущая
+        /// погоня за ней прекращается (маршрут продолжится/следующая серия).</summary>
+        public static int RemoveQueueTarget(Unit owner, int q)
+        {
+            if (!Chains.TryGetValue(owner, out Chain ch) ||
+                q < 0 || q >= ch.TargetQueue.Count)
+                return 0;
+            Unit old = ch.TargetQueue[q];
+            Version++;
+            int removed = 0;
+            foreach (KeyValuePair<Unit, Chain> kv in Chains)
+            {
+                Unit u = kv.Key;
+                Chain c = kv.Value;
+                for (int i = c.TargetQueue.Count - 1; i >= 0; i--)
+                {
+                    if (c.TargetQueue[i] != old)
+                        continue;
+                    c.TargetQueue.RemoveAt(i);
+                    c.TargetAfter.RemoveAt(i);
+                    removed++;
+                }
+                if (c.Kind == GroundOrderKind.Attack && c.Target == old)
+                {
+                    c.Target = null; // мёртвый путь TickPursuit продолжит маршрут/серию
+                    c.Holding = false;
+                }
+                CoordStrike.Remove(u);
+                StanceService.SetCoordHold(u, false);
+            }
+            return removed;
+        }
+
+        /// <summary>Ближайший живой враг юнита в радиусе от точки (для ретаргета
+        /// драгом): любой боевой класс, свой/чужой — по HQ владельца.</summary>
+        private static Unit NearestEnemyAround(Unit owner, Vector3 at, float radiusM)
+        {
+            FactionHQ hq = owner.NetworkHQ;
+            if (hq == null)
+                return null;
+            Unit best = null;
+            float bestSq = radiusM * radiusM;
+            foreach (Unit enemy in BattlefieldGrid.GetUnitsInRangeEnumerable(
+                         at.ToGlobalPosition(), radiusM))
+            {
+                if (enemy == null || enemy.disabled || enemy.NetworkHQ == null || enemy.NetworkHQ == hq)
+                    continue;
+                if (!(enemy is GroundVehicle || enemy is Ship || enemy is Aircraft || enemy is Building))
+                    continue;
+                Vector3 d = enemy.transform.position - at;
+                float sq = d.x * d.x + d.z * d.z;
+                if (sq < bestSq)
+                {
+                    bestSq = sq;
                     best = enemy;
                 }
             }

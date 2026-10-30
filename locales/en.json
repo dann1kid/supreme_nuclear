@@ -529,5 +529,9 @@
   "Залп: ЛКМ по цели/земле — залповый пуск · Shift+ЛКМ по целям — доб. в залп · ПКМ — отмена": "Salvo: LMB on target/ground — salvo launch · Shift+LMB on targets — add to salvo · RMB — cancel",
   "Распределение: ЛКМ по целям — накопить · ЛКМ по земле — раздать группу · ПКМ — отмена": "Distribute: LMB on targets — accumulate · LMB on ground — hand out the group · RMB — cancel",
   "{0}: ЛКМ — вейпоинт (Shift — серия) · ПКМ/Esc — отмена": "{0}: LMB — waypoint (Shift — series) · RMB/Esc — cancel",
-  "Ленты маршрутов мировым мешом (текстурные, как в SupCom); выкл — экранный вариант": "Route ribbons as a world mesh (textured, SupCom-style); off — screen-space variant"
+  "Ленты маршрутов мировым мешом (текстурные, как в SupCom); выкл — экранный вариант": "Route ribbons as a world mesh (textured, SupCom-style); off — screen-space variant",
+  "Оценка дальности колец у корабельных ракет: игра хранит только номинал станции, а корабли пускают за горизонт — кольцо = номинал × коэффициент (1 — как в подсказках игры; авиация и ПВО пускают строго по номиналу)": "Estimated range rings for SHIP missiles: the game data only stores the station's nominal range while ships fire over the horizon — ring = nominal x factor (1 = as the game's own tooltips; aircraft and SAMs launch strictly at nominal)",
+  "Приказ атаки снят: юнитов — {0}": "Attack order removed: units — {0}",
+  "Скоординированная атака: юнитов — {0}, одновременный удар через ~{1:0} с": "Coordinated attack: units — {0}, simultaneous strike in ~{1:0} s",
+  "Поводок патруля: предел погони от точки отрыва, м (дальше — назад на маршрут)": "Patrol leash: chase limit from the break-off point, m (beyond — back to route)"
 }

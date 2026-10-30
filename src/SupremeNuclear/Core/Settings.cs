@@ -67,6 +67,7 @@ namespace SupremeNuclear
         public static float FormationSpacing = 30f;
         public static float EnemyPickRadiusPx = 24f;   // радиус «притягивания» цели ПКМ (ракеты — ×2.5), px
         public static float WaypointPickPx = 24f;      // пик-радиус вейпоинта (захват драга/удаление/конвертация/подсветка), px
+        public static float PatrolLeashM = 500f;   // поводок патруля (Moho GuardReturnRadius): дальше от точки отрыва погоня не идёт, м
         public static bool GroundDirectRouting = true;  // наземка своих едет напрямую, не заезжая на шоссе (кроме прямой через воду — там нативные мосты)
         public static float GroundDirectWaterStepM = 150f; // шаг проверки прямой трассы наземки на воду, м
         public static float AircraftOrderAltitude = 800f; // высота полёта к точке, м над рельефом
@@ -144,6 +145,7 @@ namespace SupremeNuclear
         public static bool RangeRingWeapons = false; // режим «Оружие»: кольца по классам вместо доменных
         public static int RangeRingMaxUnits = 40;    // потолок юнитов на класс колец (перф отрисовки)
         public static int RangeRingExactDist = 4000; // ближе этой дистанции к камере (м) кольца — точные высоты по мешу
+        public static float RangeRingMissileFactor = 4f; // кольца ракет = номинал × k (у игры в данных только номинал)
 
         // Звук
         public static bool CommanderNoDoppler = true; // гасить эффект Доплера в режиме командира
@@ -258,6 +260,7 @@ namespace SupremeNuclear
             MaxSelected = config.Bind("Selection", "MaxSelected", 500).Value;
 
             FormationSpacing = config.Bind("Orders", "FormationSpacing", 30f, Loc.Tr("Шаг решётки приказов, м")).Value;
+            PatrolLeashM = config.Bind("Orders", "PatrolLeashM", 500f, Loc.Tr("Поводок патруля: предел погони от точки отрыва, м (дальше — назад на маршрут)")).Value;
             WaypointPickPx = config.Bind("Orders", "WaypointPickPx", 24f,
                 Loc.Tr("Радиус захвата вейпоинта мышью (драг/удаление/конвертация/подсветка), px")).Value;
             EnemyPickRadiusPx = config.Bind("Orders", "EnemyPickRadiusPx", 24f,
@@ -398,6 +401,9 @@ namespace SupremeNuclear
             RangeRingExactDist = config.Bind("RangeRings", "ExactTerrainDist", 4000,
                 new ConfigDescription(Loc.Tr("Дистанция до камеры (м), ближе которой кольца следуют мешу поверхности точными рейкастами; дальше — сглаженный кэш высот (0 — всегда кэш)"),
                     new AcceptableValueRange<int>(0, 20000))).Value;
+            RangeRingMissileFactor = config.Bind("RangeRings", "MissileRangeFactor", 4f,
+                new ConfigDescription(Loc.Tr("Оценка дальности колец у корабельных ракет: игра хранит только номинал станции, а корабли пускают за горизонт — кольцо = номинал × коэффициент (1 — как в подсказках игры; авиация и ПВО пускают строго по номиналу)"),
+                    new AcceptableValueRange<float>(1f, 20f))).Value;
             CommanderNoDoppler = config.Bind("Audio", "CommanderNoDoppler", true,
                 Loc.Tr("Гасить эффект Доплера в режиме командира: камера носится по карте на огромной скорости, и звук без этого летит «пилой»; вне режима звук не трогается")).Value;
         }

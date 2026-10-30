@@ -11,7 +11,8 @@ namespace SupremeNuclear
         GroundPoint, // точка цепочки наземки/флота
         AirPoint,    // точка плана авиации
         RallyPoint,  // точка ралли-маршрута фабрики (владелец — фабрика, не юнит)
-        EscortLink   // связь сопровождения (маркер — на ЦЕЛИ сопровождения)
+        EscortLink,  // связь сопровождения (маркер — на ЦЕЛИ сопровождения)
+        AttackTarget // цель серии атак (крест): драг = перенацелить, Ctrl+Shift+ПКМ = снять
     }
 
     /// <summary>ЕДИНЫЙ скан вейпоинтов под курсором (консолидация v0.48):
@@ -265,6 +266,20 @@ namespace SupremeNuclear
                     if (Near(cam, l, mouse, px))
                         return new WaypointHit(WaypointKind.GroundPoint, unit, null, 0, p);
                 }
+                // Цели серии атак (кресты): драг = перенацелить приказ (канон Moho),
+                // Ctrl+Shift+ПКМ = снять приказ цели. Пик — там, где крест.
+                var targets = GroundOrders.TargetQueueOf(unit);
+                if (targets != null)
+                    for (int q = 0; q < targets.Count; q++)
+                    {
+                        Unit t = targets[q];
+                        if (t == null || t.disabled)
+                            continue;
+                        Vector3 tp = t.transform.position;
+                        Vector3 tg = new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z);
+                        if (Near(cam, tg, mouse, px))
+                            return new WaypointHit(WaypointKind.AttackTarget, unit, null, 0, q);
+                    }
             }
 
             // 5. Планы авиации. Авиа-сбор уже лежит в CUnits/CPlans с начала скана
