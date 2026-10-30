@@ -95,7 +95,10 @@ namespace SupremeNuclear
             // Кольца дальности: пересчёт 10 Гц тяжёлой работой ВНЕ OnGUI (там только отрисовка).
             var controller = CommanderModeController.Instance;
             if (GameApi.InMission && controller != null && controller.IsActive)
+            {
                 RangeRings.Tick(controller);
+                FleetSalvo.Tick(); // очередь волн: трубы по готовности, перенацеливания
+            }
         }
 
         public static void Notice(string text, float life = 3.5f) =>
@@ -141,6 +144,7 @@ namespace SupremeNuclear
                         DrawBoxOutline(selection.DragRectGui, 1.5f, new Color(0.6f, 1f, 0.6f, 0.9f));
 
                     RangeRings.Draw(); // кольца дальности — самый нижний слой
+                    DrawFleetSalvoMarks();
                     DrawDepositMarkers();
                     DrawSalvageMarkers();
                     DrawCaptureMarkers();
@@ -900,11 +904,12 @@ namespace SupremeNuclear
                 _ => new Color(0f, 1f, 1f, 1f)
             };
 
-        /// <summary>Глобальная точка на земле.</summary>
+        /// <summary>Глобальная точка маршрута на ПОВЕРХНОСТИ (вода — уровень
+        /// моря, суша — рельеф): ленты/маркеры флота не проваливаются на дно.</summary>
         private static Vector3 GroundVec(GlobalPosition gp)
         {
             Vector3 l = gp.ToLocalPosition();
-            return new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z);
+            return new Vector3(l.x, GameApi.RouteY(l.x, l.z), l.z);
         }
 
         /// <summary>Лента цепочки вейпоинтов: ноги — кубические Эрмит-кривые
@@ -1669,11 +1674,12 @@ namespace SupremeNuclear
             }
         }
 
-        /// <summary>Наземная точка цели — на рельефе, под её корпусом.</summary>
+        /// <summary>Точка цели — на поверхности (вода — уровень моря): кресты
+        /// по кораблям не проваливаются на дно.</summary>
         private static Vector3 TargetGround(Unit target)
         {
             Vector3 tp = target.transform.position;
-            return new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z);
+            return new Vector3(tp.x, GameApi.RouteY(tp.x, tp.z), tp.z);
         }
 
         /// <summary>Связи сопровождения наземки/флота (v0.97): лента «эскорт → цель»
@@ -2391,6 +2397,177 @@ namespace SupremeNuclear
             const float th = 2f;
             DrawRect(new Rect(center.x - size * 0.5f, center.y - th * 0.5f, size, th), color);
             DrawRect(new Rect(center.x - th * 0.5f, center.y - size * 0.5f, th, size), color);
+        }
+
+        /// <summary>Отметки залпов флота (FleetSalvo, v0.119–0.122): ОЧЕРЕДЬ — крест
+        /// волны, ждущей трубы (по цели — СЛЕДУЕТ за ней), с линиями «корабль →
+        /// точка»; СТРЕЛЯННЫЕ волны (Marks) — угасающий крест в точке удара
+        /// (ленты — лишь MarkRibbonSec после залпа). Видно, кому какой приказ
+        /// отдан и что ещё pending (точки GlobalPosition — FloatingOrigin-устойчивы;
+        /// мёртвые корабли пропускаются).</summary>
+        private const float MarkRibbonSec = 15f;
+        // Голова цепи очереди: отстрелянная точка живёт в цепи, пока ракета летит.
+        private const float ChainHeadSec = 20f;
+
+        // Цепь очереди пусков на корабль (перезаполняется каждый кадр отрисовки).
+        private static readonly Dictionary<Unit, List<Vector3>> SalvoChains = new Dictionary<Unit, List<Vector3>>();
+
+        private static void DrawFleetSalvoMarks()
+        {
+            // Repaint-гейт обязателен: рисование в Layout-проходе ломает IMGUI-
+            // состояние для ВСЕГО после нас (плейтест v0.127: пропали значки юнитов).
+            if (Event.current.type != EventType.Repaint)
+                return;
+            Camera cam = GameApi.MainCam;
+            if (cam == null)
+                return;
+            float now = Time.unscaledTime;
+            Color baseC = ModeColor(AirOrderMode.Salvo); // цвет семейства «залп»
+
+            // ОЧЕРЕДЬ ПУСКОВ (канон SupCom): у корабля ОДНА общая очередь запусков —
+            // лента-ЦЕПЬ «корабль → точка₁ → точка₂ → …» как маршрут приказов, а не
+            // пучок лент к каждой точке. Кресты — вейпоинты очереди.
+            var queue = FleetSalvo.Queue;
+            SalvoChains.Clear();
+            for (int qi = 0; qi < queue.Count; qi++)
+            {
+                FleetSalvo.QueuedWave wave = queue[qi];
+                // точка волны — на ПОВЕРХНОСТИ (RouteY: вода — зеркало, не дно):
+                // ровно там же её пикает сканер вейпоинтов — иначе драг не берёт
+                Vector3 aim = wave.Aim.ToLocalPosition();
+                Vector3 world = wave.Target != null && wave.Target.disabled == false
+                    ? GameApi.UnitAnchorWorld(wave.Target)
+                    : new Vector3(aim.x, GameApi.RouteY(aim.x, aim.z), aim.z);
+                Vector3 wsp = cam.WorldToScreenPoint(world);
+                var wscr = new Vector2(wsp.x, Screen.height - wsp.y);
+                Color c = baseC * 0.95f;
+                if (wsp.z > 0f && !UnderMinimapWindow(wscr))
+                {
+                    float pulse = 12f + 6f * Mathf.Abs(Mathf.Sin(now * 3f));
+                    DrawCross(wscr, pulse, c);
+                    DrawCross(wscr, pulse * 0.5f, c);
+                }
+                // копим точку в цепь каждого ждущего корабля (порядок = порядок кликов)
+                if (wsp.z > 0f)
+                    for (int si = 0; si < wave.Ships.Count; si++)
+                    {
+                        Unit ship = wave.Ships[si];
+                        if (ship == null || ship.disabled) // Unity fake-null
+                            continue;
+                        if (!SalvoChains.TryGetValue(ship, out List<Vector3> chain))
+                        {
+                            chain = new List<Vector3>();
+                            SalvoChains[ship] = chain;
+                        }
+                        chain.Add(world);
+                    }
+            }
+            // цепь каждого корабля: якорь → [последняя ОТСТРЕЛЯННАЯ точка, пока
+            // ракета в полёте (ChainHeadSec)] → ждущие точки очереди; альфа гаснет
+            // к хвосту (голова — ближайший пуск). КОНТРАКТ: цвета ПО НОГАМ (N-1).
+            var marks = FleetSalvo.Marks;
+            foreach (KeyValuePair<Unit, List<Vector3>> kv in SalvoChains)
+            {
+                Unit ship = kv.Key;
+                List<Vector3> chain = kv.Value;
+                if (ship == null || ship.disabled || chain.Count == 0) // Unity fake-null
+                    continue;
+                ChainPts.Clear();
+                ChainCols.Clear();
+                ChainAlphas.Clear();
+                ChainPts.Add(GameApi.UnitAnchorWorld(ship));
+                // голова: самая свежая отстрелянная точка ЭТОГО корабля (Until −
+                // MarkTtlSec = момент отстрела) — первый клик тоже виден в цепи,
+                // пока ракета летит (канон SupCom: пуск живёт в очереди)
+                float bestFired = float.MinValue;
+                int headMark = -1;
+                for (int mi = 0; mi < marks.Count; mi++)
+                {
+                    FleetSalvo.SalvoMark m = marks[mi];
+                    float firedAt = m.Until - FleetSalvo.MarkTtlSec;
+                    if (now - firedAt > ChainHeadSec || firedAt <= bestFired)
+                        continue;
+                    for (int si = 0; si < m.Ships.Count; si++)
+                        if (m.Ships[si] == ship)
+                        {
+                            bestFired = firedAt;
+                            headMark = mi;
+                            break;
+                        }
+                }
+                if (headMark >= 0)
+                {
+                    Vector3 hp = marks[headMark].Point.ToLocalPosition();
+                    ChainPts.Add(new Vector3(hp.x, GameApi.RouteY(hp.x, hp.z), hp.z));
+                }
+                for (int pi = 0; pi < chain.Count; pi++)
+                    ChainPts.Add(chain[pi]);
+                int legs = ChainPts.Count - 1;
+                for (int l = 0; l < legs; l++)
+                {
+                    ChainCols.Add(baseC);
+                    ChainAlphas.Add(Mathf.Max(0.35f, 0.85f - 0.12f * l));
+                }
+                DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas, meshGated: false);
+            }
+
+            // отстрелянные волны: угасающие отметки (ждущие в очереди не рисуем —
+            // их крест уже нарисован выше по живой цели)
+            if (marks.Count == 0)
+                return;
+            for (int mi = marks.Count - 1; mi >= 0; mi--)
+            {
+                FleetSalvo.SalvoMark m = marks[mi];
+                if (now >= m.Until)
+                {
+                    marks.RemoveAt(mi);
+                    continue;
+                }
+                bool waiting = false;
+                for (int qi = 0; qi < queue.Count; qi++)
+                    if (queue[qi].MarkId == m.Id)
+                    {
+                        waiting = true;
+                        break;
+                    }
+                if (waiting)
+                    continue;
+                // ОТСТРЕЛЯННАЯ волна: тусклый СТАТИЧНЫЙ крест (без пульса) — visibly
+                // отличим от живой ждущей (та пульсирует ярко); тащить нечего
+                Color c = baseC * (0.35f * Mathf.Clamp01((m.Until - now) / 10f));
+                Vector3 mp = m.Point.ToLocalPosition();
+                Vector3 sp = cam.WorldToScreenPoint(new Vector3(mp.x, GameApi.RouteY(mp.x, mp.z), mp.z));
+                if (sp.z <= 0f)
+                    continue;
+                var scr = new Vector2(sp.x, Screen.height - sp.y);
+                if (!UnderMinimapWindow(scr))
+                {
+                    float pulse = 12f + 6f * Mathf.Abs(Mathf.Sin(now * 3f));
+                    DrawCross(scr, pulse, c);
+                    DrawCross(scr, pulse * 0.5f, c);
+                }
+                // ленты отстрелянной волны — только 15 с после залпа («кто только
+                // что бил»); дальше тусклый крест без лент — паутина хвостов
+                // читалась как «лента между целями» (плейтест v0.130)
+                if (m.Until - now <= MarkRibbonSec)
+                {
+                    Vector3 markWorld = new Vector3(mp.x, GameApi.RouteY(mp.x, mp.z), mp.z);
+                    for (int si = 0; si < m.Ships.Count; si++)
+                    {
+                        Unit ship = m.Ships[si];
+                        if (ship == null || ship.disabled) // Unity fake-null
+                            continue;
+                        ChainPts.Clear();
+                        ChainCols.Clear();
+                        ChainAlphas.Clear();
+                        ChainPts.Add(GameApi.UnitAnchorWorld(ship));
+                        ChainPts.Add(markWorld);
+                        ChainCols.Add(c);
+                        ChainAlphas.Add(0.4f * c.a);
+                        DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas, meshGated: false);
+                    }
+                }
+            }
         }
 
         private static void DrawRect(Rect r, Color color)

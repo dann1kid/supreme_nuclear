@@ -257,7 +257,6 @@
   "Профиль «Сверхнизко» (огибание рельефа), м над рельефом": "Profile \"Very Low\" (terrain follow), m AGL",
   "Профиль высоты: {0} ({1} м{2}){3}": "Altitude profile: {0} ({1} m{2}){3}",
   "Пушки": "Guns",
-  "РАЗРЕШЁННОЕ ВООРУЖЕНИЕ": "AUTHORIZED WEAPONS",
   "РЕБ": "EW",
   "РЕЗ": "RSV",
   "РЛС": "RDR",
@@ -533,5 +532,13 @@
   "Оценка дальности колец у корабельных ракет: игра хранит только номинал станции, а корабли пускают за горизонт — кольцо = номинал × коэффициент (1 — как в подсказках игры; авиация и ПВО пускают строго по номиналу)": "Estimated range rings for SHIP missiles: the game data only stores the station's nominal range while ships fire over the horizon — ring = nominal x factor (1 = as the game's own tooltips; aircraft and SAMs launch strictly at nominal)",
   "Приказ атаки снят: юнитов — {0}": "Attack order removed: units — {0}",
   "Скоординированная атака: юнитов — {0}, одновременный удар через ~{1:0} с": "Coordinated attack: units — {0}, simultaneous strike in ~{1:0} s",
-  "Поводок патруля: предел погони от точки отрыва, м (дальше — назад на маршрут)": "Patrol leash: chase limit from the break-off point, m (beyond — back to route)"
+  "Поводок патруля: предел погони от точки отрыва, м (дальше — назад на маршрут)": "Patrol leash: chase limit from the break-off point, m (beyond — back to route)",
+  "Ручной залп: пусков — {0}": "Manual salvo: launches — {0}",
+  "Ручной залп: нет готовых ракет (гейты/боезапас/перезарядка)": "Manual salvo: no ready missiles (gates/ammo/reload)",
+  "РАЗРЕШЁННОЕ ВООРУЖЕНИЕ · ПКМ по ракетному чипу — залп этим": "ALLOWED WEAPONS · RMB a missile chip — salvo with it",
+  "Залп заряжен: {0}": "Salvo armed: {0}",
+  "Ручной залп: волна в очереди — трубы перезаряжаются": "Manual salvo: wave queued — tubes reloading",
+  "Вертолётная палуба": "Helicopter deck",
+  "Вертолётная палуба: {0}": "Helicopter deck: {0}",
+  "Волна обстрела снята": "Strike wave cancelled"
 }

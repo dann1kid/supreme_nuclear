@@ -36,6 +36,7 @@ namespace SupremeNuclear
                 GameApi.ResetSceneCache();
                 EconomyService.Reset();
                 SalvageService.Reset(); // прогресс разбора обломков привязан к сцене
+                ShipPadService.Reset(); // палубы умерли вместе со сценой
                 CaptureService.Reset(); // прогресс инженерного захвата привязан к сцене
                 AiCommanderService.Reset(); // планы AI-фракций привязаны к юнитам сцены
                 BuildTasks.Reset();
@@ -46,6 +47,7 @@ namespace SupremeNuclear
                 GroundOrders.Reset();
                 StanceService.Reset();
                 WeaponGateService.Reset(); // гейты вооружения привязаны к юнитам сцены
+                FleetSalvo.Reset(); // ограничение залпа типом — новый заряд в новой сцене
                 DefenseService.Reset(); // режимы защиты/таймеры сброса привязаны к бортам сцены
                 SalvoService.Reset();   // выбор станций залпа — тоже
                 AirbaseReserve.Reset(); // резервы ангаров умершей сцены недействительны

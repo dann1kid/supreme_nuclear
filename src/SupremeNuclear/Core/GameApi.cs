@@ -165,6 +165,19 @@ namespace SupremeNuclear
         public static float CameraFloorY(Vector3 pos) =>
             Mathf.Max(GroundY(pos.x, pos.z), Datum.LocalSeaY);
 
+        /// <summary>Высота ПОВЕРХНОСТИ для вейпоинтов/лент: вода — уровень моря
+        /// (Datum.LocalSeaY), суша — рельеф. Маркеры/ленты флота лежат на воде,
+        /// а не на дне — проекция игроку не «проваливается» (плейтест v0.115).</summary>
+        public static float RouteY(float x, float z) =>
+            Mathf.Max(GroundY(x, z), Datum.LocalSeaY);
+
+        /// <summary>Проекция точки на ПОВЕРХНОСТЬ (вода — уровень моря): якоря
+        /// приказов/залпов по клику «в воду» не должны уходить на дно — прицел
+        /// AGM, маркеры волн и точки поводки ракет лежат на зеркале воды
+        /// (плейтест v0.123: «прицел идёт на дно»).</summary>
+        public static Vector3 OnSurface(Vector3 p) =>
+            new Vector3(p.x, Mathf.Max(p.y, Datum.LocalSeaY), p.z);
+
         // Кэш HP-долей юнитов (обновление 5 Гц): аггрегат partLookup.hitPoints считаем здесь,
         // чтобы OnGUI и панели читали готовое число без аллокаций.
         private static readonly Dictionary<Unit, float> _hpCache = new Dictionary<Unit, float>();

@@ -1185,7 +1185,7 @@ namespace SupremeNuclear
                 return;
             if (index < 0 || index >= ch.Points.Count)
                 return;
-            float y = GameApi.GroundY(groundPoint.x, groundPoint.z);
+            float y = GameApi.RouteY(groundPoint.x, groundPoint.z); // вода — поверхность
             ch.Points[index] = new Vector3(groundPoint.x, y, groundPoint.z).ToGlobalPosition();
             if (index == ch.Index && ch.Kind != GroundOrderKind.Attack)
                 unit.GetComponent<UnitCommand>()?.SetDestination(ch.Points[index], playerCommand: true);

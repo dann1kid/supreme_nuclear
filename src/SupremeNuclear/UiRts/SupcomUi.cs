@@ -285,6 +285,7 @@ namespace SupremeNuclear
             {
                 UpdateTileHover();
                 UpdateTypeChipWheel(); // колесо над чипом типа — цикл правила туда-обратно
+                UpdateTypeChipSalvo(); // ПКМ по ракетному чипу — заряд «Залпа» этим типом
             }
             else
                 ResetHover();
@@ -600,7 +601,7 @@ namespace SupremeNuclear
             // Заголовок секции гейтов — виден только с полосой (управляет активностью
             // BuildCommandButtons); высота секции меняется (классы / классы+типы),
             // офсеты выставляет BuildCommandButtons.
-            _gateHdr = Label(panel, "gatehdr", Loc.Tr("РАЗРЕШЁННОЕ ВООРУЖЕНИЕ"), 10, TextDim,
+            _gateHdr = Label(panel, "gatehdr", Loc.Tr("РАЗРЕШЁННОЕ ВООРУЖЕНИЕ · ПКМ по ракетному чипу — залп этим"), 10, TextDim,
                 TextAnchor.UpperLeft, true);
             var rtG = (RectTransform)_gateHdr.transform;
             rtG.anchorMin = new Vector2(0f, 0f);
@@ -1527,6 +1528,7 @@ step = "arrows";
             bool hasAir = false;
             bool hasPlane = false;
             bool hasMissileAir = false;
+            bool hasMissileFleet = false; // корабли с ракетами — кнопка «Залп» (ручной пуск)
             bool hasGround = false;
             Aircraft singleAir = null;
             int selCount = 0;
@@ -1547,7 +1549,13 @@ step = "arrows";
                             singleAir = a; // чипы станций — одиночному ракетоносцу
                     }
                 }
-                else if (unit is GroundVehicle || unit is Ship)
+                else if (unit is Ship)
+                {
+                    hasGround = true;
+                    if (FleetSalvo.ShipHasMissiles(unit))
+                        hasMissileFleet = true;
+                }
+                else if (unit is GroundVehicle)
                     hasGround = true;
             }
             if (selCount != 1)
@@ -1577,7 +1585,8 @@ step = "arrows";
                 typeKey = typeKey * 31 + wi.GetInstanceID();
             int key = (showAir ? 1 : 0) | (hasGround ? 2 : 0) | (hasPlane ? 4 : 0) |
                       (hasMissileAir ? 8 : 0) | (singleAir != null ? 16 : 0) |
-                      (buildingsOnly ? 32 : 0) | ((int)gateClasses << 6) | (typeKey << 12);
+                      (buildingsOnly ? 32 : 0) | (hasMissileFleet ? 2048 : 0) |
+                      ((int)gateClasses << 6) | (typeKey << 12);
             // Кнопки-переключатели: в ключ — ИД базы (смена корабля/базы перестраивает
             // замыкание кнопки, иначе оно держало бы устаревшую ссылку).
             key = key * 31 + (carrierBase != null ? carrierBase.GetInstanceID() : 0);
@@ -1585,7 +1594,7 @@ step = "arrows";
             if (key != _cmdContextKey)
             {
                 _cmdContextKey = key;
-                BuildCommandButtons(controller, showAir, hasPlane, hasMissileAir, singleAir, buildingsOnly,
+                BuildCommandButtons(controller, showAir, hasPlane, hasMissileAir, hasMissileFleet, singleAir, buildingsOnly,
                     carrierBase, backToShip);
             }
 
@@ -1759,7 +1768,7 @@ step = "arrows";
         /// статичным зданиям — только hold-fire. Карточка растёт вверх, панель
         /// свойств выделения поднимается за ней.</summary>
         private void BuildCommandButtons(CommanderModeController controller, bool showAir,
-            bool hasPlane, bool hasMissileAir, Aircraft singleAir, bool buildingsOnly,
+            bool hasPlane, bool hasMissileAir, bool hasMissileFleet, Aircraft singleAir, bool buildingsOnly,
             Airbase carrierBase = null, Airbase backToShip = null)
         {
             Transform grid = null;
@@ -1787,8 +1796,8 @@ step = "arrows";
                 // сами подхватывают близлежащие недострои).
                 defs.Add(("cmd_patrol", Loc.Tr("Патруль (U)"), () => OrderModes.Pending = OrderMode.Patrol));
                 defs.Add(("cmd_attack", Loc.Tr("Атака (T)"), () => OrderModes.Pending = OrderMode.Attack));
-                if (showAir && hasMissileAir)
-                    defs.Add(("cmd_salvo", Loc.Tr("Залп (V)"), () => OrderModes.Pending = OrderMode.Salvo));
+                if ((showAir && hasMissileAir) || hasMissileFleet)
+                    defs.Add(("cmd_salvo", Loc.Tr("Залп (V)"), () => controller.MoveOrders.ChargeSalvo()));
                 defs.Add(("cmd_fan", Loc.Tr("Распределение (R)"), () => controller.MoveOrders.ChargeFanAttack()));
                 defs.Add(("cmd_stop", Loc.Tr("Стоп (S)"), () => controller.MoveOrders.CancelAll(controller.Selection.Selected)));
                 defs.Add(("cmd_disperse", Loc.Tr("Рассредоточить (Alt+Shift+R)"), () =>
@@ -2018,6 +2027,39 @@ step = "arrows";
                 CycleTypeGate(controller, chip.wi, wheel > 0f);
                 RtsInput.WheelConsumedByUi = true;
                 return; // один чип за прокрутку
+            }
+        }
+
+        /// <summary>ПКМ по чипу ТИПА вооружения — зарядить режим «Залп» (v0.118):
+        /// у флота волны пойдут ТОЛЬКО этим типом (ПКМ по AGM-48 — пуск AGM-48,
+        /// ПВО прибережём), у авиации — обычный залповый заряд. Опрос в Update:
+        /// игровой input-модуль не доставляет ПКМ в uGUI (правило 18); мир в этом
+        /// кадре ПКМ не съест — курсор над UI (PointerOverUi).</summary>
+        private void UpdateTypeChipSalvo()
+        {
+            if (!RtsInput.RightDown || RtsInput.Typing || _typeChips.Count == 0)
+                return;
+            var controller = CommanderModeController.Instance;
+            if (controller == null || !controller.IsActive)
+                return;
+            for (int i = _typeChips.Count - 1; i >= 0; i--)
+            {
+                var chip = _typeChips[i];
+                if (chip.btn == null)
+                {
+                    _typeChips.RemoveAt(i); // уничтожен пересборкой карточки
+                    continue;
+                }
+                if (!chip.btn.gameObject.activeInHierarchy)
+                    continue;
+                if (!RectTransformUtility.RectangleContainsScreenPoint(
+                        (RectTransform)chip.btn.transform, Input.mousePosition, null))
+                    continue;
+                if (chip.wi == null || !chip.wi.missile)
+                    return; // заряд — только с ракетного чипа
+                controller.MoveOrders.ChargeSalvo(chip.wi);
+                CommanderHud.Notice(Loc.F("Залп заряжен: {0}", TypeChipName(chip.wi)));
+                return;
             }
         }
 

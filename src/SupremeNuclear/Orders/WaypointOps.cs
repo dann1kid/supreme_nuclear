@@ -104,6 +104,15 @@ namespace SupremeNuclear
                         CommanderHud.Notice(Loc.F("Сопровождение снято: {0}", ground + air));
                     return true;
                 }
+                case WaypointKind.SalvoPoint:
+                    // Снять волну обстрела: ракеты по этой точке больше не пойдут,
+                    // отметка угасает (уже выпущенное — не отозвать, как в SupCom).
+                    if (FleetSalvo.CancelWave(hit.Index))
+                    {
+                        CommanderHud.Notice(Loc.Tr("Волна обстрела снята"));
+                        return true;
+                    }
+                    return false;
                 default:
                     return false;
             }
@@ -164,6 +173,11 @@ namespace SupremeNuclear
                     // Драг креста = ПЕРЕНАЦЕЛИТЬ приказ (канон Moho): ближайший враг
                     // у точки бросания; врага нет — тихий no-op (невалидный дроп).
                     GroundOrders.RetargetAt(hit.Owner, hit.Index, world);
+                    break;
+                case WaypointKind.SalvoPoint:
+                    // Тактички SupCom: точка ДВИГАЕТСЯ, волна пустит ракету туда,
+                    // где точка стоит на МОМЕНТ ВЫСТРЕЛА (без снапа, на поверхности).
+                    FleetSalvo.MoveWavePoint(hit.Index, world.ToGlobalPosition());
                     break;
             }
         }

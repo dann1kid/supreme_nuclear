@@ -33,6 +33,12 @@ namespace SupremeNuclear
         private static readonly Dictionary<Unit, Dictionary<WeaponInfo, TargetDomain>> TypeRules =
             new Dictionary<Unit, Dictionary<WeaponInfo, TargetDomain>>();
 
+        /// <summary>РУЧНОЙ ПРИКАЗ (флотский залп): выставляется только на время вызова
+        /// LaunchMount из FleetSalvo — предохранитель обходит СТОЙКУ hold-fire
+        /// (канон SupCom: стойка гасит автоогонь, явный приказ стреляет всегда),
+        /// но класс-гейты и правила типов остаются законом и для ручного пуска.</summary>
+        internal static bool ManualOrder;
+
         private static bool IsHost
         {
             get
@@ -95,8 +101,8 @@ namespace SupremeNuclear
         {
             if (station == null || station.WeaponInfo == null)
                 return false;
-            if (StanceService.IsHoldFire(owner))
-                return true;
+            if (!ManualOrder && StanceService.IsHoldFire(owner))
+                return true; // ручной приказ (ManualOrder) стойку обходит — только он
             if ((BlockedOf(owner) & Catalog.ClassOf(station.WeaponInfo)) != 0)
                 return true;
             return !TypeAllows(owner, station, target);

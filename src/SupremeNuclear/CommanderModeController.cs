@@ -73,6 +73,7 @@ namespace SupremeNuclear
             GameApi.TickHpCache();
             EconomyService.Tick();
             SalvageService.Tick(); // салваж обломков — та же экономика (масса инженерам)
+            ShipPadService.Tick(); // вертолётные палубы кораблей без Airbase (host)
             CaptureService.Tick(); // инженерный захват построек (энергия, v3)
             BuildTasks.Tick();
             ProductionTasks.Tick();
@@ -392,7 +393,7 @@ namespace SupremeNuclear
                 else if (RtsInput.KeyDown(KeyCode.A)) OrderModes.Pending = OrderMode.AttackMove;
                 else if (RtsInput.KeyDown(KeyCode.U)) OrderModes.Pending = OrderMode.Patrol;
                 else if (RtsInput.KeyDown(KeyCode.T)) OrderModes.Pending = OrderMode.Attack;
-                else if (RtsInput.KeyDown(KeyCode.V)) OrderModes.Pending = OrderMode.Salvo;
+                else if (RtsInput.KeyDown(KeyCode.V)) MoveOrders.ChargeSalvo();
                 else if (RtsInput.KeyDown(KeyCode.R))
                     MoveOrders.ChargeFanAttack(); // «Распределение»: копим цели ПКМ-ами
                 else if (RtsInput.KeyDown(KeyCode.S))

@@ -132,7 +132,7 @@ namespace SupremeNuclear
         {
             GameApi.TryGetMapBounds(out Vector2 bmin, out Vector2 bmax);
             Vector3 c = new Vector3((bmin.x + bmax.x) * 0.5f, 0f, (bmin.y + bmax.y) * 0.5f);
-            float y = GameApi.GroundY(c.x, c.z) + 800f;
+            float y = GameApi.RouteY(c.x, c.z) + 800f;
             var frame = new RouteDraw { Submesh = 0 };
             frame.World.Add(new Vector3(c.x - 1000f, y, c.z - 1000f));
             frame.World.Add(new Vector3(c.x + 1000f, y, c.z - 1000f));
@@ -187,11 +187,11 @@ namespace SupremeNuclear
                     if (cycleGid != 0 && !PatrolCyclesDrawn.Add(cycleGid))
                     {
                         ChainPts.Clear();
-                        ChainPts.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                        ChainPts.Add(new Vector3(up.x, GameApi.RouteY(up.x, up.z), up.z));
                         if (cur < queues[i].Count)
                         {
                             Vector3 l = queues[i][cur].ToLocalPosition();
-                            ChainPts.Add(new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z));
+                            ChainPts.Add(new Vector3(l.x, GameApi.RouteY(l.x, l.z), l.z));
                         }
                         if (ChainPts.Count > 1)
                             AddSmoothedRoute(routes, 2, ChainPts);
@@ -200,21 +200,21 @@ namespace SupremeNuclear
                     // (cur/loopStart объявлены выше — блок группового дедупа)
                     int loopStart = GroundOrders.PatrolLoopStartOf(unit);
                     ChainPts.Clear();
-                    ChainPts.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                    ChainPts.Add(new Vector3(up.x, GameApi.RouteY(up.x, up.z), up.z));
                     for (int q = cur; q < queues[i].Count; q++)
                     {
                         Vector3 l = queues[i][q].ToLocalPosition();
-                        ChainPts.Add(new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z));
+                        ChainPts.Add(new Vector3(l.x, GameApi.RouteY(l.x, l.z), l.z));
                     }
                     for (int q = loopStart; q < cur; q++)
                     {
                         Vector3 l = queues[i][q].ToLocalPosition();
-                        ChainPts.Add(new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z));
+                        ChainPts.Add(new Vector3(l.x, GameApi.RouteY(l.x, l.z), l.z));
                     }
                     if (cur < queues[i].Count && ChainPts.Count > 2)
                     {
                         Vector3 l = queues[i][cur].ToLocalPosition();
-                        ChainPts.Add(new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z)); // замыкание на текущую
+                        ChainPts.Add(new Vector3(l.x, GameApi.RouteY(l.x, l.z), l.z)); // замыкание на текущую
                     }
                     AddSmoothedRoute(routes, 2, ChainPts);
                     continue;
@@ -225,7 +225,7 @@ namespace SupremeNuclear
                 // ветки — каждый свой (граница гонки копий — §12-51 закрыт).
                 ChainPts.Clear();
                 ChainSubs.Clear();
-                Vector3 runStart = new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z);
+                Vector3 runStart = new Vector3(up.x, GameApi.RouteY(up.x, up.z), up.z);
                 int prevGid = 0;
                 bool firstLeg = true;
                 bool runOpen = false;
@@ -233,7 +233,7 @@ namespace SupremeNuclear
                 {
                     int gid = GroundOrders.GroupIdOf(unit, q);
                     Vector3 l = queues[i][q].ToLocalPosition();
-                    Vector3 wp = new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z);
+                    Vector3 wp = new Vector3(l.x, GameApi.RouteY(l.x, l.z), l.z);
                     bool drawLeg = firstLeg && gid != 0
                         ? MeshGidEntries.Add(gid)
                         : prevGid != 0 && gid != 0
@@ -273,9 +273,9 @@ namespace SupremeNuclear
                     continue;
                 Vector3 up = units[i].transform.position;
                 var r = new RouteDraw { Submesh = 3, Bias = CurBias };
-                r.World.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                r.World.Add(new Vector3(up.x, GameApi.RouteY(up.x, up.z), up.z));
                 Vector3 tp = target.transform.position;
-                AppendSamples(r.World, new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z));
+                AppendSamples(r.World, new Vector3(tp.x, GameApi.RouteY(tp.x, tp.z), tp.z));
                 if (r.World.Count > 1)
                     routes.Add(r);
             }
@@ -291,7 +291,7 @@ namespace SupremeNuclear
                 Vector3 up = unit.transform.position;
                 int kind = -1;
                 ChainPts.Clear();
-                ChainPts.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                ChainPts.Add(new Vector3(up.x, GameApi.RouteY(up.x, up.z), up.z));
                 for (int e = 0; e < seq.Count; e++)
                 {
                     BuildTasks.SeqEntry entry = seq[e];
@@ -307,7 +307,7 @@ namespace SupremeNuclear
                             ChainPts.Add(LastChainPoint);
                     }
                     kind = entryKind;
-                    ChainPts.Add(new Vector3(at.x, GameApi.GroundY(at.x, at.z), at.z));
+                    ChainPts.Add(new Vector3(at.x, GameApi.RouteY(at.x, at.z), at.z));
                 }
                 if (ChainPts.Count > 1)
                     AddSmoothedRoute(routes, kind == 5 ? 5 : 0, ChainPts);
@@ -322,9 +322,9 @@ namespace SupremeNuclear
                     continue;
                 Vector3 up = MeshEscortUnits[i].transform.position;
                 var r = new RouteDraw { Submesh = 5, Bias = CurBias };
-                r.World.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                r.World.Add(new Vector3(up.x, GameApi.RouteY(up.x, up.z), up.z));
                 Vector3 tp = t.transform.position;
-                AppendSamples(r.World, new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z));
+                AppendSamples(r.World, new Vector3(tp.x, GameApi.RouteY(tp.x, tp.z), tp.z));
                 if (r.World.Count > 1)
                     routes.Add(r);
             }
@@ -340,7 +340,7 @@ namespace SupremeNuclear
                 Unit unit = units[i];
                 CurBias = (Mathf.Abs(unit.GetInstanceID()) % 16) * 0.12f; // анти-z-fight (см. наземку)
                 Vector3 up = unit.transform.position;
-                Vector3 anchor = new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z);
+                Vector3 anchor = new Vector3(up.x, GameApi.RouteY(up.x, up.z), up.z);
                 foreach (AircraftOrders.OrderSegment seg in plans[i])
                 {
                     if (seg == null || (seg.Points.Count == 0 && seg.Target == null))
@@ -351,7 +351,7 @@ namespace SupremeNuclear
                         Vector3 tp = seg.Target.transform.position;
                         var r = new RouteDraw { Submesh = sub, Bias = CurBias };
                         r.World.Add(anchor);
-                        AppendSamples(r.World, new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z));
+                        AppendSamples(r.World, new Vector3(tp.x, GameApi.RouteY(tp.x, tp.z), tp.z));
                         if (r.World.Count > 1)
                             routes.Add(r);
                         anchor = r.World[r.World.Count - 1];
@@ -363,7 +363,7 @@ namespace SupremeNuclear
                         Vector3 tp = seg.Target.transform.position;
                         var r = new RouteDraw { Submesh = sub, Bias = CurBias };
                         r.World.Add(anchor);
-                        AppendSamples(r.World, new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z));
+                        AppendSamples(r.World, new Vector3(tp.x, GameApi.RouteY(tp.x, tp.z), tp.z));
                         if (r.World.Count > 1)
                             routes.Add(r);
                         anchor = r.World[r.World.Count - 1];
@@ -376,7 +376,7 @@ namespace SupremeNuclear
                     for (int p = 0; p < seg.Points.Count; p++)
                     {
                         Vector3 l = seg.Points[p].ToLocalPosition();
-                        Vector3 wp = new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z);
+                        Vector3 wp = new Vector3(l.x, GameApi.RouteY(l.x, l.z), l.z);
                         ChainPts.Add(wp);
                         wps.Add(wp);
                     }
@@ -446,7 +446,7 @@ namespace SupremeNuclear
                 float t = i / (float)steps;
                 float x = Mathf.Lerp(from.x, to.x, t);
                 float z = Mathf.Lerp(from.z, to.z, t);
-                world.Add(new Vector3(x, GameApi.GroundY(x, z), z));
+                world.Add(new Vector3(x, GameApi.RouteY(x, z), z));
             }
         }
 

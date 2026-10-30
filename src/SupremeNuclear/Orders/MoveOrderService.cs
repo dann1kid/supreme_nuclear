@@ -76,12 +76,16 @@ namespace SupremeNuclear
                     FanTargets.Clear();
                     return;
                 }
-                if (RtsInput.LeftDown && !RtsInput.PointerOverUi)
+                // RouteEditor.Consumed: клик УШЁЛ в захват вейпоинта (в «Залпе» —
+                // точка обстрела: тянем её, а не выдаём новый залп в это место)
+                if (RtsInput.LeftDown && !RtsInput.PointerOverUi && !RouteEditor.Consumed)
                 {
                     if (OrderModes.Pending == OrderMode.Cancel)
                     {
                         CancelAll(_controller.Selection.Selected);
-                        return; // заряд держится: стоп можно прокликать по каждому выделению
+                        if (!RtsInput.Shift)
+                            OrderModes.Pending = OrderMode.None; // стоп — разовый приказ
+                        return;
                     }
                     GameApi.TryGetLocalHQ(out FactionHQ chargeHq);
                     Unit chargeEnemy = TryPickEnemyAt(chargeHq);
@@ -95,6 +99,14 @@ namespace SupremeNuclear
                         return;
                     }
                     IssuePending(_controller.Selection.Selected, RtsInput.Shift);
+                    // Канон SupCom: обычный клик — ОДИН приказ и выход в дефолт
+                    // (ЛКМ — выделение, ПКМ — контекст); Shift удерживает заряд
+                    // серией. Многоточечные по природе держат заряд: ПАТРУЛЬ (точки
+                    // дописываются в цикл) и ЗАЛП (SupCom-канон флота: серия кликов
+                    // дозирует расход по точкам/волнам) — выход ПКМ/Esc.
+                    if (!RtsInput.Shift && OrderModes.Pending != OrderMode.Patrol &&
+                        OrderModes.Pending != OrderMode.Salvo)
+                        OrderModes.Pending = OrderMode.None;
                 }
                 return;
             }
@@ -341,6 +353,7 @@ namespace SupremeNuclear
                 target = RouteEditor.SnapAt(GameApi.MainCam); // снап постановки к юнитам/зданиям, иначе рельеф
             else
                 target = ground;
+            target = GameApi.OnSurface(target); // клик «в воду» — якорь на ПОВЕРХНОСТИ, не на дне
 
             switch (OrderModes.Pending)
             {
@@ -413,6 +426,7 @@ namespace SupremeNuclear
             List<Unit> selected = _controller.Selection.Selected;
             if (selected.Count == 0)
                 return;
+            target = GameApi.OnSurface(target); // клик миникарты по воде — на поверхность
             _moveGroupId = BuildTasks.NextGroupId(); // клик миникарты = свой групповой вейпоинт
             OrderMode mode = OrderModes.Pending;
             if (mode == OrderMode.None)
@@ -667,6 +681,12 @@ namespace SupremeNuclear
         // Наземные атакующие текущего клика: сортировка по азимуту для полукруга.
         private readonly List<Unit> _attackFan = new List<Unit>();
 
+        // Корабли ручного залпа текущего клика (SupCom-канон: волна без похода в атаку).
+        private readonly List<Unit> _fleetSalvo = new List<Unit>();
+
+        // Остаток выделения залпа по площади после вырезания кораблей (без аллокаций).
+        private readonly List<Unit> _salvoRest = new List<Unit>();
+
         // Сопровождающие текущего клика (веер секторов вокруг цели) — наземка и авиация.
         private readonly List<Unit> _escortFan = new List<Unit>();
 
@@ -807,6 +827,11 @@ namespace SupremeNuclear
             bool hasGround = GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 anchor);
             if (!hasGround)
                 anchor = enemy.transform.position;
+            anchor = GameApi.OnSurface(anchor); // залп по цели у воды — якорь на поверхности
+            // Флот в режиме «Залп» — РУЧНОЙ пуск (SupCom-канон: волна = по одной
+            // ракете с корабля, серия кликов дозирует расход), корабли НЕ идут в
+            // атаку. Собираем отдельно, пускаем после цикла.
+            _fleetSalvo.Clear();
             foreach (Unit unit in _controller.Selection.Selected)
             {
                 if (unit is Aircraft aircraft)
@@ -824,11 +849,31 @@ namespace SupremeNuclear
                         AircraftOrders.Attack(aircraft, enemy, anchor);
                     any = true;
                 }
-                else if ((unit is GroundVehicle || unit is Ship) && !GameApi.IsEngineer(unit))
+                else if (unit is Ship)
+                {
+                    if (salvo)
+                    {
+                        _fleetSalvo.Add(unit);
+                        any = true;
+                    }
+                    else
+                    {
+                        _attackFan.Add(unit); // сектора разносятся вторым проходом
+                        any = true;
+                    }
+                }
+                else if (unit is GroundVehicle && !GameApi.IsEngineer(unit))
                 {
                     _attackFan.Add(unit); // сектора разносятся вторым проходом
                     any = true;
                 }
+            }
+            if (_fleetSalvo.Count > 0)
+            {
+                int fired = FleetSalvo.LaunchWave(_fleetSalvo, enemy, enemy.GlobalPosition());
+                Markers.Add(new Marker(enemy.transform.position, Time.unscaledTime));
+                SalvoNotice(fired);
+                _fleetSalvo.Clear();
             }
             if (_attackFan.Count > 0)
             {
@@ -870,6 +915,25 @@ namespace SupremeNuclear
                     CommanderHud.Notice(Loc.Tr("Цель вне разведки: ведём на позицию, огонь — после захвата сенсорами"));
             }
             return any;
+        }
+
+        /// <summary>Notice ручного залпа по факту: ушедшие сразу / волна в очереди
+        /// (трубы перезаряжаются — SupCom-перечисление пусков) / нечем вовсе.</summary>
+        private static void SalvoNotice(int fired)
+        {
+            CommanderHud.Notice(fired > 0
+                ? Loc.F("Ручной залп: пусков — {0}", fired)
+                : FleetSalvo.Queue.Count > 0
+                    ? Loc.Tr("Ручной залп: волна в очереди — трубы перезаряжаются")
+                    : Loc.Tr("Ручной залп: нет готовых ракет (гейты/боезапас/перезарядка)"));
+        }
+
+        /// <summary>Заряд режима «Залп» (V/кнопка — без ограничения типа; ПКМ по
+        /// чипу типа на панели — волны флота только этим вооружением).</summary>
+        public void ChargeSalvo(WeaponInfo scope = null)
+        {
+            FleetSalvo.Scope = scope;
+            OrderModes.Pending = OrderMode.Salvo;
         }
 
         /// <summary>Заряд «Распределения» (R / кнопка): список целей копится с нуля.</summary>
@@ -1146,6 +1210,34 @@ namespace SupremeNuclear
         /// без ракетных станций (бомбовоз) залп деградирует в атаку-движение.</summary>
         private void IssueSalvoArea(List<Unit> selected, Vector3 target, bool queue)
         {
+            target = GameApi.OnSurface(target); // залп «в воду» — в точку ПОВЕРХНОСТИ
+            // Флот — РУЧНОЙ пуск по ТОЧКЕ (SupCom-нул, v0.117): волна уходит сразу,
+            // цель-юнит не нужна (ракета летит в точку, ГСН может захватить цель
+            // у неё по пути). Корабль не двигается и НЕ участвует в решётке
+            // залпа авиации — дальше разбираем только остальных.
+            _fleetSalvo.Clear();
+            bool anyShip = false;
+            foreach (Unit unit in selected)
+                if (unit is Ship)
+                {
+                    _fleetSalvo.Add(unit);
+                    anyShip = true;
+                }
+            if (anyShip)
+            {
+                // Пуск ПО ТОЧКЕ (SupCom-нул): ракета ведётся в координату
+                // (отложенное Missile.SetAimpoint после спавна), цель-юнит не нужна —
+                // насыщение ПВО, сплеш, удар наугад, упреждение кликом вперёд.
+                // Точка — на ПОВЕРХНОСТИ (клик по воде даёт ДНО — канон флота).
+                Vector3 surface = new Vector3(target.x, GameApi.RouteY(target.x, target.z), target.z);
+                int fired = FleetSalvo.LaunchWave(_fleetSalvo, null, surface.ToGlobalPosition());
+                SalvoNotice(fired);
+                _salvoRest.Clear();
+                foreach (Unit unit in selected)
+                    if (!(unit is Ship))
+                        _salvoRest.Add(unit);
+                selected = _salvoRest;
+            }
             int cols = Mathf.CeilToInt(Mathf.Sqrt(selected.Count));
             float groundY = GameApi.GroundY(target.x, target.z);
             int aircraft = 0, ground = 0;

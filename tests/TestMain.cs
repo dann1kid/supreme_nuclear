@@ -1549,6 +1549,17 @@ namespace SupremeNuclear.Tests
                 Util.RouteSeenBefore(seenFlat, seenLens, rA1) &&
                 !Util.RouteSeenBefore(seenFlat, seenLens, rAshort));
 
+            // ---------- FleetSalvo.FitsDomain: домен станции для ручной волны ----------
+            {
+                // перевес ВВ — только по воздуху; АС и ничья (правило зеркально ClassOf) — по земле/морю
+                Check("Флот-залп: ВВ-ракета бьёт воздушную цель, не наземную",
+                    FleetSalvo.FitsDomain(0.93f, 0f, true) && !FleetSalvo.FitsDomain(0.93f, 0f, false));
+                Check("Флот-залп: AGM (АС-перевес) бьёт наземную/надводную, не воздушную",
+                    FleetSalvo.FitsDomain(0.5f, 0.814f, false) && !FleetSalvo.FitsDomain(0.5f, 0.814f, true));
+                Check("Флот-залп: ничья весов — по земле (канон тай-брейка АС)",
+                    FleetSalvo.FitsDomain(0.6f, 0.6f, false) && !FleetSalvo.FitsDomain(0.6f, 0.6f, true));
+            }
+
             Console.WriteLine(_failed == 0 ? "ВСЕ ТЕСТЫ ПРОЙДЕНЫ" : "ПРОВАЛОВ: " + _failed);
             return _failed == 0 ? 0 : 1;
         }

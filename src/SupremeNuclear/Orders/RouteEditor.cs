@@ -41,6 +41,7 @@ namespace SupremeNuclear
             new List<(object, int, Vector3)>();
         private static readonly List<object> RallyGroupFactories = new List<object>();
         private static readonly List<int> RallyGroupIdx = new List<int>();
+
         private static Vector3 _grabWorld;
 
         /// <summary>Диагностика последней попытки захвата (строка F11).</summary>
@@ -64,10 +65,20 @@ namespace SupremeNuclear
             {
                 // Заряженный режим приказа: ЛКМ выдаёт приказ (MoveOrders) — захват
                 // вейпоинта не стартует (SupCom-схема: заряд = ЛКМ, ПКМ — отмена).
-                if (RtsInput.LeftDown && OrderModes.Pending == OrderMode.None)
+                if (RtsInput.LeftDown &&
+                    (OrderModes.Pending == OrderMode.None || OrderModes.Pending == OrderMode.Salvo))
                 {
+                    // В заряженном «Залпе» (канон тактичек SupCom: маркеры двигаются
+                    // и при активном режиме пуска) ЛКМ захватывает ТОЛЬКО точку
+                    // обстрела — клик по чему угодно ещё обязан выдать приказ.
                     bool overUi = RtsInput.PointerOverUi;
                     bool found = !overUi && TryGrab(controller, cam, out _hit);
+                    if (found && OrderModes.Pending == OrderMode.Salvo &&
+                        _hit.Kind != WaypointKind.SalvoPoint)
+                    {
+                        found = false;
+                        _hit = default;
+                    }
                     LastGrabDebug = overUi ? "курсор над UI" : found
                         ? "захват: " + KindLabel(_hit.Kind)
                         : "рядом нет вейпоинта";
@@ -89,7 +100,8 @@ namespace SupremeNuclear
 
             Consumed = true;
             if (RtsInput.LeftHeld && (_hit.Owner != null || _hit.Kind == WaypointKind.BuildSite ||
-                                       _hit.Kind == WaypointKind.RallyPoint))
+                                       _hit.Kind == WaypointKind.RallyPoint ||
+                                       _hit.Kind == WaypointKind.SalvoPoint))
             {
                 // Порог «клик vs драг» тот же, что у классификации на отпускании:
                 // пока курсор не сдвинулся на ClickPx — захват только взведён (клик по
@@ -101,7 +113,9 @@ namespace SupremeNuclear
                 // Площадки не снапятся к юнитам (юнит — блокер зоны, не цель), и промах
                 // луча по рельефу (курсор над небом) кадр пропускает — фолбэк (0,0,0)
                 // телепортировал площадку в мировой ноль посреди драга.
-                if (_dragMoved && TrySnapPoint(cam, _hit.Kind != WaypointKind.BuildSite, out Vector3 snapped))
+                if (_dragMoved && TrySnapPoint(cam,
+                        _hit.Kind != WaypointKind.BuildSite && _hit.Kind != WaypointKind.SalvoPoint,
+                        out Vector3 snapped))
                 {
                     if (_hit.Kind == WaypointKind.BuildSite)
                         WaypointOps.Move(_hit, snapped); // guard «начатая не двигается» внутри
@@ -148,7 +162,7 @@ namespace SupremeNuclear
             if (!RtsInput.LeftHeld)
             {
                 var ctrl0 = CommanderModeController.Instance;
-                if (!_dragMoved && !RtsInput.Shift)
+                if (!_dragMoved && !RtsInput.Shift && _hit.Kind != WaypointKind.SalvoPoint)
                 {
                     // Клик без движения по площадке = ВЫДЕЛИТЬ недострой; по любому ДРУГОМУ
                     // вейпоинту — сброс выделения (SupCom: клик мимо = пусто).

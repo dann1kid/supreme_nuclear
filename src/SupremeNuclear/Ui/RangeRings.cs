@@ -133,7 +133,9 @@ namespace SupremeNuclear
         {
             float mr = wi.targetRequirements.maxRange;
             float k = Settings.RangeRingMissileFactor;
-            if (wi.missile && k > 1f && owner is Ship)
+            // overHorizon — флаг самой игры: только у таких ракет ShipAI даёт ×100
+            // (короткоракетному ПВО кораблей множитель не нужен — оно честно бьёт по номиналу)
+            if (wi.missile && wi.overHorizon && k > 1f && owner is Ship)
                 mr *= k;
             return mr;
         }

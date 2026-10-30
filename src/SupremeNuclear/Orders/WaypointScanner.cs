@@ -12,7 +12,9 @@ namespace SupremeNuclear
         AirPoint,    // точка плана авиации
         RallyPoint,  // точка ралли-маршрута фабрики (владелец — фабрика, не юнит)
         EscortLink,  // связь сопровождения (маркер — на ЦЕЛИ сопровождения)
-        AttackTarget // цель серии атак (крест): драг = перенацелить, Ctrl+Shift+ПКМ = снять
+        AttackTarget, // цель серии атак (крест): драг = перенацелить, Ctrl+Shift+ПКМ = снять
+        SalvoPoint   // точка обстрела залпа флота: ПОЛНОЦЕННЫЙ вейпоинт SupCom-тактичек —
+                     // лента от корабля, драг (без снапа к юнитам), Ctrl+Shift+ПКМ = снять волну
     }
 
     /// <summary>ЕДИНЫЙ скан вейпоинтов под курсором (консолидация v0.48):
@@ -109,7 +111,7 @@ namespace SupremeNuclear
         {
             Vector4 acc = GroupCentroids[gid];
             float x = acc.x / acc.w, z = acc.z / acc.w;
-            return new Vector3(x, GameApi.GroundY(x, z), z);
+            return new Vector3(x, GameApi.RouteY(x, z), z);
         }
 
         /// <summary>Точка, где РИСУЕТСЯ вейпоинт: групповая (gid≠0) — центроид
@@ -229,13 +231,28 @@ namespace SupremeNuclear
                 {
                     // Пик — там, где рисуется маркер: на земле (CommanderHud.GroundVec).
                     Vector3 l = route.Points[p].ToLocalPosition();
-                    Vector3 v = new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z);
+                    Vector3 v = new Vector3(l.x, GameApi.RouteY(l.x, l.z), l.z);
                     if (Near(cam, v, mouse, px))
                         return new WaypointHit(WaypointKind.RallyPoint, f, p);
                 }
             }
 
-            // 4. Цепочки наземки/флота.
+            // 4. Точки обстрела залпа флота — полноценные вейпоинты (канон тактичек
+            // SupCom: лента, драг, снятие). Ждущие ТОЧЕЧНЫЕ волны, видны всегда;
+            // пик — на поверхности (RouteY), ровно где рисуется крест и лента.
+            // Волн по целям нет: их крест следует за целью, не таскается.
+            for (int wi = 0; wi < FleetSalvo.Queue.Count; wi++)
+            {
+                FleetSalvo.QueuedWave wave = FleetSalvo.Queue[wi];
+                if (wave.Target != null)
+                    continue;
+                Vector3 l = wave.Aim.ToLocalPosition();
+                Vector3 v = new Vector3(l.x, GameApi.RouteY(l.x, l.z), l.z);
+                if (Near(cam, v, mouse, px))
+                    return new WaypointHit(WaypointKind.SalvoPoint, (object)null, wave.MarkId);
+            }
+
+            // 5. Цепочки наземки/флота.
             OwnersFromSelection(controller);
             if (allUnits)
             {
@@ -276,7 +293,7 @@ namespace SupremeNuclear
                         if (t == null || t.disabled)
                             continue;
                         Vector3 tp = t.transform.position;
-                        Vector3 tg = new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z);
+                        Vector3 tg = new Vector3(tp.x, GameApi.RouteY(tp.x, tp.z), tp.z);
                         if (Near(cam, tg, mouse, px))
                             return new WaypointHit(WaypointKind.AttackTarget, unit, null, 0, q);
                     }
@@ -308,7 +325,7 @@ namespace SupremeNuclear
                         // захват и удаление точек (в т.ч. патруля) промахивались.
                         // Групповая точка пикается в ЦЕНТРОИДЕ формации (там, где маркер).
                         Vector3 own = plan[s].Points[p].ToLocalPosition();
-                        own.y = GameApi.GroundY(own.x, own.z);
+                        own.y = GameApi.RouteY(own.x, own.z);
                         if (Near(cam, PickPoint(plan[s].PointGroups[p], own), mouse, px))
                             return new WaypointHit(WaypointKind.AirPoint, unit, null, s, p);
                     }
@@ -332,7 +349,7 @@ namespace SupremeNuclear
                     if (!SeenEscortTargets.Add(seg.Target))
                         continue;
                     Vector3 tp = seg.Target.transform.position;
-                    tp.y = GameApi.GroundY(tp.x, tp.z);
+                    tp.y = GameApi.RouteY(tp.x, tp.z);
                     if (Near(cam, tp, mouse, px))
                         return new WaypointHit(WaypointKind.EscortLink, seg.Target, null, 0, 0);
                 }
@@ -347,7 +364,7 @@ namespace SupremeNuclear
                 if (!SeenEscortTargets.Add(target))
                     continue; // несколько эскортов одной цели — один маркер
                 Vector3 tp = target.transform.position;
-                tp.y = GameApi.GroundY(tp.x, tp.z);
+                tp.y = GameApi.RouteY(tp.x, tp.z);
                 if (Near(cam, tp, mouse, px))
                     return new WaypointHit(WaypointKind.EscortLink, target, null, 0, 0);
             }
