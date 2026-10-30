@@ -245,11 +245,19 @@ namespace SupremeNuclear
 
         private static readonly List<Unit> _claimsDead = new List<Unit>();
 
+        // Скретч DistributeTargets (раз в 5 с на борт, но большой воздушный бой —
+        // 40+ бортов × 200 контактов): кандидаты и счётчик занятости целей —
+        // раньше new List на вызов и O(|Claims|) на КАЖДОГО кандидата (§12-45д).
+        private static readonly List<Unit> _distrCandidates = new List<Unit>();
+        private static readonly Dictionary<Unit, int> _claimsCount = new Dictionary<Unit, int>();
+
         /// <summary>Сброс реестра занятости (sceneLoaded — инвариант №11).</summary>
         internal static void ResetClaims()
         {
             Claims.Clear();
             _claimsDead.Clear();
+            _distrCandidates.Clear();
+            _claimsCount.Clear();
         }
 
         /// <summary>Записать итоговую цель борта (null = не воюет); заодно вычистить
@@ -268,16 +276,26 @@ namespace SupremeNuclear
             Claims[aircraft] = target;
         }
 
-        /// <summary>Сколько живых бортов (кроме except) сейчас держат цель.</summary>
-        private static int ClaimsOn(Unit target, Aircraft except)
+        /// <summary>Счётчики занятости целей одним проходом по Claims (кроме борта
+        /// except): ключ — цель, значение — сколько живых бортов её держат.</summary>
+        private static void BuildClaimsCount(Aircraft except)
         {
-            int n = 0;
+            _claimsCount.Clear();
             foreach (KeyValuePair<Unit, Unit> kv in Claims)
-                if (kv.Key != null && kv.Key != except && !kv.Key.disabled &&
-                    kv.Value != null && !kv.Value.disabled && kv.Value == target)
-                    n++;
-            return n;
+            {
+                if (kv.Key == null || kv.Key == except || kv.Key.disabled)
+                    continue;
+                Unit t = kv.Value;
+                if (t == null || t.disabled)
+                    continue;
+                _claimsCount.TryGetValue(t, out int c);
+                _claimsCount[t] = c + 1;
+            }
         }
+
+        /// <summary>Сколько живых бортов (кроме нашего) держат цель — из BuildClaimsCount.</summary>
+        private static int ClaimsOn(Unit target) =>
+            _claimsCount.TryGetValue(target, out int c) ? c : 0;
 
         /// <summary>Живые борта с живой целью — конкуренты за распределение.</summary>
         private static int EngagedCount()
@@ -314,7 +332,8 @@ namespace SupremeNuclear
             Vector3 pos = aircraft.transform.position;
             Vector3 heading = cone ? AircraftOrders.SegmentHeading(seg, pos) : Vector3.zero;
             bool hasHeading = heading != Vector3.zero;
-            var candidates = new List<Unit>(hq.trackingDatabase.Count);
+            var candidates = _distrCandidates; // без new List на вызов (§12-45д)
+            candidates.Clear();
             foreach (KeyValuePair<PersistentID, TrackingInfo> item in hq.trackingDatabase)
             {
                 if (!item.Value.TryGetUnit(out Unit unit) || unit == null || unit.disabled ||
@@ -328,10 +347,11 @@ namespace SupremeNuclear
             int m = candidates.Count;
             if (m == 0)
                 return;
+            BuildClaimsCount(aircraft); // O(|Claims|) один раз, не на каждого кандидата
 
             int n = EngagedCount() + (current == null || current.disabled ? 1 : 0);
             int capacity = System.Math.Max(1, (n + m - 1) / m); // ceil: «насколько хватает»
-            if (current != null && !current.disabled && ClaimsOn(current, aircraft) < capacity)
+            if (current != null && !current.disabled && ClaimsOn(current) < capacity)
                 return; // на цели хватает бортов и без нас — держим свою
 
             // Перебор «лишнего»/бесцельного борта: лучший скор среди недозанятых.
@@ -343,7 +363,7 @@ namespace SupremeNuclear
             for (int i = 0; i < m; i++)
             {
                 Unit cand = candidates[i];
-                if (cand == current || ClaimsOn(cand, aircraft) >= capacity)
+                if (cand == current || ClaimsOn(cand) >= capacity)
                     continue; // цель уже укомплектована
                 TrackingInfo tracking = hq.GetTrackingData(cand.persistentID);
                 if (tracking == null || !hq.IsTargetPositionAccurate(cand, 1000f))

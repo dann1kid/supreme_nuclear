@@ -24,19 +24,42 @@ namespace SupremeNuclear
         private static int _lastGroundVersion = -1;
         private static bool _ready;
 
-        private static readonly List<Vector3>[] Verts = { new List<Vector3>(), new List<Vector3>(), new List<Vector3>(), new List<Vector3>(), new List<Vector3>(), new List<Vector3>() };
-        private static readonly List<Vector2>[] Uv = { new List<Vector2>(), new List<Vector2>(), new List<Vector2>(), new List<Vector2>(), new List<Vector2>(), new List<Vector2>() };
-        private static readonly List<int>[] Tris = { new List<int>(), new List<int>(), new List<int>(), new List<int>(), new List<int>(), new List<int>() };
-        // Скругление углов цепочки перед сэмплированием рельефа (та же логика, что в IMGUI-ленте).
-        private static readonly List<Vector3> ChainPts = new List<Vector3>();
-        private static readonly List<Vector3> SmoothChain = new List<Vector3>();
-        private static readonly List<int> SmoothLegs = new List<int>();
-
         private sealed class RouteDraw
         {
             public int Submesh;
+            /// <summary>Индивидуальное смещение высоты (анти-z-fight: копланарные
+            /// ленты членов группы мерцали «подразбитиями», плейтест v0.114).</summary>
+            public float Bias;
+            /// <summary>Подмеш каждого СЕГМЕНТА (World.Count-1 записей; null — вся
+            /// лента фиксированным Submesh). Непрерывная геометрия, цвет — по виду
+            /// ноги: канон FA (кривая не рвётся на границе приказов).</summary>
+            public List<int> SegSub;
             public readonly List<Vector3> World = new List<Vector3>();
         }
+
+        /// <summary>Смещение высоты текущего юнита (ставится перед сборкой его лент).</summary>
+        private static float CurBias;
+
+        // Глобальные буферы меша: вершины/UV общие на все сабмеши, треугольники —
+        // по сабмешам (общие вершины на границах цветов: геометрия не рвётся).
+        private static readonly List<Vector3> MeshVerts = new List<Vector3>();
+        private static readonly List<Vector2> MeshUv = new List<Vector2>();
+        private static readonly List<int>[] Tris =
+        {
+            new List<int>(), new List<int>(), new List<int>(),
+            new List<int>(), new List<int>(), new List<int>()
+        };
+        // Сглаживание цепочки Эрмит-кривыми перед сэмплированием рельефа (канон
+        // Moho UICommandGraph); ChainSubs — подмеш каждой ноги непрерывной ленты.
+        private static float[] _ptU; // UV-дистанция точек текущей ленты (тайлы)
+        private static readonly List<Vector3> ChainPts = new List<Vector3>();
+        private static readonly List<Vector3> SmoothChain = new List<Vector3>();
+        private static readonly List<int> SmoothLegs = new List<int>();
+        private static readonly List<int> ChainSubs = new List<int>();
+        // Адаптивная ширина от камеры: переборка при движении/зуме (троттл).
+        private static Vector3 _lastCamPos = Vector3.zero;
+        private static Vector3 _lastCamFwd = Vector3.zero;
+        private static float _nextCamRebuild;
 
         private static Vector3 _lastOriginPos;
 
@@ -44,6 +67,7 @@ namespace SupremeNuclear
         {
             if (!Settings.RouteUseMesh || !GameApi.InMission)
                 return;
+            AnimateFlow(); // бегущие шевроны — каждый кадр (сдвиг UV материала)
 
             // Сдвиг floating origin = смена системы координат: меш обязан пересобраться.
             Transform origin = Datum.origin;
@@ -51,7 +75,28 @@ namespace SupremeNuclear
             if (origin != null)
                 _lastOriginPos = origin.position;
 
-            bool dirty = originMoved ||
+            // Адаптивная ширина зависит от камеры: движение/зум → переборка
+            // (троттл 0.15 с — ширина чуть запаздывает за камерой, незаметно).
+            bool camMoved = false;
+            Camera cam = GameApi.MainCam;
+            if (cam != null)
+            {
+                Vector3 pos = cam.transform.position;
+                Vector3 fwd = cam.transform.forward;
+                if ((pos - _lastCamPos).sqrMagnitude > 4f ||
+                    (fwd - _lastCamFwd).sqrMagnitude > 1e-4f)
+                {
+                    if (Time.unscaledTime >= _nextCamRebuild)
+                    {
+                        _nextCamRebuild = Time.unscaledTime + 0.15f;
+                        _lastCamPos = pos;
+                        _lastCamFwd = fwd;
+                        camMoved = true;
+                    }
+                }
+            }
+
+            bool dirty = originMoved || camMoved ||
                          AircraftOrders.Version != _lastAirVersion ||
                          GroundOrders.Version != _lastGroundVersion;
             if (dirty || Time.unscaledTime >= _nextRebuild)
@@ -99,9 +144,13 @@ namespace SupremeNuclear
 
         private static readonly List<Unit> MeshEscortUnits = new List<Unit>();
         private static readonly List<Unit> MeshEscortTargets = new List<Unit>();
+        // Групповые циклы патруля, уже нарисованные в этой сборке (дедуп — цикл
+        // рисует один член группы, §12-51 для патруля).
+        private static readonly HashSet<int> PatrolCyclesDrawn = new HashSet<int>();
 
         private static void CollectGround(List<RouteDraw> routes)
         {
+            PatrolCyclesDrawn.Clear();
             var units = new List<Unit>();
             var queues = new List<IReadOnlyList<GlobalPosition>>();
             var indices = new List<int>();
@@ -113,22 +162,120 @@ namespace SupremeNuclear
                 // маршрут инженера рисует IMGUI-проход очередей, ленту не дублируем.
                 if (BuildTasks.ChainIsIssuedHead(unit))
                     continue;
+                // Своё смещение высоты: групповые магистрали членов группы не лежат
+                // копланарно (z-fight-мерцание «подразбитиями»).
+                CurBias = (Mathf.Abs(unit.GetInstanceID()) % 16) * 0.12f;
                 bool patrol = GroundOrders.KindOf(unit) == GroundOrderKind.Patrol;
-                ChainPts.Clear();
                 Vector3 up = unit.transform.position;
+                int cur = GroundOrders.DrawStartIndex(unit); // текущая точка (голова ленты)
+                if (patrol)
+                {
+                    // Групповой цикл рисуется ОДИН раз (первый встреченный член):
+                    // N копий с разными UV-фазами размывали шевроны наложением.
+                    // Остальные члены рисуют только свою ногу «якорь → текущая».
+                    int cycleGid = cur < queues[i].Count
+                        ? GroundOrders.GroupIdOf(unit, Mathf.Min(cur, GroundOrders.PatrolLoopStartOf(unit)))
+                        : 0;
+                    if (cycleGid != 0 && !PatrolCyclesDrawn.Add(cycleGid))
+                    {
+                        ChainPts.Clear();
+                        ChainPts.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                        if (cur < queues[i].Count)
+                        {
+                            Vector3 l = queues[i][cur].ToLocalPosition();
+                            ChainPts.Add(new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z));
+                        }
+                        if (ChainPts.Count > 1)
+                            AddSmoothedRoute(routes, 2, ChainPts);
+                        continue;
+                    }
+                    // (cur/loopStart объявлены выше — блок группового дедупа)
+                    int loopStart = GroundOrders.PatrolLoopStartOf(unit);
+                    ChainPts.Clear();
+                    ChainPts.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                    for (int q = cur; q < queues[i].Count; q++)
+                    {
+                        Vector3 l = queues[i][q].ToLocalPosition();
+                        ChainPts.Add(new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z));
+                    }
+                    for (int q = loopStart; q < cur; q++)
+                    {
+                        Vector3 l = queues[i][q].ToLocalPosition();
+                        ChainPts.Add(new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z));
+                    }
+                    if (cur < queues[i].Count && ChainPts.Count > 2)
+                    {
+                        Vector3 l = queues[i][cur].ToLocalPosition();
+                        ChainPts.Add(new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z)); // замыкание на текущую
+                    }
+                    AddSmoothedRoute(routes, 2, ChainPts);
+                    continue;
+                }
+                // Линейная цепочка — ОДИН непрерывный путь (канон FA: кривая течёт
+                // через ВСЕ вейпоинты с митр-тангенсами, цвет меняется на границе
+                // приказов БЕЗ разрыва геометрии — пробеги-куски давали стыки
+                // «прямоугольниками»). Подмеш сегмента = вид точки, В КОТОРУЮ он
+                // входит (per-point, v0.114).
+                ChainPts.Clear();
+                ChainSubs.Clear();
                 ChainPts.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
-                Vector3 first = default;
                 for (int q = GroundOrders.DrawStartIndex(unit); q < queues[i].Count; q++)
                 {
                     Vector3 l = queues[i][q].ToLocalPosition();
-                    Vector3 wp = new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z);
-                    if (q == GroundOrders.DrawStartIndex(unit))
-                        first = wp;
-                    ChainPts.Add(wp);
+                    ChainPts.Add(new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z));
+                    ChainSubs.Add(SubmeshOf(GroundOrders.KindOfPoint(unit, q)));
                 }
-                if (patrol && ChainPts.Count > 2)
-                    ChainPts.Add(first); // замыкающая нога цикла
-                AddSmoothedRoute(routes, patrol ? 2 : 0, ChainPts);
+                if (ChainPts.Count > 1)
+                    AddSmoothedRoute(routes, ChainPts, ChainSubs, 0);
+            }
+
+            // Атак-ноги наземки (погоня за целью): юнит → цель, красный сабмеш —
+            // иначе при меш-режиме подходы к целям пропадали (кресты остаются в HUD).
+            for (int i = 0; i < units.Count; i++)
+            {
+                Unit target = GroundOrders.TargetOf(units[i]);
+                if (target == null || target.disabled)
+                    continue;
+                Vector3 up = units[i].transform.position;
+                var r = new RouteDraw { Submesh = 3, Bias = CurBias };
+                r.World.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                Vector3 tp = target.transform.position;
+                AppendSamples(r.World, new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z));
+                if (r.World.Count > 1)
+                    routes.Add(r);
+            }
+
+            // Инженерные очереди (записи движений/площадок): движение — циан,
+            // площадка — жёлтый (инженерное семейство FA); от юнита по записям.
+            foreach (Unit unit in BuildTasks.UnitsWithSequences())
+            {
+                var seq = BuildTasks.SequenceOf(unit);
+                if (seq == null || seq.Count == 0)
+                    continue;
+                LastChainPoint = new Vector3(float.NaN, 0f, float.NaN); // хвост — свой, не чужой
+                Vector3 up = unit.transform.position;
+                int kind = -1;
+                ChainPts.Clear();
+                ChainPts.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
+                for (int e = 0; e < seq.Count; e++)
+                {
+                    BuildTasks.SeqEntry entry = seq[e];
+                    int entryKind = entry.Task != null ? 5 : 0;
+                    Vector3 at = entry.Task != null
+                        ? entry.Task.Site.ToLocalPosition()
+                        : entry.Move.ToLocalPosition();
+                    if (entryKind != kind && ChainPts.Count > 1)
+                    {
+                        AddSmoothedRoute(routes, kind == 5 ? 5 : 0, ChainPts);
+                        ChainPts.Clear();
+                        if (HasChainPoint)
+                            ChainPts.Add(LastChainPoint);
+                    }
+                    kind = entryKind;
+                    ChainPts.Add(new Vector3(at.x, GameApi.GroundY(at.x, at.z), at.z));
+                }
+                if (ChainPts.Count > 1)
+                    AddSmoothedRoute(routes, kind == 5 ? 5 : 0, ChainPts);
             }
 
             // Связи сопровождения наземки/флота (v0.97): лента «эскорт → цель».
@@ -139,7 +286,7 @@ namespace SupremeNuclear
                 if (t == null || t.disabled)
                     continue;
                 Vector3 up = MeshEscortUnits[i].transform.position;
-                var r = new RouteDraw { Submesh = 5 };
+                var r = new RouteDraw { Submesh = 5, Bias = CurBias };
                 r.World.Add(new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z));
                 Vector3 tp = t.transform.position;
                 AppendSamples(r.World, new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z));
@@ -156,6 +303,7 @@ namespace SupremeNuclear
             for (int i = 0; i < units.Count; i++)
             {
                 Unit unit = units[i];
+                CurBias = (Mathf.Abs(unit.GetInstanceID()) % 16) * 0.12f; // анти-z-fight (см. наземку)
                 Vector3 up = unit.transform.position;
                 Vector3 anchor = new Vector3(up.x, GameApi.GroundY(up.x, up.z), up.z);
                 foreach (AircraftOrders.OrderSegment seg in plans[i])
@@ -166,7 +314,7 @@ namespace SupremeNuclear
                     if (seg.Mode == AirOrderMode.Attack && seg.Target != null)
                     {
                         Vector3 tp = seg.Target.transform.position;
-                        var r = new RouteDraw { Submesh = sub };
+                        var r = new RouteDraw { Submesh = sub, Bias = CurBias };
                         r.World.Add(anchor);
                         AppendSamples(r.World, new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z));
                         if (r.World.Count > 1)
@@ -178,7 +326,7 @@ namespace SupremeNuclear
                     {
                         // Эскорт-сегмент (v0.97): зелёная нога «борт → цель».
                         Vector3 tp = seg.Target.transform.position;
-                        var r = new RouteDraw { Submesh = sub };
+                        var r = new RouteDraw { Submesh = sub, Bias = CurBias };
                         r.World.Add(anchor);
                         AppendSamples(r.World, new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z));
                         if (r.World.Count > 1)
@@ -206,17 +354,50 @@ namespace SupremeNuclear
             }
         }
 
-        /// <summary>Цепочка вейпоинтов → лента со скруглёнными углами: сглаживание
-        /// в XZ (Util.RoundChainCorners), затем сэмплирование рельефа вдоль пути.</summary>
-        private static void AddSmoothedRoute(List<RouteDraw> routes, int submesh, List<Vector3> chain)
+        /// <summary>Цепочка вейпоинтов → лента Эрмит-кривых (канон Moho,
+        /// Util.HermiteChain, кламп тангенса от мировой ширины ленты): повороты
+        /// «текут» как в SupCom; затем сэмплирование рельефа вдоль пути.</summary>
+        private static Vector3 LastChainPoint = new Vector3(float.NaN, 0f, float.NaN);
+        private static bool HasChainPoint => !float.IsNaN(LastChainPoint.x);
+        // Подмеш каждой выходной точки-сегмента (после Эрмита и сэмплирования
+        // рельефа) — непрерывная лента красится по виду ноги без разрывов.
+        private static readonly List<int> SmoothSubs = new List<int>();
+
+        private static void AddSmoothedRoute(List<RouteDraw> routes, int submesh, List<Vector3> chain) =>
+            AddSmoothedRoute(routes, chain, null, submesh);
+
+        /// <summary>Лента из цепочки: Эрмит → сэмплирование рельефа → RouteDraw.
+        /// legSub — подмеш каждой ВЕРХНЕУРОВНЕВОЙ ноги (точки→точки); null — вся
+        /// лента одним фиксированным подмешем. Выходные сегменты наследуют подмеш
+        /// ноги, в которой лежат (маппинг SmoothLegs), — цвет меняется на границе
+        /// ног при НЕПРЕРЫВНОЙ геометрии (общие вершины).</summary>
+        private static void AddSmoothedRoute(List<RouteDraw> routes, List<Vector3> chain,
+            List<int> legSub, int fixedSub)
         {
-            int n = Util.RoundChainCorners(chain, Settings.RouteCornerRadiusM, SmoothChain, SmoothLegs);
+            int n = Util.HermiteChain(chain, null, Settings.RouteRibbonWidthM,
+                Settings.RouteSampleStepM, SmoothChain, SmoothLegs);
+            // Хвост пробега — ЗДЕСЬ, для всех вызывающих (стейт в вызывавшем месте
+            // давал ПРОТАХШИЙ хвост чужой цепи → гигантский квад через камеру).
+            if (n >= 2)
+                LastChainPoint = SmoothChain[n - 1];
             if (n < 2)
                 return;
-            var route = new RouteDraw { Submesh = submesh };
+            var route = new RouteDraw { Submesh = fixedSub, Bias = CurBias };
+            // Сегменты выходных точек: расширяем вместе с сэмплированием рельефа —
+            // сегменты внутри куска (j-1→j) принадлежат ноге SmoothLegs-интервала.
             route.World.Add(SmoothChain[0]);
+            route.SegSub = legSub != null ? new List<int>(n) : null;
+            int leg = 0;
             for (int j = 1; j < n; j++)
+            {
+                while (leg + 1 < SmoothLegs.Count && j > SmoothLegs[leg + 1])
+                    leg++;
+                int before = route.World.Count;
                 AppendSamples(route.World, SmoothChain[j]);
+                int sub = legSub != null && leg < legSub.Count ? legSub[leg] : fixedSub;
+                for (int k = before; k < route.World.Count; k++)
+                    route.SegSub.Add(sub);
+            }
             routes.Add(route);
         }
 
@@ -246,54 +427,142 @@ namespace SupremeNuclear
                 _ => 0
             };
 
+        /// <summary>Сабмеш цвета вида ТОЧКИ наземной цепочки (per-point, v0.114):
+        /// та же палитра, что у режимов авиации.</summary>
+        private static int SubmeshOf(GroundOrderKind kind) =>
+            kind switch
+            {
+                GroundOrderKind.AttackMove => 1,
+                GroundOrderKind.Patrol => 2,
+                _ => 0
+            };
+
         private static void Rebuild(List<RouteDraw> routes)
         {
             if (!EnsureMaterials())
                 return;
 
+            MeshVerts.Clear();
+            MeshUv.Clear();
             for (int i = 0; i < SubmeshCount; i++)
-            {
-                Verts[i].Clear();
-                Uv[i].Clear();
                 Tris[i].Clear();
-            }
 
-            float half = Settings.RouteRibbonWidthM * 0.5f;
+            // Адаптивная ширина (как IMGUI-лента): у камеры — экранный потолок
+            // ~6px полуширины на 1440p, в стратзуме — мировая RouteRibbonWidthM.
+            // Тайл шеврона следует за ФАКТИЧЕСКОЙ шириной (u = дист/ширина×0.2):
+            // вблизи шевроны сжимаются вместе с лентой и видны на любой ноге.
+            Camera cam = GameApi.MainCam;
+            float pxPerRad = 1f;
+            Vector3 camPos = Vector3.zero;
+            bool adaptive = cam != null && Screen.height > 0;
+            if (adaptive)
+            {
+                camPos = cam.transform.position;
+                pxPerRad = Screen.height / (2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad));
+                if (pxPerRad < 1f)
+                    adaptive = false;
+            }
+            float worldHalf = Settings.RouteRibbonWidthM * 0.5f;
+            float screenScale = Mathf.Max(Screen.height, 1) / 1440f;
+
             foreach (RouteDraw route in routes)
             {
-                var verts = Verts[route.Submesh];
-                var uv = Uv[route.Submesh];
-                var tris = Tris[route.Submesh];
-                int baseIndex = verts.Count;
-                float uAcc = 0f;
-                Vector3 prevC = route.World[0];
-                for (int i = 0; i < route.World.Count; i++)
+                var world = route.World;
+                int count = world.Count;
+                if (count < 2)
+                    continue;
+                float bias = HeightBias + route.Bias;
+                // Тайл шевронов — экранно-пропорционален (~80px на любом зуме),
+                // паттерн плотный (3 шеврона на тайл).
+                float TileAt(Vector3 c)
                 {
-                    Vector3 c = route.World[i];
-                    if (i > 0)
-                        uAcc += Vector3.Distance(prevC, c);
-                    prevC = c;
-                    Vector3 next = i + 1 < route.World.Count ? route.World[i + 1] : c;
-                    Vector3 prev = i > 0 ? route.World[i - 1] : c;
-                    Vector3 dir = next - prev;
+                    if (!adaptive)
+                        return Mathf.Max(8f, 5f * worldHalf * 2f);
+                    return Mathf.Max(8f, 80f * (camPos - c).magnitude / pxPerRad);
+                }
+                // Данные точки: позиция, перпендикуляр, полуширина, UV-дистанция.
+                void PointAt(int i, out Vector3 c, out Vector3 perp, out float half, out float u)
+                {
+                    c = world[i];
+                    Vector3 next = world[i + 1 < count ? i + 1 : count - 1];
+                    Vector3 prevP = world[i > 0 ? i - 1 : 0];
+                    Vector3 dir = next - prevP;
                     Vector3 flat = new Vector3(dir.x, 0f, dir.z);
-                    Vector3 perp = flat.sqrMagnitude < 1e-6f
+                    perp = flat.sqrMagnitude < 1e-6f
                         ? Vector3.right
                         : new Vector3(-flat.z, 0f, flat.x).normalized;
-                    verts.Add(c + perp * half + Vector3.up * HeightBias);
-                    verts.Add(c - perp * half + Vector3.up * HeightBias);
-                    uv.Add(new Vector2(uAcc * 0.01f, 0f));
-                    uv.Add(new Vector2(uAcc * 0.01f, 1f));
+                    half = worldHalf;
+                    if (adaptive)
+                        half = Mathf.Min(worldHalf,
+                            Mathf.Max(1.5f, 6f * screenScale * (camPos - c).magnitude / pxPerRad));
+                    u = 0f;
+                    if (i > 0)
+                        u = _ptU[i - 1] + Vector3.Distance(world[i - 1], c) / TileAt(c);
                 }
-                for (int i = 0; i + 1 < route.World.Count; i++)
+                // UV точки — сначала накопить (PointAt ссылается на предыдущую).
+                if (_ptU == null || _ptU.Length < count)
+                    _ptU = new float[Mathf.NextPowerOfTwo(count)];
+                for (int i = 0; i < count; i++)
                 {
-                    int a = baseIndex + i * 2;
-                    tris.Add(a);
-                    tris.Add(a + 1);
-                    tris.Add(a + 2);
-                    tris.Add(a + 1);
-                    tris.Add(a + 3);
-                    tris.Add(a + 2);
+                    PointAt(i, out _, out _, out _, out float uu);
+                    _ptU[i] = uu;
+                }
+                // Пара вершин в точке (uv.x — внутри [0..1], БЕЗ зависимости от wrap
+                // текстуры: сегменты режутся по границам тайлов, каждый квад живёт
+                // в одном тайле — clamp-обёртка донора больше не прячет шевроны
+                // за первым тайлом, плейтест «шеврон только в хвосте полилинии»).
+                int EmitPair(Vector3 c, Vector3 perp, float half, float uFrac)
+                {
+                    int idx = MeshVerts.Count;
+                    MeshVerts.Add(c + perp * half + Vector3.up * bias);
+                    MeshVerts.Add(c - perp * half + Vector3.up * bias);
+                    MeshUv.Add(new Vector2(uFrac, 0f));
+                    MeshUv.Add(new Vector2(uFrac, 1f));
+                    return idx;
+                }
+
+                for (int i = 1; i < count; i++)
+                {
+                    int sub = route.Submesh;
+                    if (route.SegSub != null && i - 1 < route.SegSub.Count)
+                        sub = route.SegSub[i - 1];
+                    var tris = Tris[sub];
+                    bool flow = sub == 1 || sub == 2; // шевронные сабмеши
+                    PointAt(i - 1, out Vector3 a, out Vector3 perpA, out float halfA, out float u0);
+                    PointAt(i, out Vector3 b, out Vector3 perpB, out float halfB, out float u1);
+                    if (u1 < u0)
+                        u1 = u0;
+                    float du = u1 - u0;
+                    if (!flow || du < 1e-4f)
+                    {
+                        // Мягкая полоса — UV не важен.
+                        int v0 = EmitPair(a, perpA, halfA, 0f);
+                        int v1 = EmitPair(b, perpB, halfB, Mathf.Min(du, 1f));
+                        tris.Add(v0); tris.Add(v0 + 1); tris.Add(v1);
+                        tris.Add(v0 + 1); tris.Add(v1 + 1); tris.Add(v1);
+                        continue;
+                    }
+                    // Шевронная: разрез по целым тайлам — каждый квад внутри [k, k+1].
+                    float ua = u0;
+                    for (int k = Mathf.FloorToInt(u0) + 1; ; k++)
+                    {
+                        float ub = Mathf.Min(k, u1);
+                        float fa = (ua - u0) / du;
+                        float fb = (ub - u0) / du;
+                        int v0 = EmitPair(
+                            Vector3.LerpUnclamped(a, b, fa),
+                            Vector3.SlerpUnclamped(perpA, perpB, fa),
+                            Mathf.LerpUnclamped(halfA, halfB, fa), ua - Mathf.Floor(ua));
+                        int v1 = EmitPair(
+                            Vector3.LerpUnclamped(a, b, fb),
+                            Vector3.SlerpUnclamped(perpA, perpB, fb),
+                            Mathf.LerpUnclamped(halfA, halfB, fb), ub - Mathf.Floor(ub));
+                        tris.Add(v0); tris.Add(v0 + 1); tris.Add(v1);
+                        tris.Add(v0 + 1); tris.Add(v1 + 1); tris.Add(v1);
+                        ua = ub;
+                        if (ub >= u1 - 1e-6f)
+                            break;
+                    }
                 }
             }
 
@@ -302,8 +571,8 @@ namespace SupremeNuclear
                 if (_meshes[i] == null)
                     _meshes[i] = new Mesh { name = "RouteRibbon" + i };
                 _meshes[i].Clear();
-                _meshes[i].SetVertices(Verts[i]);
-                _meshes[i].SetUVs(0, Uv[i]);
+                _meshes[i].SetVertices(MeshVerts);
+                _meshes[i].SetUVs(0, MeshUv);
                 _meshes[i].SetTriangles(Tris[i], 0);
                 _meshes[i].RecalculateNormals();
                 _meshes[i].RecalculateBounds();
@@ -349,34 +618,77 @@ namespace SupremeNuclear
 
             var colors = new[]
             {
-                new Color(1f, 0.8f, 0.25f),
-                new Color(1f, 0.5f, 0.2f),
-                new Color(0.3f, 0.95f, 0.85f),
-                new Color(1f, 0.25f, 0.2f),
-                new Color(0.95f, 0.3f, 0.8f), // залп
-                new Color(0.55f, 0.95f, 0.4f) // сопровождение
+                new Color(0f, 1f, 1f),     // 0 движение — циан FA
+                new Color(1f, 0f, 0f),     // 1 атака-движение — красный FA (шевроны, аним.)
+                new Color(0f, 1f, 1f),     // 2 патруль — циан FA (шевроны, аним.)
+                new Color(1f, 0f, 0f),     // 3 атака — красный FA
+                new Color(1f, 0f, 0f),     // 4 залп (Tactical) — красный FA
+                new Color(1f, 1f, 0f)      // 5 эскорт/площадки — жёлтый FA
             };
-            // Белая 1x1 текстура вместо текстуры донора (иначе лента получает «асфальт» корпуса).
             var white = new Texture2D(1, 1);
             white.SetPixel(0, 0, Color.white);
             white.Apply();
 
+            // Текстуры лент (порт command_graph_renderer FA): шевронная — на
+            // «живых» сабмешах (1 атака-движение, 2 патруль), мягкая — на статичных.
+            CommanderHud.EnsureRibbonTextures();
+            Texture2D soft = CommanderHud.RibbonTexSoft != null ? CommanderHud.RibbonTexSoft : white;
+            Texture2D arrow = CommanderHud.RibbonTexArrow != null ? CommanderHud.RibbonTexArrow : white;
+
             _mats = new Material[SubmeshCount];
             for (int i = 0; i < SubmeshCount; i++)
             {
+                bool flow = i == 1 || i == 2;
+                Texture2D tex = flow ? arrow : soft;
                 _mats[i] = new Material(baseMat);
                 if (_mats[i].HasProperty("_BaseMap"))
-                    _mats[i].SetTexture("_BaseMap", white);
+                    _mats[i].SetTexture("_BaseMap", tex);
                 if (_mats[i].HasProperty("_MainTex"))
-                    _mats[i].SetTexture("_MainTex", white);
+                    _mats[i].SetTexture("_MainTex", tex);
                 _mats[i].DisableKeyword("_NORMALMAP");
                 if (_mats[i].HasProperty("_BaseColor"))
                     _mats[i].SetColor("_BaseColor", colors[i]);
                 else
                     _mats[i].color = colors[i];
+                MakeTransparent(_mats[i]);
             }
             _meshes = new Mesh[SubmeshCount];
             return true;
+        }
+
+        /// <summary>URP-хак прозрачности ленты: поверхность → Transparent, альфа-
+        /// блендинг, без записи глубины, двусторонне. Неизвестные ключи донора
+        /// не трогаем.</summary>
+        private static void MakeTransparent(Material m)
+        {
+            m.SetOverrideTag("RenderType", "Transparent");
+            m.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+            m.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+            m.SetInt("_ZWrite", 0);
+            m.DisableKeyword("_ALPHATEST_ON");
+            m.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+            m.EnableKeyword("_BLENDMODE_ALPHA");
+            m.EnableKeyword("_ALPHAPREMULTIPLY_ON");
+            m.SetInt("_Cull", 0); // Off — двусторонне
+            m.SetInt("_Surface", 1);
+            m.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+        }
+
+        /// <summary>Анимация «живых» сабмешей (1 атака-движение, 2 патруль):
+        /// бегущие шевроны = сдвиг UV текстуры, orderline_anim_rate FA = 0.25/с.</summary>
+        private static void AnimateFlow()
+        {
+            if (_mats == null)
+                return;
+            float shift = -Mathf.Repeat(Time.unscaledTime * 0.25f, 1f);
+            var off = new Vector2(shift, 0f);
+            for (int i = 1; i <= 2; i++)
+            {
+                if (_mats[i].HasProperty("_BaseMap"))
+                    _mats[i].SetTextureOffset("_BaseMap", off);
+                if (_mats[i].HasProperty("_MainTex"))
+                    _mats[i].SetTextureOffset("_MainTex", off);
+            }
         }
 
         public static void Destroy()

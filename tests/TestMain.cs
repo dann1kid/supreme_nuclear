@@ -339,7 +339,7 @@ namespace SupremeNuclear.Tests
                 AircraftOrders.NextPatrolIndex(pd, 0, 3, 240f) == 3 &&
                 AircraftOrders.NextPatrolIndex(pd, 4, -1, 240f) == -1);
 
-            // ---------- Util.RoundChainCorners: скругление углов лент ----------
+            // ---------- Util.HermiteChain: Эрмит-сглаживание лент (канон Moho) ----------
             var rcSmooth = new List<UnityEngine.Vector3>();
             var rcLegs = new List<int>();
             var rcCorner = new List<UnityEngine.Vector3>
@@ -348,19 +348,29 @@ namespace SupremeNuclear.Tests
                 new UnityEngine.Vector3(100f, 0f, 0f),
                 new UnityEngine.Vector3(100f, 0f, 100f),
             };
-            int rcn = Util.RoundChainCorners(rcCorner, 20f, rcSmooth, rcLegs);
-            bool RcHas(float x, float z) => rcSmooth.Any(v =>
-                Math.Abs(v.x - x) < 0.01f && Math.Abs(v.z - z) < 0.01f);
-            Check("Скругление: концы цепочки на месте",
-                rcSmooth[0] == rcCorner[0] && rcSmooth[rcn - 1] == rcCorner[2], "n=" + rcn);
-            Check("Скругление: точки касания на смежных ногах",
-                RcHas(80f, 0f) && RcHas(100f, 20f),
-                string.Join(" ", rcSmooth.Select(v => v.x + ";" + v.z)));
-            Check("Скругление: угол заменён дугой, самой вершины нет", !RcHas(100f, 0f));
-            Check("Скругление: середина дуги = контрольная точка Безье", RcHas(95f, 5f));
-            Check("Скругление: legStart ведёт ногу от конца дуги",
-                rcLegs.Count == 2 && rcLegs[0] == 0 && rcLegs[1] == 3,
+            int rcn = Util.HermiteChain(rcCorner, null, 1f, 200f, rcSmooth, rcLegs);
+            bool RcHas(float x, float z, float eps = 0.01f) => rcSmooth.Any(v =>
+                Math.Abs(v.x - x) < eps && Math.Abs(v.z - z) < eps);
+            Check("Эрмит: концы цепочки и вейпоинты лежат НА кривой",
+                rcSmooth[0] == rcCorner[0] && rcSmooth[rcn - 1] == rcCorner[2] && RcHas(100f, 0f),
+                "n=" + rcn);
+            Check("Эрмит: legStart — по ноге на точку, монотонно",
+                rcLegs.Count == 2 && rcLegs[0] == 0 && rcLegs[1] > 0,
                 string.Join(",", rcLegs));
+            // Поворот 90° (ноги по 100 м, m=25): кривая идёт ЧЕРЕЗ вейпоинт касательно
+            // (митр 45°) с ограниченным перелётом НАРУЖУ — свойство Эрмита с митр-
+            // тангенсами (как Catmull-Rom), канон FA: sag ≈ 0.105·m·0.707 ≈ 1.9 м.
+            float rcSag = 0f;
+            foreach (var v in rcSmooth)
+            {
+                float m1 = v.x <= 100f ? Math.Max(-v.z, 0f) : 0f; // провал под ногу 1 (на её пролёте)
+                float m2 = v.z >= 0f && v.z <= 100f ? Math.Max(v.x - 100f, 0f) : 0f; // вылет за ногу 2
+                rcSag = Math.Max(rcSag, Math.Max(m1, m2));
+            }
+            Check("Эрмит: поворот 90° — касательный проход, перелёт наружу ограничен",
+                rcSag > 0.5f && rcSag < 4f,
+                "sag=" + Math.Round(rcSag, 2) + " " +
+                string.Join(" ", rcSmooth.Select(v => Math.Round(v.x) + ";" + Math.Round(v.z))));
 
             var rcLine = new List<UnityEngine.Vector3>
             {
@@ -368,41 +378,27 @@ namespace SupremeNuclear.Tests
                 new UnityEngine.Vector3(50f, 0f, 0f),
                 new UnityEngine.Vector3(100f, 0f, 0f),
             };
-            int rcLn = Util.RoundChainCorners(rcLine, 20f, rcSmooth, rcLegs);
-            Check("Скругление: коллинеарная цепочка проходит как есть",
-                rcLn == 3 && rcSmooth[1] == rcLine[1] && rcLegs.Count == 2 && rcLegs[1] == 1);
+            int rcLn = Util.HermiteChain(rcLine, null, 1f, 200f, rcSmooth, rcLegs);
+            Check("Эрмит: коллинеарная цепочка — прямая (митр-тангенс вдоль ноги)",
+                rcSmooth.All(v => Math.Abs(v.z) < 0.5f) && rcLegs.Count == 2,
+                string.Join(" ", rcSmooth.Select(v => Math.Round(v.z, 2))));
 
-            var rcClamp = new List<UnityEngine.Vector3>
+            var rcLong = new List<UnityEngine.Vector3>
             {
                 new UnityEngine.Vector3(0f, 0f, 0f),
-                new UnityEngine.Vector3(10f, 0f, 0f),
-                new UnityEngine.Vector3(10f, 0f, 1000f),
+                new UnityEngine.Vector3(1000f, 0f, 0f),
             };
-            int rcCn = Util.RoundChainCorners(rcClamp, 100f, rcSmooth, rcLegs);
-            bool RcClampHas(float x, float z) => rcSmooth.Take(rcCn).Any(v =>
-                Math.Abs(v.x - x) < 0.01f && Math.Abs(v.z - z) < 0.01f);
-            Check("Скругление: радиус зажат 45% короткой ноги (t=4.5)",
-                RcClampHas(5.5f, 0f) && RcClampHas(10f, 4.5f),
-                string.Join(" ", rcSmooth.Take(rcCn).Select(v => v.x + ";" + v.z)));
-
-            var rcZero = new List<UnityEngine.Vector3>
+            int rcSegN = Util.HermiteChain(rcLong, null, 1f, 200f, rcSmooth, rcLegs);
+            Check("Эрмит: сегменты по длине ноги (1000 м / 200 м = 6 точек)",
+                rcSegN == 6 && rcLegs.Count == 1 && rcLegs[0] == 0, "n=" + rcSegN);
+            var rcHuge = new List<UnityEngine.Vector3>
             {
                 new UnityEngine.Vector3(0f, 0f, 0f),
-                new UnityEngine.Vector3(100f, 0f, 0f),
-                new UnityEngine.Vector3(100f, 0f, 100f),
+                new UnityEngine.Vector3(10000f, 0f, 0f),
             };
-            int rcZn = Util.RoundChainCorners(rcZero, 0f, rcSmooth, rcLegs);
-            Check("Скругление: нулевой радиус — цепочка без изменений", rcZn == 3);
-
-            var rcUturn = new List<UnityEngine.Vector3>
-            {
-                new UnityEngine.Vector3(0f, 0f, 0f),
-                new UnityEngine.Vector3(100f, 0f, 0f),
-                new UnityEngine.Vector3(0f, 0f, 0f),
-            };
-            int rcUn = Util.RoundChainCorners(rcUturn, 20f, rcSmooth, rcLegs);
-            Check("Скругление: точный разворот — острый угол, без артефактов",
-                rcUn == 3 && rcSmooth[1] == rcUturn[1]);
+            int rcCapN = Util.HermiteChain(rcHuge, null, 1f, 200f, rcSmooth, rcLegs);
+            Check("Эрмит: кламп 20 сегментов на ногу (ui_CurveSegments FA)",
+                rcCapN == 21, "n=" + rcCapN);
 
             var rcDup = new List<UnityEngine.Vector3>
             {
@@ -411,19 +407,71 @@ namespace SupremeNuclear.Tests
                 new UnityEngine.Vector3(100f, 0f, 0f),
                 new UnityEngine.Vector3(100f, 0f, 100f),
             };
-            int rcDn = Util.RoundChainCorners(rcDup, 20f, rcSmooth, rcLegs);
-            Check("Скругление: вырожденная нога пропущена, конец на месте",
-                rcDn > 0 && rcSmooth[rcDn - 1] == rcDup[3] && rcLegs.Count == 3 && rcLegs[0] == 0 && rcLegs[1] == 0,
+            int rcDn = Util.HermiteChain(rcDup, null, 1f, 200f, rcSmooth, rcLegs);
+            Check("Эрмит: вырожденная нога пропущена (legStart без точек), конец на месте",
+                rcDn > 0 && rcSmooth[rcDn - 1] == rcDup[3] && rcLegs.Count == 3 &&
+                rcLegs[0] == 0 && rcLegs[1] == 0,
                 "n=" + rcDn + " legs=" + string.Join(",", rcLegs));
 
-            var rcTwo = new List<UnityEngine.Vector3>
+            // Кламп тангенса толщиной ноги (шире лента — шире заход в поворот):
+            // на длинных сторонах m = min(¼, 50·w) растёт с толщиной — кривая
+            // отклоняется от ломаной сильнее (выпуклый заход), максимальное
+            // отклонение от полилинии больше.
+            var rcWide = new List<UnityEngine.Vector3>
             {
                 new UnityEngine.Vector3(0f, 0f, 0f),
-                new UnityEngine.Vector3(100f, 0f, 0f),
+                new UnityEngine.Vector3(1000f, 0f, 0f),
+                new UnityEngine.Vector3(1000f, 0f, 1000f),
             };
-            int rcTn = Util.RoundChainCorners(rcTwo, 20f, rcSmooth, rcLegs);
-            Check("Скругление: одна нога — без изменений",
-                rcTn == 2 && rcSmooth[0] == rcTwo[0] && rcSmooth[1] == rcTwo[1] && rcLegs.Count == 1 && rcLegs[0] == 0);
+            var rcW1 = new List<float> { 1f, 1f };
+            var rcW3 = new List<float> { 3f, 3f };
+            int rw1 = Util.HermiteChain(rcWide, rcW1, 1f, 100f, rcSmooth, rcLegs);
+            float dev1 = 0f;
+            for (int i = 0; i < rw1; i++)
+            {
+                var v = rcSmooth[i];
+                // расстояние до полилинии (0,0)-(1000,0)-(1000,1000)
+                float dLeg1 = v.x <= 1000f ? UnityEngine.Mathf.Abs(v.z)
+                    : UnityEngine.Mathf.Sqrt((v.x - 1000f) * (v.x - 1000f) + v.z * v.z);
+                float dx = UnityEngine.Mathf.Max(0f, v.x - 1000f);
+                float dz = UnityEngine.Mathf.Max(0f, -v.z);
+                float dLeg2 = UnityEngine.Mathf.Sqrt(dx * dx + dz * dz);
+                dev1 = UnityEngine.Mathf.Max(dev1, UnityEngine.Mathf.Min(dLeg1, dLeg2));
+            }
+            int rw3 = Util.HermiteChain(rcWide, rcW3, 1f, 100f, rcSmooth, rcLegs);
+            float dev3 = 0f;
+            for (int i = 0; i < rw3; i++)
+            {
+                var v = rcSmooth[i];
+                float dLeg1 = v.x <= 1000f ? UnityEngine.Mathf.Abs(v.z)
+                    : UnityEngine.Mathf.Sqrt((v.x - 1000f) * (v.x - 1000f) + v.z * v.z);
+                float dx = UnityEngine.Mathf.Max(0f, v.x - 1000f);
+                float dz = UnityEngine.Mathf.Max(0f, -v.z);
+                float dLeg2 = UnityEngine.Mathf.Sqrt(dx * dx + dz * dz);
+                dev3 = UnityEngine.Mathf.Max(dev3, UnityEngine.Mathf.Min(dLeg1, dLeg2));
+            }
+            Check("Эрмит: толщина ноги клампит тангенс — широкая лента заходит шире",
+                dev3 > dev1 + 0.5f,
+                "dev1=" + Math.Round(dev1, 2) + " dev3=" + Math.Round(dev3, 2));
+            // Наши ленты (RouteRibbonWidthM=40): кламп 50×40=2000 м не душит
+            // кривизну — тангенсы на ¼ ноги, поворот 90° длинных сторон выходит
+            // ШИРОКОЙ дугой (усадка клампом до 50 м была багом «прямых линий»).
+            var rcN1 = new List<float> { 1f, 1f };
+            int rwn = Util.HermiteChain(rcWide, rcN1, 40f, 100f, rcSmooth, rcLegs);
+            float devn = 0f;
+            for (int i = 0; i < rwn; i++)
+            {
+                var v = rcSmooth[i];
+                float dLeg1 = v.x <= 1000f ? UnityEngine.Mathf.Abs(v.z)
+                    : UnityEngine.Mathf.Sqrt((v.x - 1000f) * (v.x - 1000f) + v.z * v.z);
+                float dx = UnityEngine.Mathf.Max(0f, v.x - 1000f);
+                float dz = UnityEngine.Mathf.Max(0f, -v.z);
+                float dLeg2 = UnityEngine.Mathf.Sqrt(dx * dx + dz * dz);
+                devn = UnityEngine.Mathf.Max(devn, UnityEngine.Mathf.Min(dLeg1, dLeg2));
+            }
+            Check("Эрмит: широкая лента (40 м) — тангенс на четверть ноги, дуга широкая",
+                devn > 20f && devn > dev1 * 2f,
+                "devn=" + Math.Round(devn, 1) + " dev1=" + Math.Round(dev1, 2));
 
             // ---------- Catalog.ApplyTierFilter: терцили по цене ----------
             var defs = Enumerable.Range(1, 9).Select(i => (Id: i, Price: (float)i * 10)).ToList();
@@ -474,19 +522,263 @@ namespace SupremeNuclear.Tests
             Check("Роль: полное имя", Catalog.AirRoleName(Fighter(), asType) == "истребитель");
 
             // ---------- BuildTasks.Task.Progress01: доля оплаты ----------
-            var task = new BuildTasks.Task { Cost = 250f, Paid = 100f };
+            var task = new BuildTasks.Task { Cost = 250f, PaidMass = 100f };
             Check("Progress01: 100/250 = 0.4", Math.Abs(task.Progress01 - 0.4f) < 0.001f);
-            task.Paid = 999f;
+            task.PaidMass = 999f;
             Check("Progress01: кламп сверху", Math.Abs(task.Progress01 - 1f) < 0.001f);
-            task.Paid = -5f;
+            task.PaidMass = -5f;
             Check("Progress01: кламп снизу", Math.Abs(task.Progress01 - 0f) < 0.001f);
 
-            // ---------- EconomyProfile.Rate: тиры и клампы ----------
+            // ---------- EcoFlow.DrainStep: налив двух валют с дефицитом ----------
+            var full = EcoFlow.DrainStep(10f, 5f, 100f, 100f);
+            Check("DrainStep: хватает всего", full.Mass == 10f && full.Energy == 5f);
+            var massStarved = EcoFlow.DrainStep(10f, 5f, 4f, 100f);
+            Check("DrainStep: дефицит массы режет обе",
+                Math.Abs(massStarved.Mass - 4f) < 1e-4f && Math.Abs(massStarved.Energy - 2f) < 1e-4f);
+            var eStarved = EcoFlow.DrainStep(10f, 5f, 100f, 1f);
+            Check("DrainStep: дефицит энергии режет обе",
+                Math.Abs(eStarved.Mass - 2f) < 1e-4f && Math.Abs(eStarved.Energy - 1f) < 1e-4f);
+            var nothing = EcoFlow.DrainStep(10f, 5f, 0f, 0f);
+            Check("DrainStep: пустые хранилища — нули", nothing.Mass == 0f && nothing.Energy == 0f);
+            var noWant = EcoFlow.DrainStep(0f, 0f, 0f, 0f);
+            Check("DrainStep: нет запроса — нули", noWant.Mass == 0f && noWant.Energy == 0f);
+            var neg = EcoFlow.DrainStep(10f, 5f, -50f, 100f);
+            Check("DrainStep: отрицательный доступ — кламп 0", neg.Mass == 0f && neg.Energy == 0f);
+
+            // ---------- EcoFlow.AddCapped: сток энергии с капом ----------
+            Check("AddCapped: обычное пополнение", Math.Abs(EcoFlow.AddCapped(10f, 5f, 100f) - 15f) < 1e-4f);
+            Check("AddCapped: перелив до капа", Math.Abs(EcoFlow.AddCapped(90f, 50f, 100f) - 100f) < 1e-4f);
+            Check("AddCapped: отрицательный доход игнорируется",
+                Math.Abs(EcoFlow.AddCapped(10f, -5f, 100f) - 10f) < 1e-4f);
+            Check("AddCapped: нулевой кап", EcoFlow.AddCapped(10f, 5f, 0f) == 0f);
+
+            // ---------- EcoFlow.ServiceCost: наценка за ремонт (DESIGN §3-10) ----------
+            Check("ServiceCost: целый борт — база",
+                Math.Abs(EcoFlow.ServiceCost(150f, 1f, 500f, 0.25f) - 150f) < 1e-4f);
+            Check("ServiceCost: половина урона",
+                Math.Abs(EcoFlow.ServiceCost(150f, 0.5f, 500f, 0.25f) - 212.5f) < 1e-3f);
+            Check("ServiceCost: hp01 клампится сверху",
+                Math.Abs(EcoFlow.ServiceCost(150f, 2f, 500f, 0.25f) - 150f) < 1e-4f);
+
+            // ---------- EconomyProfile v2: потоки в секунду, апгрейды наливом ----------
             var profile = new EconomyProfile();
-            Check("Rate: T1/T2/T3", profile.Rate(1) == 150f && profile.Rate(2) == 400f && profile.Rate(3) == 1000f);
-            Check("Rate: кламп тира", profile.Rate(0) == 150f && profile.Rate(99) == 1000f);
-            profile.incomePerMinute = new[] { 10f };
-            Check("Rate: один тир", profile.Rate(3) == 10f);
+            Check("Rate v2: T1/T2/T3 в секунду",
+                profile.Rate(1) == 2.5f && profile.Rate(2) == 7f && profile.Rate(3) == 17f);
+            Check("Rate v2: кламп тира", profile.Rate(0) == 2.5f && profile.Rate(99) == 17f);
+            profile.incomePerSecond = new[] { 10f };
+            Check("Rate v2: один тир", profile.Rate(3) == 10f);
+            profile.incomePerSecond = null;
+            profile.incomePerMinute = new[] { 150f };
+            Check("Rate v2: старый формат минут конвертируется", Math.Abs(profile.Rate(1) - 2.5f) < 1e-4f);
+            var profile2 = new EconomyProfile();
+            Check("Апгрейд v2: цены налива массы",
+                profile2.NextUpgradeMass(1) == 800f && profile2.NextUpgradeMass(2) == 2400f);
+            Check("Апгрейд v2: максимальный тир — нет цены", profile2.NextUpgradeMass(3) == -1f);
+            Check("Апгрейд v2: цены энергии и время",
+                profile2.NextUpgradeEnergy(1) == 400f && profile2.NextUpgradeSeconds(1) == 15f);
+
+            // ---------- ScenarioLayout: геометрия сценария (DESIGN §2.4) ----------
+            var tmpl = new ScenarioTemplate { depositCount = 8, centerRichCount = 2, depositSpacing = 500f };
+            UnityEngine.Vector2 vmin = new UnityEngine.Vector2(-50000f, -40000f), vmax = new UnityEngine.Vector2(50000f, 40000f);
+            UnityEngine.Vector2 cc = ScenarioLayout.Center(vmin, vmax);
+            var basesA = ScenarioLayout.Bases(vmin, vmax, tmpl, new System.Random(42), p => true);
+            var basesB = ScenarioLayout.Bases(vmin, vmax, tmpl, new System.Random(42), p => true);
+            Check("Scenario: базы найдены на открытой карте", basesA.Count == 1);
+            Check("Scenario: детерминизм (сид)", basesA[0].Pos == basesB[0].Pos);
+            Check("Scenario: база на длинной оси",
+                UnityEngine.Mathf.Abs(basesA[0].Pos.y - cc.y) < 0.01f && basesA[0].Pos.x > cc.x);
+            Check("Scenario: расстояние до центра = inset×half",
+                Math.Abs(UnityEngine.Vector2.Distance(basesA[0].Pos, cc) - 0.40f * 50000f) < 0.01f);
+            Check("Scenario: зеркалирование точки",
+                ScenarioLayout.Mirror(new UnityEngine.Vector2(10f, 20f), cc) ==
+                new UnityEngine.Vector2(cc.x * 2f - 10f, cc.y * 2f - 20f));
+            Check("Scenario: непригодная карта — баз нет",
+                ScenarioLayout.Bases(vmin, vmax, tmpl, new System.Random(42), p => false).Count == 0);
+
+            var deps = ScenarioLayout.Deposits(vmin, vmax, tmpl, new System.Random(7), p => true, basesA);
+            bool allMirrored = true, spacingOk = true;
+            foreach (ScenarioLayout.Deposit d in deps)
+            {
+                bool hasPair = false;
+                foreach (ScenarioLayout.Deposit o in deps)
+                    if ((o.Pos - ScenarioLayout.Mirror(d.Pos, cc)).sqrMagnitude < 0.01f)
+                        hasPair = true;
+                allMirrored &= hasPair;
+            }
+            for (int i = 0; i < deps.Count && spacingOk; i++)
+                for (int j = i + 1; j < deps.Count; j++)
+                    if ((deps[i].Pos - deps[j].Pos).sqrMagnitude < 500f * 500f)
+                        spacingOk = false;
+            Check("Scenario: мексовка зеркальна парами", allMirrored, deps.Count + " точек");
+            Check("Scenario: спейсинг соблюдён", spacingOk);
+            Check("Scenario: счёт = пары + жирный центр", deps.Count == 20, deps.Count + " точек");
+            bool hasRich = false;
+            foreach (ScenarioLayout.Deposit d in deps)
+                if (d.Tier == 2) hasRich = true;
+            Check("Scenario: жирный центр есть (T2)", hasRich);
+            var depsDet1 = ScenarioLayout.Deposits(vmin, vmax, tmpl, new System.Random(9), p => true, basesA);
+            var depsDet2 = ScenarioLayout.Deposits(vmin, vmax, tmpl, new System.Random(9), p => true, basesA);
+            bool detOk = depsDet1.Count == depsDet2.Count;
+            for (int i = 0; detOk && i < depsDet1.Count; i++)
+                detOk = depsDet1[i].Pos == depsDet2[i].Pos;
+            Check("Scenario: мексовка детерминирована", detOk);
+            // Вода (непригодные зоны): генератор добирает счёт из СУХИХ точек —
+            // проверяем, что ни одна не попала в «воду», и что сплошная вода даёт пусто.
+            var depsWater = ScenarioLayout.Deposits(vmin, vmax, tmpl, new System.Random(9),
+                p => UnityEngine.Mathf.Abs(p.x) > 20000f, basesA);
+            bool dryOk = depsWater.Count > 0;
+            foreach (ScenarioLayout.Deposit d in depsWater)
+                dryOk &= UnityEngine.Mathf.Abs(d.Pos.x) > 20000f;
+            Check("Scenario: раскладка уважает воду (все точки сухие)", dryOk,
+                depsWater.Count + " точек");
+            Check("Scenario: сплошная вода — пустая раскладка без падения",
+                ScenarioLayout.Deposits(vmin, vmax, tmpl, new System.Random(9), p => false, basesA).Count == 0);
+
+            // ---------- HeightmapGen: рельеф спец-карты (Neroxis-паттерн, DESIGN §2.4) ----------
+            var terrainParams = new ScenarioTemplate.TerrainSettings { sizeM = 16000f, stepM = 200f, edgeM = 2000f };
+            var hm = HeightmapGen.Generate(terrainParams, 1234);
+            var hm2 = HeightmapGen.Generate(terrainParams, 1234);
+            Check("Heightmap: размер чётный и по шагу", hm.W == 80 && hm.H == 80 && hm.W == hm.H);
+            bool symOk = true, hmDetOk = hm.W == hm2.W;
+            for (int j = 0; j < hm.H && (symOk || hmDetOk); j++)
+                for (int i = 0; i < hm.W; i++)
+                {
+                    if (hm.Height[i, j] != hm.Height[hm.W - 1 - i, j])
+                    {
+                        symOk = false;
+                    }
+                    if (hmDetOk && hm.Height[i, j] != hm2.Height[i, j])
+                        hmDetOk = false;
+                }
+            Check("Heightmap: точная симметрия по X", symOk);
+            Check("Heightmap: детерминизм сида", hmDetOk);
+            bool maskOk = true;
+            int plainCnt = 0, inner = 0;
+            for (int j = 0; j < hm.H; j++)
+                for (int i = 0; i < hm.W; i++)
+                {
+                    if (hm.Water[i, j] == (hm.Height[i, j] >= hm.SeaLevel))
+                        maskOk = false; // Water ⇔ ниже уровня моря
+                    if (hm.Plain[i, j] && (hm.Water[i, j] || hm.Steep[i, j]))
+                        maskOk = false; // Plain — не вода и не склон
+                    if (!hm.Edge[i, j])
+                    {
+                        inner++;
+                        if (hm.Plain[i, j])
+                            plainCnt++;
+                    }
+                }
+            Check("Heightmap: маски согласованы с высотами", maskOk);
+            Check("Heightmap: равнины ≥ 50% внутри (DESIGN §2.4)",
+                inner > 0 && plainCnt / (float)inner >= 0.5f,
+                "plain " + (plainCnt / (float)inner).ToString("F2"));
+            bool hmEdgeOk = hm.Edge[0, 0] && !hm.Edge[hm.W / 2, hm.H / 2];
+            Check("Heightmap: краевая зона у границы, центр свободен", hmEdgeOk);
+            float centerH = hm.SampleHeight(0f, 0f);
+            Check("Heightmap: билинейная выборка в диапазоне",
+                centerH >= hm.Min - 0.01f && centerH <= hm.Max + 0.01f);
+            // Регрессия «плоская карта» (2026-10-29): Clamp01 индекса узла давал всем
+            // X высоту первой колонки — меш строился плоским при живом heightmap.
+            float half = terrainParams.sizeM * 0.5f;
+            float sxMin = float.MaxValue, sxMax = float.MinValue;
+            for (float sx = -half * 0.9f; sx <= half * 0.9f; sx += terrainParams.stepM)
+            {
+                float h = hm.SampleHeight(sx, half * 0.25f);
+                if (h < sxMin) sxMin = h;
+                if (h > sxMax) sxMax = h;
+            }
+            Check("Heightmap: выборка меняется по X (не первая колонка)",
+                sxMax - sxMin > terrainParams.gentleAmp * 0.5f,
+                "разброс " + (sxMax - sxMin).ToString("F0") + " м");
+            bool nodeOk = true;
+            for (int i = 0; i < hm.W; i += hm.W / 8)
+                if (Math.Abs(hm.SampleHeight(i * hm.Step - half, 0f) - hm.Height[i, hm.H / 2]) > 0.01f)
+                    nodeOk = false;
+            Check("Heightmap: выборка совпадает с узлами решётки", nodeOk);
+            // Террасы SupCom (2026-10-30): плоских клеток (|dh| к соседу ≈ 0) стало
+            // заметно больше — «плоскости и плато» вместо сплошных склонов.
+            {
+                int flat = 0, total = 0;
+                for (int j = 2; j < hm.H - 2; j += 3)
+                    for (int i = 2; i < hm.W - 2; i += 3)
+                    {
+                        total++;
+                        float dh = Math.Abs(hm.Height[i, j] - hm.Height[i + 1, j]) +
+                                   Math.Abs(hm.Height[i, j] - hm.Height[i, j + 1]);
+                        if (dh < 0.5f)
+                            flat++;
+                    }
+                Check("Heightmap: террасы — плоских клеток ≥ 30%",
+                    total > 0 && flat / (float)total >= 0.30f,
+                    "flat " + (total > 0 ? (flat / (float)total).ToString("F2") : "?"));
+            }
+            // Террасы: плато ложатся на ±(k+0.5)·step (35/105/175 при step=70),
+            // нулевого ПЛОСКОГО уровня нет — «плато-0» топило юнитов мгновенно
+            // (плейтест 2026-10-30). Рампа между плато −35/+35 проходит через 0
+            // законно — это пологий берег, не плато.
+            {
+                float[] plateauH = { 15f, 55f, 90f, 130f, 200f };
+                float[] expect = { 35f, 35f, 105f, 105f, 175f };
+                var probe = new float[5, 5];
+                for (int j = 0; j < 5; j++)
+                    for (int i = 0; i < 5; i++)
+                        probe[j, i] = plateauH[i];
+                Heightmap.Terrace(probe, 5, 70f);
+                bool plateausOk = true;
+                for (int i = 0; i < 5; i++)
+                    if (Math.Abs(probe[0, i] - expect[i]) > 0.5f)
+                        plateausOk = false;
+                Check("Heightmap: плато террас на ±35+70k, уровня моря нет", plateausOk);
+
+            // ---------- PassGraph: кластеры террас (Moho path_clusters) ----------
+            {
+                var h = new float[5, 3];
+                for (int j = 0; j < 3; j++) { h[0, j] = 10f; h[1, j] = 10f; h[3, j] = 10f; h[4, j] = 10f; h[2, j] = 100f; }
+                PassGraph g = PassGraph.Build(h, 5, 3, 100f, 0f, 100f * 0.75f);
+                // хребет-обрыв — самостоятельный кластер; берега не связаны рёбрами
+                Check("PassGraph: обрыв делит плато (3 кластера)", g.Count == 3);
+                Check("PassGraph: берега без переправы — рёбер нет", g.Edges.Count == 0);
+                var h2 = new float[4, 2];
+                float[] ramp = { 10f, 25f, 40f, 55f };
+                for (int j = 0; j < 2; j++) for (int i = 0; i < 4; i++) h2[i, j] = ramp[i];
+                PassGraph g2 = PassGraph.Build(h2, 4, 2, 100f, 0f, 100f * 0.75f);
+                Check("PassGraph: рампа связывает плато", g2.Count == 1);
+                var h3 = new float[3, 2];
+                float[] isle = { 10f, -5f, 10f };
+                for (int j = 0; j < 2; j++) for (int i = 0; i < 3; i++) h3[i, j] = isle[i];
+                PassGraph g3 = PassGraph.Build(h3, 3, 2, 100f, 0f, 100f * 0.75f);
+                Check("PassGraph: острова разделены водой", g3.Count == 2);
+                var g4 = PassGraph.Build(h, 5, 3, 100f, 0f, 100f * 0.75f);
+                g4.Edges.Add(new[] { 1, 2 });
+                Check("PassGraph: Reachable через ребро глубиной 1",
+                    g4.Reachable(1, 1).Contains(2) && !g4.Reachable(1, 0).Contains(2));
+            }
+
+            // ---------- AiCommander: чистые решения (v3 + M28-паттерны) ----------
+            Check("AI: план v3 — уголь первым, затем мексовки, затем депо",
+                AiCommanderService.PlanSlot(false, 0, 3, false, 0, 99) == 0 &&
+                AiCommanderService.PlanSlot(true, 0, 3, false, 0, 99) == 1 &&
+                AiCommanderService.PlanSlot(true, 2, 3, false, 0, 99) == 1 &&
+                AiCommanderService.PlanSlot(true, 3, 3, false, 0, 99) == 2);
+            Check("AI: план v3 — после депо генераторы до цели волн",
+                AiCommanderService.PlanSlot(true, 3, 3, true, 2, 3) == 3 &&
+                AiCommanderService.PlanSlot(true, 3, 3, true, 3, 3) == -1);
+            Check("AI: энергосталл (Moho StoredRatio) — энергопостройка вне очереди",
+                AiCommanderService.PlanSlot(true, 3, 3, true, 3, 3, true) == 3 &&
+                AiCommanderService.PlanSlot(false, 3, 3, true, 3, 3, true) == 0 &&
+                AiCommanderService.PlanSlot(true, 0, 3, false, 0, 99, true) == 3);
+            Check("AI: волна — гарнизон держит базу",
+                !AiCommanderService.WaveDue(2, 6, 2, 0f, 100f) &&
+                AiCommanderService.WaveDue(6, 6, 2, 0f, 100f) &&
+                !AiCommanderService.WaveDue(0, 6, 2, 500f, 100f));
+            Check("AI: волна по таймеру — минимум сверх гарнизона и срок вышел",
+                AiCommanderService.WaveDue(4, 6, 2, 150f, 100f) &&
+                !AiCommanderService.WaveDue(4, 6, 2, 50f, 100f));
+            Check("AI: reclaim при масс-сталле (M28)",
+                AiCommanderService.ShouldReclaim(100f, 0f, 2f) &&
+                !AiCommanderService.ShouldReclaim(100f, 5f, 0f) &&
+                !AiCommanderService.ShouldReclaim(1000f, 0f, 5f));
+            }
 
             // ---------- OrderTemplates.ComputeOffsets: относительные позиции ----------
             var offs = OrderTemplates.ComputeOffsets(new List<UnityEngine.Vector3>
@@ -1012,6 +1304,55 @@ namespace SupremeNuclear.Tests
             GroundOrders.RemoveAtCore(rmChain, 9);
             Check("Ядро удаления: невалидный индекс — no-op",
                 rmChain.Points.Count == 2 && rmChain.Index == 1);
+
+            // ---------- Per-point вид (v0.114): PointKinds параллельны Points ----------
+            var ppChain = new GroundOrders.Chain { Index = 0 };
+            foreach (GroundOrderKind k in new[] { GroundOrderKind.Move,
+                    GroundOrderKind.AttackMove, GroundOrderKind.AttackMove, GroundOrderKind.Move })
+            {
+                ppChain.Points.Add(new UnityEngine.Vector3(ppChain.Points.Count * 10f, 0f, 0f)
+                    .ToGlobalPosition());
+                ppChain.PointGroups.Add(0);
+                ppChain.PointKinds.Add(k);
+            }
+            Check("Per-point: вид точки читается по индексу, за границей — Move",
+                GroundOrders.LinearKindAt(ppChain, 1) == GroundOrderKind.AttackMove &&
+                GroundOrders.LinearKindAt(ppChain, 99) == GroundOrderKind.Move);
+            ppChain.Kind = GroundOrderKind.Move;
+            GroundOrders.RemoveAtCore(ppChain, 0); // удалили текущую Move — курсор на AttackMove
+            Check("Per-point: удаление текущей синхронизирует Kind с новой текущей точкой",
+                ppChain.Index == 0 && ppChain.PointKinds.Count == 3 &&
+                ppChain.Kind == GroundOrderKind.AttackMove);
+            GroundOrders.RemoveAtCore(ppChain, 0); // снова AttackMove текущая
+            Check("Per-point: Kind следует виду точки при продвижении очереди удалениями",
+                ppChain.Kind == GroundOrderKind.AttackMove && ppChain.Points.Count == 2);
+            // Патрульный хвост: начало цикла сдвигается вместе с очередью
+            var plChain = new GroundOrders.Chain { Kind = GroundOrderKind.Patrol, PatrolLoopStart = 2 };
+            for (int pl = 0; pl < 4; pl++)
+            {
+                plChain.Points.Add(new UnityEngine.Vector3(pl * 10f, 0f, 0f).ToGlobalPosition());
+                plChain.PointGroups.Add(0);
+                plChain.PointKinds.Add(GroundOrderKind.Patrol);
+            }
+            GroundOrders.RemoveAtCore(plChain, 0);
+            Check("PatrolLoopStart: удаление точки до начала цикла сдвигает начало",
+                plChain.PatrolLoopStart == 1 && plChain.Points.Count == 3);
+
+            // ---------- GroundOrders.CanClosePatrol: гейты конвертации хвостом ----------
+            Check("Конвертация хвостом: линейная цепочка, точка не последняя — можно",
+                GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, 2, 0));
+            Check("Конвертация хвостом: атака-движение тоже линейная — можно",
+                GroundOrders.CanClosePatrol(GroundOrderKind.AttackMove, 4, 0, 0));
+            Check("Конвертация хвостом: последняя точка — циклу нужно ≥2 точек",
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, 3, 0));
+            Check("Конвертация хвостом: ждущие цели серии запрещают (канон Moho)",
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, 1, 2));
+            Check("Конвертация хвостом: атака/патруль/эскорт не конвертятся",
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Attack, 4, 1, 0) &&
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Patrol, 4, 1, 0) &&
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Escort, 4, 1, 0));
+            Check("Конвертация хвостом: отрицательный индекс — no-op",
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, -1, 0));
 
             // ---------- GroundOrders.FanBearingOffset: секторы полукруга атаки ----------
             Check("Полукруг: симметричный веер, центр без смещения",

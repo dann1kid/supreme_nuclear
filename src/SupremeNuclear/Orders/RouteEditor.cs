@@ -62,7 +62,9 @@ namespace SupremeNuclear
 
             if (!IsDragging)
             {
-                if (RtsInput.LeftDown)
+                // Заряженный режим приказа: ЛКМ выдаёт приказ (MoveOrders) — захват
+                // вейпоинта не стартует (SupCom-схема: заряд = ЛКМ, ПКМ — отмена).
+                if (RtsInput.LeftDown && OrderModes.Pending == OrderMode.None)
                 {
                     bool overUi = RtsInput.PointerOverUi;
                     bool found = !overUi && TryGrab(controller, cam, out _hit);
@@ -151,7 +153,12 @@ namespace SupremeNuclear
                     // Клик без движения по площадке = ВЫДЕЛИТЬ недострой; по любому ДРУГОМУ
                     // вейпоинту — сброс выделения (SupCom: клик мимо = пусто).
                     // Shift удерживается — режим ДОБАВЛЕНИЯ: выделение не трогаем.
-                    if (_hit.Kind == WaypointKind.BuildSite && _hit.Task != null)
+                    // ЧУЖИЕ площадки не выбираем даже в Shift-режиме видимости:
+                    // чужая задача в панели давала «вражескую постройку в моей
+                    // очереди» (плейтест 2026-10-30).
+                    if (_hit.Kind == WaypointKind.BuildSite && _hit.Task != null &&
+                        (!GameApi.TryGetLocalHQ(out FactionHQ pickHq) ||
+                         _hit.Task.Faction == pickHq))
                     {
                         ctrl0?.Selection.Selected.Clear();
                         if (ctrl0 != null)

@@ -429,14 +429,14 @@ namespace SupremeNuclear
             rtF.offsetMin = new Vector2(14f, 0f);
             rtF.offsetMax = Vector2.zero;
 
-            _incomeText = Label(bar, "income", Loc.Tr("+0/мин"), 17, TextMain, TextAnchor.MiddleLeft);
+            _incomeText = Label(bar, "income", Loc.Tr("+0 −0/с"), 15, TextMain, TextAnchor.MiddleLeft);
             var rtI = (RectTransform)_incomeText.transform;
             rtI.anchorMin = new Vector2(0.45f, 0.5f);
             rtI.anchorMax = new Vector2(1f, 1f);
             rtI.offsetMin = new Vector2(6f, 0f);
             rtI.offsetMax = new Vector2(-10f, 0f);
 
-            _extractorsText = Label(bar, "extractors", Loc.Tr("экстракторы 0/0"), 15, TextDim, TextAnchor.MiddleLeft);
+            _extractorsText = Label(bar, "energy", string.Empty, 15, TextDim, TextAnchor.MiddleLeft);
             var rtE = (RectTransform)_extractorsText.transform;
             rtE.anchorMin = new Vector2(0.45f, 0f);
             rtE.anchorMax = new Vector2(1f, 0.5f);
@@ -925,11 +925,28 @@ step = "arrows";
             if (!GameApi.TryGetLocalHQ(out FactionHQ hq))
                 return;
             _fundsText.text = $"{hq.factionFunds:F0}";
-            float rate = EconomyService.Running ? EconomyService.IncomePerMinute(hq) : 0f;
-            _incomeText.text = Loc.F("+{0}/мин", rate.ToString("F0"));
-            _incomeText.color = rate > 0f ? TextMain : WarnRed;
-            if (EconomyService.Running)
-                _extractorsText.text = Loc.F("экстракторы {0}/{1} · T1-3", EconomyService.OwnedExtractors(hq), EconomyService.TotalExtractors);
+
+            // Панель потока (DESIGN §2.2, этап C): масса и энергия с доходом/расходом.
+            bool running = EconomyService.Running;
+            float massInc = running ? EconomyService.MassIncomePerSecond(hq) : 0f;
+            float massDr = EconomyService.MassDrainPerSecond(hq);
+            _incomeText.text = Loc.F("+{0} −{1}/с · экстракторы {2}/{3}",
+                massInc.ToString("F1"), massDr.ToString("F1"),
+                EconomyService.OwnedExtractors(hq), EconomyService.TotalExtractors);
+            _incomeText.color = massInc - massDr >= 0f ? TextMain : WarnRed;
+
+            if (EconomyService.EnergyActive)
+            {
+                float eInc = EconomyService.EnergyIncomePerSecond(hq);
+                float eDr = EconomyService.EnergyDrainPerSecond(hq);
+                _extractorsText.text = Loc.F("энергия {0}/{1} · +{2} −{3}/с",
+                    EconomyService.EnergyStore(hq).ToString("F0"),
+                    EconomyService.EnergyCapacity(hq).ToString("F0"),
+                    eInc.ToString("F1"), eDr.ToString("F1"));
+                _extractorsText.color = eInc - eDr >= 0f ? TextDim : WarnRed;
+            }
+            else
+                _extractorsText.text = string.Empty;
         }
 
         /// <summary>Вкладка «Список»: плитки выделения по типам (15 в ряд, 3 ряда),
@@ -1034,7 +1051,7 @@ step = "arrows";
                     return;
                 _infoTitle.text = Util.FitLine(t.Definition.unitName, FitTitleChars);
                 _infoClass.text = Util.FitLine(Loc.F("недострой · {0}/{1} · строителей {2}",
-                t.Paid.ToString("F0"), t.Cost.ToString("F0"), t.Builders.Count), FitBodyChars);
+                t.PaidMass.ToString("F0"), t.Cost.ToString("F0"), t.Builders.Count), FitBodyChars);
                 UiKit.SetProgress(_infoHpFill, t.Progress01);
                 _infoHpTxt.text = t.Progress01.ToString("P0");
                 _infoFuelTrack.gameObject.SetActive(false);
@@ -1591,13 +1608,13 @@ step = "arrows";
                             Settings.DockMinDepthM.ToString("F0")), 62);
             else if (pending == Loc.Tr("Залп"))
                 _modeHint.text = Util.FitLine(
-                    Loc.Tr("Залп: ПКМ по цели/земле — залповый пуск · Shift+ПКМ по целям — доб. в залп"), 62);
+                    Loc.Tr("Залп: ЛКМ по цели/земле — залповый пуск · Shift+ЛКМ по целям — доб. в залп · ПКМ — отмена"), 62);
             else if (pending == Loc.Tr("Распределение"))
                 _modeHint.text = Util.FitLine(
-                    Loc.Tr("Распределение: ПКМ по целям — накопить · ПКМ по земле — раздать группу"), 62);
+                    Loc.Tr("Распределение: ЛКМ по целям — накопить · ЛКМ по земле — раздать группу · ПКМ — отмена"), 62);
             else if (pending != null)
                 _modeHint.text = Util.FitLine(
-                    Loc.F("{0}: ПКМ — вейпоинт (Shift — серия) · Esc — движение", pending), 62);
+                    Loc.F("{0}: ЛКМ — вейпоинт (Shift — серия) · ПКМ/Esc — отмена", pending), 62);
             else
                 _modeHint.text = "";
             ApplyCommandLayout();
@@ -2110,10 +2127,10 @@ step = "arrows";
                     _tierButtons[i].img.color = i == _prodTier ? BtnActive : BtnBg;
 
             // Деньги НЕ в ключе пересборки (§12-45а, v0.112): в каталоге «Производства»
-            // нет фонд-зависимого контента (цены статичны, платёжеспособность проверяется
-            // в момент клика), а квант в сотни заставлял ClearChildren+пересоздание всей
-            // ленты (плитки с замыканиями) на каждом тике дохода — регулярный GC-чурн.
-            // «Апгрейд» пересобирается только при ПЕРЕСЕЧЕНИИ цены апгрейда.
+            // нет фонд-зависимого контента (цены статичны, потоковая модель льёт что есть),
+            // а квант в сотни заставлял ClearChildren+пересоздание всей ленты (плитки с
+            // замыканиями) на каждом тике дохода — регулярный GC-чурн.
+            // «Апгрейд» пересобирается по кванту прогресса налива (5%).
             int hash = 17 * 31 + _activeTab;
             hash = hash * 31 + selHash;
             if (_activeTab == TabProduction)
@@ -2134,8 +2151,9 @@ step = "arrows";
             {
                 hash = hash * 31 + (extractor != null ? EconomyService.TierOf(extractor) : 0);
                 hash = hash * 31 + (EconomyService.Running ? 1 : 0);
-                float upCost = extractor != null ? EconomyService.NextUpgradeCost(extractor) : -1f;
-                hash = hash * 31 + (upCost >= 0f && hq.factionFunds >= upCost ? 1 : 0);
+                hash = hash * 31 + (extractor != null && EconomyService.UpgradeInProgress(extractor) ? 1 : 0);
+                hash = hash * 31 + (int)(extractor != null
+                    ? EconomyService.UpgradeProgress01(extractor) * 20f : 0f);
             }
             // Нижняя строка видима ВСЕГДА (без прыжков высоты): пустая — просто пустая лента.
             // Высота панели — компакт v0.64.0 (12 отступ + 134 контент = 146).
@@ -2285,16 +2303,32 @@ step = "arrows";
         /// Инженер в выделении → здания (стройка где угодно), иначе депо/аэродром.
         /// Нижняя лента — задел под очередь фабрики (этап B).</summary>
         /// <summary>Нижняя строка «Производства» (инженер): очередь активных строек —
-        /// плитка «иконка здания + прогресс», клик — камера к площадке.</summary>
+        /// плитка «иконка здания + прогресс», клик — камера к площадке. Только СВОИ
+        /// задачи фракции: чужие (AI) площадки в ленте выглядели «чужой очередью
+        /// моего инженера» (плейтест 2026-10-30).</summary>
         private void FillBuildQueue(CommanderModeController controller)
         {
             ClearChildren(_strip2Content);
+            if (!GameApi.TryGetLocalHQ(out FactionHQ localHq))
+                return;
+            // Выделенные инженеры → лента показывает ИХ очереди (задачи, где кто-то
+            // из выделенных — строитель). Без выделения инженеров — все задачи
+            // фракции. Раньше лента была всегда фракционной: чужая/осиротевшая
+            // задача висела как «здание, которое он не строит» (юзер, 2026-10-30).
+            var selEngineers = new List<Unit>();
+            foreach (Unit u in controller.Selection.Selected)
+                if (u != null && GameApi.IsEngineer(u))
+                    selEngineers.Add(u);
             // Стак: подряд идущие задания одного здания — одна плитка с числом.
             BuildTasks.Task runDef = null;   // образец повтора
             int runCount = 0;
             bool first = true;
             foreach (BuildTasks.Task t in BuildTasks.All)
             {
+                if (t.Faction != localHq)
+                    continue;
+                if (selEngineers.Count > 0 && !HasAnyBuilder(t, selEngineers))
+                    continue;
                 if (t.Definition == runDef?.Definition)
                 {
                     runCount++;
@@ -2310,6 +2344,15 @@ step = "arrows";
             }
             if (runDef != null)
                 AddQueueTile(_strip2Content, runDef, first, runCount, controller);
+        }
+
+        private static bool HasAnyBuilder(BuildTasks.Task t, List<Unit> units)
+        {
+            foreach (Unit b in t.Builders)
+                foreach (Unit u in units)
+                    if (b == u)
+                        return true;
+            return false;
         }
 
         /// <summary>Плитка очереди стройки: иконка + подпись + бейдж ×N, у головной —
@@ -2555,7 +2598,7 @@ step = "arrows";
                     order.Add(item.UnitDef);
                 }
                 totals[item.UnitDef]++;
-                if (item.Paid > 0f)
+                if (item.PaidMass > 0f)
                 {
                     activeCounts[item.UnitDef] = activeCounts.TryGetValue(item.UnitDef, out int n)
                         ? n + 1 : 1;
@@ -2631,7 +2674,7 @@ step = "arrows";
                 int waiting = 0;
                 for (int i = 0; i < items.Count; i++)
                 {
-                    if (items[i].Paid <= 0f)
+                    if (items[i].PaidMass <= 0f)
                     {
                         waiting = items.Count - i;
                         break;
@@ -3001,9 +3044,19 @@ step = "arrows";
                     });
                 var defs = new List<BuildingDefinition>();
                 foreach (BuildingDefinition def in Encyclopedia.i.buildings)
-                    if (def != null)
-                        defs.Add(def);
+                    if (def != null && !EconomyService.IsReplacedOriginal(def))
+                        defs.Add(def); // оригиналы-доноры заменены клонами с честными именами
                 Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                // Эконом-постройки ВНЕ ценового фильтра: терциль Т1 режет по value,
+                // и семь «нулевых» оборонных сооружений вытесняли клоны во Т2
+                // (скрин юзера 2026-10-30: GEN/MES/HYD отсутствовали в Т1).
+                // Базовая экономика доступна в ЛЮБОМ тире — как ВПП/верфь.
+                if (EconomyService.GeneratorDefinition != null)
+                    defs.Insert(0, EconomyService.GeneratorDefinition);
+                if (EconomyService.HydroDefinition != null)
+                    defs.Insert(0, EconomyService.HydroDefinition);
+                if (EconomyService.ExtractorDefinition != null)
+                    defs.Insert(0, EconomyService.ExtractorDefinition);
                 foreach (BuildingDefinition def in defs)
                 {
                     BuildingDefinition d = def;
@@ -3110,8 +3163,8 @@ step = "arrows";
         /// на три равные части; 0 — без фильтра. Список правится на месте.</summary>
 
 
-        /// <summary>Вкладка «Апгрейд»: тир экстрактора и апгрейд за деньги фракции.</summary>
-        /// <summary>Вкладка «Апгрейд»: тир экстрактора и кнопка улучшения (лента).</summary>
+        /// <summary>Вкладка «Апгрейд»: тир экстрактора и апгрейд потоковым наливом
+        /// (масса + энергия); идущий налив — прогресс и отмена с возвратом.</summary>
         private void FillUpgradeTab(FactionHQ hq, Unit extractor, bool ecoRunning)
         {
             if (extractor == null || !ecoRunning)
@@ -3122,18 +3175,35 @@ step = "arrows";
                 return;
             }
             int tier = EconomyService.TierOf(extractor);
-            _contextTitle.text = Loc.F("Экстрактор T{0} · +{1}/мин",
-                tier, EconomyService.IncomeRate(tier).ToString("F0"));
-            float cost = EconomyService.NextUpgradeCost(extractor);
-            if (cost >= 0f)
+            _contextTitle.text = Loc.F("Экстрактор T{0} · +{1}/с",
+                tier, EconomyService.IncomeRate(tier).ToString("F1"));
+
+            if (EconomyService.UpgradeInProgress(extractor))
             {
-                bool ok = hq.factionFunds >= cost;
                 AddItemButton(_strip1Content, null,
-                    Loc.F("Улучшить до T{0} — {1}", tier + 1, cost.ToString("F0")),
-                    ok ? () => EconomyService.TryUpgrade(hq, extractor) : null);
+                    Loc.F("апгрейд идёт · {0}%",
+                        (EconomyService.UpgradeProgress01(extractor) * 100f).ToString("F0")),
+                    null);
+                AddItemButton(_strip1Content, null,
+                    Loc.Tr("отменить апгрейд"),
+                    () => EconomyService.CancelUpgrade(extractor));
             }
             else
-                AddItemButton(_strip1Content, null, Loc.Tr("максимальный тир"), null);
+            {
+                float mass = EconomyService.NextUpgradeMass(extractor);
+                if (mass >= 0f)
+                {
+                    string price = EconomyService.EnergyActive
+                        ? Loc.F("{0} + {1} эн.", mass.ToString("F0"),
+                            EconomyService.NextUpgradeEnergy(extractor).ToString("F0"))
+                        : mass.ToString("F0");
+                    AddItemButton(_strip1Content, null,
+                        Loc.F("Улучшить до T{0} — {1}", tier + 1, price),
+                        () => EconomyService.TryStartUpgrade(hq, extractor));
+                }
+                else
+                    AddItemButton(_strip1Content, null, Loc.Tr("максимальный тир"), null);
+            }
             _strip2.gameObject.SetActive(false);
         }
 

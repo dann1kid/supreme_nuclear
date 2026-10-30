@@ -94,11 +94,13 @@ namespace SupremeNuclear
                                       !GameApi.TryGetContact(Inspected, inspectHq, out _)))
                 Inspected = null;
 
-            if (RouteEditor.Consumed || RouteEditor.IsDragging || BuildTasks.Consumed)
+            if (RouteEditor.Consumed || RouteEditor.IsDragging || BuildTasks.Consumed ||
+                OrderModes.Pending != OrderMode.None)
             {
                 _leftPressed = false;
                 IsDragging = false;
-                return; // ЛКМ занят подтверждением приказа или перетаскиванием точки
+                return; // ЛКМ занят подтверждением приказа, перетаскиванием точки или
+                        // выдачей заряженного режима (SupCom-схема: заряд = ЛКМ)
             }
 
             // Space — осмотр камеры (мышь крутит вид), выделение не стартуем.

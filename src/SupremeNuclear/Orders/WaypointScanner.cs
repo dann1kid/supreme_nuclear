@@ -125,7 +125,13 @@ namespace SupremeNuclear
             GroupCentroids.Clear();
             GroundOrders.CollectAll(CUnits, CQueues, CIdx);
             for (int i = 0; i < CUnits.Count; i++)
-                for (int p = CIdx[i]; p < CQueues[i].Count; p++)
+            {
+                int from = CIdx[i];
+                // Патруль — цикл: центроид должен учитывать точку у ВСЕХ членов
+                // (иначе пик уезжал с маркера, когда один член проходил точку).
+                if (GroundOrders.KindOf(CUnits[i]) == GroundOrderKind.Patrol)
+                    from = Mathf.Min(from, GroundOrders.PatrolLoopStartOf(CUnits[i]));
+                for (int p = from; p < CQueues[i].Count; p++)
                 {
                     int gid = GroundOrders.GroupIdOf(CUnits[i], p);
                     if (gid == 0)
@@ -133,6 +139,7 @@ namespace SupremeNuclear
                     Vector3 l = CQueues[i][p].ToLocalPosition();
                     Accumulate(gid, l.x, l.z);
                 }
+            }
             AircraftOrders.CollectAll(CUnits, CPlans);
             for (int i = 0; i < CUnits.Count; i++)
                 for (int s = 0; s < CPlans[i].Count; s++)
@@ -246,6 +253,10 @@ namespace SupremeNuclear
                 if (BuildTasks.ChainIsIssuedHead(unit))
                     continue;
                 int start = GroundOrders.DrawStartIndex(unit); // производная точка
+                // Патруль — постоянный приказ: сканируем ВЕСЬ цикл от начала хвоста
+                // (лента рисуется целиком — точки должны пикаться там же).
+                if (GroundOrders.KindOf(unit) == GroundOrderKind.Patrol)
+                    start = Mathf.Min(start, GroundOrders.PatrolLoopStartOf(unit));
                 // подхода атак не сканируется — она не редактируется
                 for (int p = start; p < queue.Count; p++)
                 {

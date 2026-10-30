@@ -18,7 +18,9 @@ namespace SupremeNuclear
     [HarmonyPatch(typeof(PathfindingAgent), "Pathfind")]
     internal static class GroundPathfindPatch
     {
-        private const int MaxWaterSamples = 24; // потолок сэмплов воды на один приказ (перф)
+        private const int MaxWaterSamples = 96; // потолок сэмплов воды на приказ: узкие
+                                                // озёра на длинных прямых пропускались
+                                                // при 24 (шаг растягивался до 200+ м)
 
         private static readonly FieldInfo UnitField = AccessTools.Field(typeof(PathfindingAgent), "unit");
 
@@ -32,8 +34,20 @@ namespace SupremeNuclear
             Unit unit = (Unit)UnitField?.GetValue(__instance);
             if (!(unit is GroundVehicle))
                 return true; // рулёжка авиации/морские лузы — натив
-            if (!GameApi.TryGetLocalHQ(out FactionHQ hq) || !GameApi.IsFriendlyUnit(unit, hq))
-                return true; // чужая наземка: сценарный ИИ ездит как ездил
+            bool friendly = GameApi.TryGetLocalHQ(out FactionHQ hq) &&
+                            GameApi.IsFriendlyUnit(unit, hq);
+            if (!friendly)
+            {
+                // Чужая наземка: на стоковых картах натив возит её по дорогам — не
+                // трогаем. Но СПЕЦ-КАРТА несёт ПУСТОЙ граф дорог: натив вернёт
+                // NoNetwork и юнит вообще без пути (AI-инженеры «стояли без эмоций»,
+                // плейтест 2026-10-30) — прямая точка нужна и чужим.
+                MapSettings map = NetworkSceneSingleton<LevelInfo>.i != null
+                    ? NetworkSceneSingleton<LevelInfo>.i.LoadedMapSettings
+                    : null;
+                if (map == null || !RuntimeMap.IsOurKey(map.name))
+                    return true;
+            }
             if (CrossesWater(unit.GlobalPosition(), targetPos))
                 return true; // прямая через воду — натив ведёт по дорогам/мостам
             __instance.Shortcut(targetPos);

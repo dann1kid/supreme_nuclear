@@ -453,72 +453,101 @@ namespace SupremeNuclear
             return result;
         }
 
-        /// <summary>Скругление углов цепочки вейпоинтов (лента без «лесенок»): каждая
-        /// промежуточная точка B заменяется дугой — квадратичной кривой Безье P→B→Q,
-        /// где P/Q — точки касания на смежных ногах на расстоянии t от угла,
-        /// t = min(radiusM, 0.45·min(|AB|, |BC|)) — дуга не съедает больше 45% короткой
-        /// ноги, соседние дуги не пересекаются. Стыки дуг с ногами G1-гладкие (у кривой
-        /// в P/Q касательная совпадает с направлением ноги). Коллинеарные углы проходят
-        /// как есть; вырожденные ноги (совпадающие точки) пропускаются; точный разворот
-        /// (P≈Q) остаётся острым углом. Скругление считается в XZ, высота дуги — лерп
-        /// по кривой. smooth заполняется сглаженной цепочкой, legStart[i] — индекс в
-        /// smooth, с которого начинается нога i (последняя идёт до конца);
-        /// возвращается число точек smooth.</summary>
-        public static int RoundChainCorners(IReadOnlyList<Vector3> pts, float radiusM,
-            List<Vector3> smooth, List<int> legStart)
+        /// <summary>Сглаживание цепочки вейпоинтов кубическими Эрмит-кривыми — порт 1:1
+        /// канона Moho UICommandGraph (OpenSupCom command_graph_renderer, MIT; адаптация
+        /// 2026-10-30): в каждом узле тангенс — нормализованная сумма ЕДИНИЧНЫХ
+        /// направлений смежных ног (митр; концы — направление своей ноги), нога
+        /// изгибается Эрмитом с длиной тангенсов m = min(0.25·len, 50·width), где
+        /// width — МИРОВАЯ ширина РИСУЕМОЙ ленты (baseWidthM × множитель ноги; у FA
+        /// ленты тонкие 1–10 м → кламп 50–500 м, наши ленты 40 м → кламп 2000 м —
+        /// формула та же, «кривизна пропорциональна видимой ширине линии»; 50 =
+        /// ui_CurveSmoothness FA). Сегментов на ногу — max(ceil(len/maxSegLenM),
+        /// 12 на поворотной), кламп 1..20 (20 = ui_CurveSegments FA; прямые ноги —
+        /// по шагу длины, поворотные — не меньше двенадцати: широкие дуги требуют
+        /// детализации); вейпоинты лежат НА кривой, стыки ног не дублируются.
+        /// legWidths[i] — множитель толщины ноги (null = 1). smooth заполняется
+        /// точками кривой, legStart[i] — индекс начала ноги i (вырожденная нога —
+        /// без точек); возвращается счёт. Буферы переиспользуются; чистая —
+        /// тестируется.</summary>
+        public static int HermiteChain(IReadOnlyList<Vector3> pts, IReadOnlyList<float> legWidths,
+            float baseWidthM, float maxSegLenM, List<Vector3> smooth, List<int> legStart)
         {
             smooth.Clear();
             legStart.Clear();
             int count = pts.Count;
-            if (count == 0)
+            if (count < 2)
                 return 0;
-            smooth.Add(pts[0]);
-            for (int k = 0; k + 1 < count; k++)
+            const float curveSmoothness = 50f; // ui_CurveSmoothness FA
+            const int maxSegments = 20;        // ui_CurveSegments FA
+            if (maxSegLenM < 1f)
+                maxSegLenM = 200f;
+            // Тангенсы узлов (митр): сумма единичных направлений смежных ног.
+            HermiteTangents.Clear();
+            for (int p = 0; p < count; p++)
             {
-                Vector3 a = pts[k];
-                Vector3 b = pts[k + 1];
-                legStart.Add(smooth.Count - 1);
-                Vector3 ab = b - a;
-                float len1 = new Vector2(ab.x, ab.z).magnitude;
-                if (len1 < 1e-3f)
-                    continue; // вырожденная нога: точка b уже лежит в smooth
-                if (k + 2 < count)
+                Vector3 t = Vector3.zero;
+                if (p > 0)
                 {
-                    Vector3 bc = pts[k + 2] - b;
-                    float len2 = new Vector2(bc.x, bc.z).magnitude;
-                    if (len2 >= 1e-3f)
-                    {
-                        var d1 = new Vector2(ab.x / len1, ab.z / len1);
-                        var d2 = new Vector2(bc.x / len2, bc.z / len2);
-                        float cross = d1.x * d2.y - d1.y * d2.x;
-                        float dot = d1.x * d2.x + d1.y * d2.y;
-                        bool turn = Math.Abs(cross) > 1e-4f || dot < 0f;
-                        float t = Mathf.Min(radiusM, 0.45f * Mathf.Min(len1, len2));
-                        if (turn && t > 0.5f)
-                        {
-                            Vector3 p = Vector3.LerpUnclamped(b, a, t / len1);
-                            Vector3 q = Vector3.LerpUnclamped(b, pts[k + 2], t / len2);
-                            if ((q - p).sqrMagnitude > 1e-4f)
-                            {
-                                smooth.Add(p);
-                                int arcSteps = Mathf.Clamp(Mathf.CeilToInt(t / 40f), 2, 8);
-                                for (int s = 1; s <= arcSteps; s++)
-                                {
-                                    float u = s / (float)arcSteps;
-                                    float w0 = (1f - u) * (1f - u);
-                                    float w1 = 2f * u * (1f - u);
-                                    float w2 = u * u;
-                                    smooth.Add(p * w0 + b * w1 + q * w2);
-                                }
-                                continue; // угол заменён дугой, сама B в цепь не входит
-                            }
-                        }
-                    }
+                    Vector3 inDir = pts[p] - pts[p - 1];
+                    float dl = inDir.magnitude;
+                    if (dl > 1e-6f)
+                        t += inDir / dl;
                 }
-                smooth.Add(b);
+                if (p < count - 1)
+                {
+                    Vector3 outDir = pts[p + 1] - pts[p];
+                    float dl = outDir.magnitude;
+                    if (dl > 1e-6f)
+                        t += outDir / dl;
+                }
+                float tl = t.magnitude;
+                HermiteTangents.Add(tl > 1e-6f ? t / tl : Vector3.zero);
+            }
+            for (int i = 0; i + 1 < count; i++)
+            {
+                legStart.Add(smooth.Count);
+                Vector3 a = pts[i];
+                Vector3 b = pts[i + 1];
+                Vector3 d = b - a;
+                float len = d.magnitude;
+                if (len < 1e-4f)
+                    continue; // вырожденная нога — без точек
+                Vector3 dir = d / len;
+                // Ширина ноги = мировая ширина ленты × множитель (канон: кламп тангенса
+                // привязан к ВИДИМОЙ ширине линии, width = kLineWidth × √units у FA).
+                float legMul = legWidths != null && i < legWidths.Count ? Mathf.Max(legWidths[i], 1f) : 1f;
+                float width = Mathf.Max(baseWidthM, 1f) * legMul;
+                float m = Mathf.Min(0.25f * len, curveSmoothness * width);
+                Vector3 sa = HermiteTangents[i].sqrMagnitude < 1e-8f ? dir : HermiteTangents[i];
+                Vector3 sb = HermiteTangents[i + 1].sqrMagnitude < 1e-8f ? dir : HermiteTangents[i + 1];
+                sa *= m;
+                sb *= m;
+                // Поворотная нога (тангенс конца отклонился от её направления) получает
+                // минимум сегментов независимо от длины — широкая дуга требует
+                // детализации, иначе угол выглядит острым (у FA сегментов фиксированно
+                // 20 на любую ногу — мы экономим на прямых).
+                bool turn = Vector3.Dot(sa, dir) < 0.999f * sa.magnitude ||
+                            Vector3.Dot(sb, dir) < 0.999f * sb.magnitude;
+                int segments = Mathf.Clamp(
+                    Mathf.Max(Mathf.CeilToInt(len / maxSegLenM), turn ? 12 : 1), 1, maxSegments);
+                for (int k = 0; k <= segments; k++)
+                {
+                    if (i > 0 && k == 0)
+                        continue; // стык ног: точка уже отдана предыдущей ногой (t=1)
+                    float t = k / (float)segments;
+                    float t2 = t * t;
+                    float t3 = t2 * t;
+                    float h00 = 2f * t3 - 3f * t2 + 1f;
+                    float h10 = t3 - 2f * t2 + t;
+                    float h01 = -2f * t3 + 3f * t2;
+                    float h11 = t3 - t2;
+                    smooth.Add(a * h00 + sa * h10 + b * h01 + sb * h11);
+                }
             }
             return smooth.Count;
         }
+
+        private static readonly List<Vector3> HermiteTangents = new List<Vector3>();
 
         /// <summary>Наклон футпринта под рельеф: средние высоты передней/задней и
         /// правой/левой кромок → продольный (pitch) и поперечный (roll) углы, град.

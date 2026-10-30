@@ -51,6 +51,17 @@ namespace SupremeNuclear
 
         private void UpdateSafe()
         {
+            // Редактор миссий: Ctrl+<MapGenKey> — сгенерировать дуэльный сценарий
+            // на открытой карте (MapGen, файл миссии в User-группе).
+            if (GameManager.gameState == GameState.Editor &&
+                RtsInput.Ctrl && RtsInput.KeyDown(Settings.MapGenKey))
+            {
+                bool ok = ScenarioBuild.Generate(Settings.MapGenTemplate, Settings.MapGenSeed, out string gen);
+                CommanderHud.Notice(gen);
+                if (!ok)
+                    return;
+            }
+
             if (!GameApi.InMission)
             {
                 if (IsActive)
@@ -61,11 +72,14 @@ namespace SupremeNuclear
             GameApi.TickOriginShiftMonitor();
             GameApi.TickHpCache();
             EconomyService.Tick();
+            SalvageService.Tick(); // салваж обломков — та же экономика (масса инженерам)
+            CaptureService.Tick(); // инженерный захват построек (энергия, v3)
             BuildTasks.Tick();
             ProductionTasks.Tick();
             SortieService.Tick(); // миссии вылетов живут и со закрытым столом командира
             SalvoService.Tick();  // залп-приказы — тоже (пуски на хосте)
             WeaponGateService.Tick(); // гейты вооружения — блок Ready() выключенных станций
+            AiCommanderService.Tick(); // AI-фракции играют тем же Task-API (до ворот режима)
             RouteRibbonMesh.Tick();
             RouteRibbonMesh.Render();
             BuildGhosts.Render();
@@ -338,8 +352,9 @@ namespace SupremeNuclear
             if (RtsInput.Ctrl && RtsInput.KeyDown(KeyCode.K))
                 SelfDestructSelection();
 
-            // Ctrl+M — отладочные деньги (плейтесты стройки/производства без гринда).
-            // Хост-only (инвариант №2), сумма — настройка Debug.Funds.
+            // Ctrl+M — отладочные деньги (плейтесты стройки/производства без гринда)
+            // + энергия до капа: без генераторов фонового потока на стройку не хватает
+            // (курица-и-яйцо первого генератора). Хост-only (инвариант №2).
             if (RtsInput.Ctrl && RtsInput.KeyDown(KeyCode.M) &&
                 NetworkManagerNuclearOption.i != null &&
                 NetworkManagerNuclearOption.i.Server != null &&
@@ -348,7 +363,10 @@ namespace SupremeNuclear
                 if (GameApi.TryGetLocalHQ(out FactionHQ debugHq))
                 {
                     debugHq.AddFunds(Settings.DebugFunds);
-                    CommanderHud.Notice($"+{Settings.DebugFunds:F0} — отладка");
+                    float energy = EconomyService.DebugFillEnergy(debugHq);
+                    CommanderHud.Notice(energy > 0f
+                        ? $"+{Settings.DebugFunds:F0} · энергия +{energy:F0} — отладка"
+                        : $"+{Settings.DebugFunds:F0} — отладка");
                 }
             }
 
@@ -389,7 +407,7 @@ namespace SupremeNuclear
                         : Loc.Tr("В выделении нет бортов с контрмерами"));
                 }
                 if (RtsInput.KeyDown(KeyCode.Escape))
-                    OrderModes.Pending = OrderMode.Move;
+                    OrderModes.Pending = OrderMode.None; // Esc гасит заряженный режим (как ПКМ)
             }
         }
 
@@ -629,11 +647,16 @@ namespace SupremeNuclear
 
             SelfCheck.RunActivation();
 
-            // Родная карта игры не нужна в режиме командира (дублируется с миникартой мода).
+            // Родная карта игры не нужна в режиме командира (дублируется с миникартой мода):
+            // гасим канвас И запрещаем открытие (AllowedToOpen) — иначе Esc («Map»-бинд)
+            // переоткрывает её через ExtraUiInput.Maximize поверх режима.
             DynamicMap stockMap = SceneSingleton<DynamicMap>.i;
             if (stockMap != null)
             {
                 _stockMapWasActive = stockMap.gameObject.activeSelf;
+                DynamicMap.AllowedToOpen = false;
+                if (DynamicMap.mapMaximized)
+                    stockMap.Minimize();
                 DynamicMap.EnableCanvas(false);
             }
 
@@ -659,7 +682,10 @@ namespace SupremeNuclear
                 cam.SwitchState(cam.freeState);
             DynamicMap stockMap = SceneSingleton<DynamicMap>.i;
             if (stockMap != null)
+            {
+                DynamicMap.AllowedToOpen = true; // пара к Activate (инвариант №9)
                 DynamicMap.EnableCanvas(_stockMapWasActive);
+            }
             if (!silent)
                 Log.Info("Режим командира выключен");
         }

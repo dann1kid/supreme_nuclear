@@ -503,7 +503,12 @@ namespace SupremeNuclear
             FactionHQ hq = aircraft.NetworkHQ;
             if (hq == null)
                 return;
-            if (hq.factionFunds < Settings.AirbaseRearmCost)
+            // Цена растёт с уроном борта (DESIGN §3-10): деспавн+выкат даёт полный HP —
+            // наценка = доля урона от ценности борта.
+            float cost = EcoFlow.ServiceCost(Settings.AirbaseRearmCost,
+                GameApi.HpFraction(aircraft), aircraft.definition.value,
+                Settings.AirbaseRearmDamageFactor);
+            if (hq.factionFunds < cost)
                 return; // ждём денег: таймер стоит, попробуем в следующем тике
 
             var stations = new int[aircraft.weaponStations.Count];
@@ -514,7 +519,7 @@ namespace SupremeNuclear
                     ? 0
                     : Mathf.Max(st.FullAmmo - st.GetAmmoTotal(), 0);
             }
-            hq.AddFunds(-Settings.AirbaseRearmCost);
+            hq.AddFunds(-cost);
             aircraft.RpcRearm(new RearmEventArgs { Rearmer = null, Stations = stations });
             aircraft.Refuel(null);
             seg.Serviced = true;

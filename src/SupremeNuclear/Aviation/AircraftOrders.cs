@@ -171,6 +171,14 @@ namespace SupremeNuclear
             /// (радианы; NaN — без смещения, у цели). Своя цель известна всегда —
             /// даталинк не нужен.</summary>
             public float EscortBearing = float.NaN;
+
+            /// <summary>Кэш мировых координат точек (руление спрашивает их каждый
+            /// физтик; GroundY — физлуч с 9 км). Инвалидация: Version (правки
+            /// планов), число точек, сдвиг floating origin — WorldOf.</summary>
+            internal Vector3[] WorldCache;
+            internal int WorldStamp = -1;
+            internal int WorldCount;
+            internal Vector3 WorldOrigin;
         }
 
         private static readonly Dictionary<Unit, List<OrderSegment>> Plans =
@@ -935,11 +943,31 @@ namespace SupremeNuclear
             return null;
         }
 
-        /// <summary>Мировая точка вейпоинта: x/z + GroundY + AGL (живое следование рельефу).</summary>
+        /// <summary>Мировая точка вейпоинта: x/z + GroundY + AGL (живое следование
+        /// рельефу). Кэш на СЕГМЕНТЕ (§12-45е, v0.113): руление спрашивает точки
+        /// каждый физтик (патруль — весь цикл за тик), а покадровый кэш GroundY
+        /// умирает на смене кадра — физлуч с 9 км на каждую точку каждый кадр.
+        /// Кэш сегмента живёт до правки планов (Version), смены числа точек или
+        /// сдвига floating origin (локальные координаты протухают, №1).</summary>
         private static Vector3 WorldOf(OrderSegment seg, int pointIndex)
         {
-            Vector3 p = seg.Points[pointIndex].ToLocalPosition();
-            return new Vector3(p.x, GameApi.GroundY(p.x, p.z) + p.y, p.z);
+            Vector3 originPos = Datum.origin != null ? Datum.origin.position : Vector3.zero;
+            int n = seg.Points.Count;
+            if (seg.WorldCache == null || seg.WorldStamp != Version ||
+                seg.WorldCount != n || seg.WorldOrigin != originPos)
+            {
+                if (seg.WorldCache == null || seg.WorldCache.Length < n)
+                    seg.WorldCache = new Vector3[Mathf.Max(4, Mathf.NextPowerOfTwo(n))];
+                for (int i = 0; i < n; i++)
+                {
+                    Vector3 p = seg.Points[i].ToLocalPosition();
+                    seg.WorldCache[i] = new Vector3(p.x, GameApi.GroundY(p.x, p.z) + p.y, p.z);
+                }
+                seg.WorldStamp = Version;
+                seg.WorldCount = n;
+                seg.WorldOrigin = originPos;
+            }
+            return seg.WorldCache[pointIndex];
         }
 
         /// <summary>Скретч-буфер дистанций патрульного цикла (руление, каждый

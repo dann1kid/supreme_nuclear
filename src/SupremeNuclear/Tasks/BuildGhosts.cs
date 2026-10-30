@@ -254,6 +254,7 @@ namespace SupremeNuclear
                 return;
             Camera cam = GameApi.MainCam;
             bool drewRunwayGhost = false; // превью из цикла задач — НЕ стирать в конце
+            DrawSiteDiscs();
 
             // Призраки всех площадок (поворот площадки + стрелка выхода; депо
             // дополнительно наклонено под рельеф — как встанет при достройке).
@@ -278,7 +279,7 @@ namespace SupremeNuclear
                 Quaternion rot = Quaternion.Euler(t.PitchDeg, t.YawDeg, t.RollDeg);
                 Color tint = t.ZoneBlocked
                     ? BlockedTint
-                    : (t.Paid > 0f ? ValidTint : BuildTint);
+                    : (t.PaidMass > 0f ? ValidTint : BuildTint);
                 Matrix4x4 root = Matrix4x4.TRS(origin, rot, Vector3.one);
                 Draw(t.Definition, origin, rot, tint);
                 if (BuildTasks.IsProducingDefinition(t.Definition))
@@ -296,8 +297,26 @@ namespace SupremeNuclear
                     ? BuildTasks.PlacingSite.ToLocalPosition()
                     : ground;
                 float yaw = BuildTasks.PlacingActive ? BuildTasks.PendingYawDeg : 0f;
+                // Месторождения v3: экстрактор снапится к ближайшей свободной точке
+                // массы (вдали — красный: строить можно только на точке); генератор —
+                // при свободном угле рядом снапится на него.
+                bool siteBuilding = def == EconomyService.ExtractorDefinition ||
+                                    def == EconomyService.HydroDefinition;
+                EconomyService.DepositSite snap = null;
+                if (siteBuilding && EconomyService.Profile != null)
+                {
+                    snap = EconomyService.FreeSiteNear(at,
+                        def == EconomyService.ExtractorDefinition
+                            ? EconomyService.DepositKind.Mass
+                            : EconomyService.DepositKind.Coal,
+                        EconomyService.Profile.siteSnapRadiusM);
+                    if (snap != null)
+                        at = snap.Pos.ToLocalPosition();
+                }
                 bool ok = GameApi.IsSiteBuildable(at.x, at.z) &&
-                          !BuildTasks.IsZoneBlockedAt(at, null);
+                          (snap != null || !BuildTasks.IsZoneBlockedAt(at, null));
+                if (siteBuilding)
+                    ok = snap != null; // мекс/гидро — только на своей точке (маркер в зоне — норм)
                 if (ok && BuildTasks.IsHangarDefinition(def))
                 {
                     GameApi.TryGetLocalHQ(out FactionHQ hq);
@@ -422,6 +441,73 @@ namespace SupremeNuclear
             float vPx = Mathf.Max(t.Definition.height / dist * pxPerRad * 0.5f, rPx * 0.6f);
             return Mathf.Abs(mouse.x - sp.x) <= rPx &&
                    Mathf.Abs(mouse.y - sp.y) <= vPx;
+        }
+
+        // ---------- Точки месторождений: 3D-кольцо-голограмма (v3) ----------
+
+        private static Mesh _discMesh;
+        private static Material _massDisc;
+        private static Material _coalDisc;
+
+        /// <summary>Кольца свободных месторождений на земле, ВИДНЫЕ СКВОЗЬ РЕЛЬЕФ
+        /// (SupCom-канон юзера 2026-10-30: месторождение — виртуальная точка,
+        /// шейдер сквозь всё; модель-носитель скрыта EconomyService). DrawMesh из
+        /// Update-контекста (правило №16) — Render зовётся из UpdateSafe.</summary>
+        private static void DrawSiteDiscs()
+        {
+            if (!EconomyService.Running || EconomyService.SiteList.Count == 0)
+                return;
+            if (_discMesh == null)
+                _discMesh = MakeRing(26f, 34f);
+            _massDisc ??= MakeDiscMat(new Color(1f, 0.85f, 0.2f, 0.55f));
+            _coalDisc ??= MakeDiscMat(new Color(1f, 0.55f, 0.2f, 0.55f));
+            foreach (EconomyService.DepositSite s in EconomyService.SiteList)
+            {
+                if (!EconomyService.SiteIsFree(s))
+                    continue;
+                Vector3 p = s.Pos.ToLocalPosition();
+                p.y = GameApi.GroundY(p.x, p.z) + 1.5f;
+                Graphics.DrawMesh(_discMesh, Matrix4x4.TRS(p, Quaternion.identity, Vector3.one),
+                    s.Kind == EconomyService.DepositKind.Coal ? _coalDisc : _massDisc, 0);
+            }
+        }
+
+        /// <summary>Кольцо по окружности в плоскости XZ (низкополигональное).</summary>
+        private static Mesh MakeRing(float rInner, float rOuter)
+        {
+            const int seg = 24;
+            var verts = new Vector3[seg * 2];
+            var tris = new int[seg * 6];
+            for (int i = 0; i < seg; i++)
+            {
+                float a0 = i * Mathf.PI * 2f / seg;
+                float a1 = (i + 1) * Mathf.PI * 2f / seg;
+                verts[i * 2] = new Vector3(Mathf.Cos(a0) * rInner, 0f, Mathf.Sin(a0) * rInner);
+                verts[i * 2 + 1] = new Vector3(Mathf.Cos(a0) * rOuter, 0f, Mathf.Sin(a0) * rOuter);
+                int v0 = i * 2, v2 = ((i + 1) % seg) * 2;
+                tris[i * 6] = v0;
+                tris[i * 6 + 1] = v2 + 1;
+                tris[i * 6 + 2] = v0 + 1;
+                tris[i * 6 + 3] = v0;
+                tris[i * 6 + 4] = v2;
+                tris[i * 6 + 5] = v2 + 1;
+            }
+            var m = new Mesh { name = "SN-SiteDisc" };
+            m.vertices = verts;
+            m.triangles = tris;
+            return m;
+        }
+
+        private static Material MakeDiscMat(Color color)
+        {
+            Shader shader = Shader.Find("Hidden/Internal-Colored");
+            var mat = new Material(shader) { name = "SN-SiteDisc" };
+            mat.SetColor("_Color", color);
+            // «Видно сквозь всё»: отключаем глубинный тест и запись глубины.
+            mat.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always);
+            mat.SetInt("_ZWrite", 0);
+            mat.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
+            return mat;
         }
     }
 }

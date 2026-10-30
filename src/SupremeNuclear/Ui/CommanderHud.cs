@@ -12,6 +12,71 @@ namespace SupremeNuclear
         public static bool DebugOverlay;
 
         private static Texture2D _white;
+        /// <summary>Лента-текстуры для меш-рендера (RouteRibbonMesh читает напрямую).</summary>
+        internal static Texture2D RibbonTexSoft => _ribbonSoft;
+        internal static Texture2D RibbonTexArrow => _ribbonArrow;
+        /// <summary>Лента-текстура FA (процедурная): полоса с мягкими краями и ярким
+        /// ядром (glow-профиль в альфе, RGB белый — GUI.color тинтит по виду ноги).
+        /// Стрелочная модуляция для «живых» ног (attack-move/патруль): яркость
+        /// полосы несёт бегущий шеврон, анимация = сдвиг UV по пути (anim_rate FA).</summary>
+        private static Texture2D _ribbonSoft;
+        private static Texture2D _ribbonArrow;
+
+        /// <summary>Профиль полосы (канон orderline FA): v=0..1 поперёк ленты —
+        /// яркое ядро ~18% + мягкий ореол до краёв.</summary>
+        private static float RibbonBandProfile(float v)
+        {
+            float x = Mathf.Abs(v - 0.5f) * 2f; // 0 центр — 1 край
+            float core = Mathf.Clamp01(1f - x / 0.18f);
+            float glow = Mathf.Exp(-(x * x) / (0.55f * 0.55f)) * 0.42f;
+            return Mathf.Clamp01(core + glow);
+        }
+
+        internal static void EnsureRibbonTextures()
+        {
+            if (_ribbonSoft != null && _ribbonArrow != null)
+                return; // одноразовая генерация (смена вида = пересоздание игры)
+            const int w = 16, h = 64;
+            _ribbonSoft = new Texture2D(w, h, TextureFormat.RGBA32, false)
+            { wrapMode = TextureWrapMode.Repeat, filterMode = FilterMode.Bilinear };
+            for (int y = 0; y < h; y++)
+            {
+                float a = RibbonBandProfile((y + 0.5f) / h) * 0.85f;
+                for (int x = 0; x < w; x++)
+                    _ribbonSoft.SetPixel(x, y, new Color(1f, 1f, 1f, a));
+            }
+            _ribbonSoft.Apply();
+            // Стрелочная: один тайл = 5 ширин ленты (uv_aspect FA 0.2); шеврон «>»
+            // по ходу (+u) — яркость полосы модулирована 0.45..1.0.
+            const int aw = 256;
+            _ribbonArrow = new Texture2D(aw, h, TextureFormat.RGBA32, false)
+            { wrapMode = TextureWrapMode.Repeat, filterMode = FilterMode.Bilinear };
+            for (int y = 0; y < h; y++)
+            {
+                float v = (y + 0.5f) / h;
+                float band = RibbonBandProfile(v);
+                for (int x = 0; x < aw; x++)
+                {
+                    float u = (x + 0.5f) / aw;
+                    // ТРИ шеврона на тайл (период 1/3) без мёртвых зон: паттерн
+                    // плотный и ФАЗОНЕЗАВИСИМЫЙ — на любом видимом отрезке 2-3
+                    // бегущих шеврона, где бы ни стартовала UV-фаза пути (плейтесты:
+                    // одиночный шеврон «у последнего вейпоинта», переезды фазы).
+                    float base0 = 0.10f - Mathf.Abs(v - 0.5f) * 0.20f; // вершина в центре линии
+                    float du = Mathf.Repeat(u - base0 + 1f / 6f, 1f / 3f) - 1f / 6f;
+                    float chev = Mathf.Clamp01(1f - Mathf.Abs(du) / 0.045f);
+                    // База стрелочной = яркости обычной полосы (0.85 soft), шеврон —
+                    // полновесный яркий штрих (тонкий на выровненной базе был
+                    // неразличим, «всё одинаковое»).
+                    float a = band * (0.72f + 0.28f * chev);
+                    _ribbonArrow.SetPixel(x, y, new Color(1f, 1f, 1f, a));
+                }
+            }
+            _ribbonArrow.Apply();
+        }
+
+        /// <summary>Центральная линия шеврона по v (0..1 поперёк ленты): вершина «>»
+        /// в центре ленты на u=0.30, крылья уходят назад (u меньше) к краям.</summary>
         private static GUIStyle _label;
         private static GUIStyle _small;
         private float _fps;
@@ -77,6 +142,8 @@ namespace SupremeNuclear
 
                     RangeRings.Draw(); // кольца дальности — самый нижний слой
                     DrawDepositMarkers();
+                    DrawSalvageMarkers();
+                    DrawCaptureMarkers();
                     DrawStrategicIcons(controller);
                     DrawHpBars();
                     DrawBuildMarkers();
@@ -530,7 +597,9 @@ namespace SupremeNuclear
 
         // ---------- маркеры и выделение ----------
 
-        /// <summary>Маркеры месторождений: только НЕзахваченные, жёлтые пульсирующие (SupCom-мекс).</summary>
+        /// <summary>Маркеры СВОБОДНЫХ месторождений (v3): жёлтый квадрат — масса,
+        /// оранжевый ромб — уголь (SupCom: «видишь точку — строй»). Занятые скрыты
+        /// у всех; построенные здания видны как юниты.</summary>
         private static void DrawDepositMarkers()
         {
             Camera cam = GameApi.MainCam;
@@ -539,29 +608,94 @@ namespace SupremeNuclear
 
             float pulse = 0.5f + 0.5f * Mathf.Sin(Time.unscaledTime * 3f);
             float s = 18f * (Screen.height / 1440f);
-            foreach (Unit unit in UnitRegistry.allUnits)
+            foreach (EconomyService.DepositSite site in EconomyService.SiteList)
             {
-                if (!(unit is Building) || unit.disabled)
+                if (!EconomyService.SiteIsFree(site))
                     continue;
-                if (unit.NetworkHQ != null)
-                    continue;
-                string name = unit.NetworkunitName;
-                if (string.IsNullOrEmpty(name) || !name.StartsWith("Extractor"))
-                    continue;
-
-                Vector3 sp = cam.WorldToScreenPoint(GameApi.UnitAnchorWorld(unit));
+                Vector3 world = site.Pos.ToLocalPosition();
+                world.y += 12f;
+                Vector3 sp = cam.WorldToScreenPoint(world);
                 if (sp.z <= 0f || sp.x < -40f || sp.x > Screen.width + 40f || sp.y < -40f || sp.y > Screen.height + 40f)
                     continue;
                 float guiY = Screen.height - sp.y;
                 if (UnderMinimapWindow(new Vector2(sp.x, guiY)))
                     continue;
 
-                Color color = new Color(1f, 0.85f, 0.2f, 1f);
+                Color color = site.Kind == EconomyService.DepositKind.Coal
+                    ? new Color(1f, 0.55f, 0.2f, 1f)
+                    : new Color(1f, 0.85f, 0.2f, 1f);
                 var outer = new Rect(sp.x - s * 0.5f, guiY - s * 0.5f, s, s);
                 DrawBoxOutline(outer, 1.5f, color);
                 float innerSize = s * (0.25f + 0.35f * pulse);
                 Color fill = color;
                 fill.a = 0.35f + 0.5f * pulse;
+                DrawRect(new Rect(sp.x - innerSize * 0.5f, guiY - innerSize * 0.5f, innerSize, innerSize), fill);
+            }
+        }
+
+        /// <summary>Маркеры салвижа: обломки, которые прямо сейчас разбирают инженеры
+        /// (оранжевая рамка, заполнение = прогресс разбора). Только активные сборы —
+        /// поля боёв не шумят маркерами.</summary>
+        private static void DrawSalvageMarkers()
+        {
+            Camera cam = GameApi.MainCam;
+            var wrecks = SalvageService.MarkerWrecks;
+            var progress = SalvageService.MarkerProgress;
+            if (cam == null || wrecks.Count == 0)
+                return;
+
+            float s = 16f * (Screen.height / 1440f);
+            Color color = new Color(1f, 0.55f, 0.15f, 1f);
+            for (int i = 0; i < wrecks.Count; i++)
+            {
+                Wreckage wreck = wrecks[i];
+                if (wreck == null)
+                    continue;
+                Vector3 sp = cam.WorldToScreenPoint(wreck.transform.position);
+                if (sp.z <= 0f || sp.x < -40f || sp.x > Screen.width + 40f || sp.y < -40f || sp.y > Screen.height + 40f)
+                    continue;
+                float guiY = Screen.height - sp.y;
+                if (UnderMinimapWindow(new Vector2(sp.x, guiY)))
+                    continue;
+
+                var outer = new Rect(sp.x - s * 0.5f, guiY - s * 0.5f, s, s);
+                DrawBoxOutline(outer, 1.5f, color);
+                float innerSize = s * (0.15f + 0.7f * progress[i]);
+                Color fill = color;
+                fill.a = 0.7f;
+                DrawRect(new Rect(sp.x - innerSize * 0.5f, guiY - innerSize * 0.5f, innerSize, innerSize), fill);
+            }
+        }
+
+        /// <summary>Маркеры инженерного захвата (v3): оранжевый ромб-рамка на цели,
+        /// заполнение = прогресс (как салваж, но обводка двойная — захват).</summary>
+        private static void DrawCaptureMarkers()
+        {
+            Camera cam = GameApi.MainCam;
+            var targets = CaptureService.MarkerTargets;
+            var progress = CaptureService.MarkerProgress;
+            if (cam == null || targets.Count == 0)
+                return;
+
+            float s = 18f * (Screen.height / 1440f);
+            Color color = new Color(1f, 0.4f, 0.1f, 1f);
+            for (int i = 0; i < targets.Count; i++)
+            {
+                Building b = targets[i];
+                if (b == null)
+                    continue;
+                Vector3 sp = cam.WorldToScreenPoint(GameApi.UnitAnchorWorld(b));
+                if (sp.z <= 0f || sp.x < -40f || sp.x > Screen.width + 40f || sp.y < -40f || sp.y > Screen.height + 40f)
+                    continue;
+                float guiY = Screen.height - sp.y;
+                if (UnderMinimapWindow(new Vector2(sp.x, guiY)))
+                    continue;
+
+                var outer = new Rect(sp.x - s * 0.5f, guiY - s * 0.5f, s, s);
+                DrawBoxOutline(outer, 2f, color);
+                float innerSize = s * (0.15f + 0.7f * progress[i]);
+                Color fill = color;
+                fill.a = 0.55f;
                 DrawRect(new Rect(sp.x - innerSize * 0.5f, guiY - innerSize * 0.5f, innerSize, innerSize), fill);
             }
         }
@@ -746,16 +880,24 @@ namespace SupremeNuclear
         // ---------- маршруты: плоскости-сегменты между вейпоинтами; статику не кэшируем (дёшево),
         // движущийся «якорь» юнита пересчитывается сам собой каждый кадр ----------
 
+        /// <summary>Палитра лент/маркеров — СТРОГИЙ канон SupCom FA 1:1
+        /// (commandgraphparams.lua): семейство движения (Move/CoordinatedMove/Patrol)
+        /// — ЦИАН 00ffff, семейство атаки (Attack/AggressiveMove/Tactical) — чистый
+        /// КРАСНЫЙ ff0000, инженерное семейство (Guard/Repair/Reclaim) — ЖЁЛТЫЙ
+        /// ffff00, транспортное (Ferry/Transport) — ФИОЛЕТОВЫЙ 654bc2. Патруль
+        /// наследует циан движения (отличается формой маркера-цикла, бегущими
+        /// шевронами и замыкающей ногой); залп = Tactical → красный; эскорт =
+        /// Guard → жёлтый; RTB — транспортное семейство.</summary>
         internal static Color ModeColor(AirOrderMode mode) =>
             mode switch
             {
-                AirOrderMode.Patrol => new Color(0.3f, 0.95f, 0.85f, 1f),
-                AirOrderMode.AttackMove => new Color(1f, 0.5f, 0.2f, 1f),
-                AirOrderMode.Attack => new Color(1f, 0.25f, 0.2f, 1f),
-                AirOrderMode.Salvo => new Color(0.95f, 0.3f, 0.8f, 1f),
-                AirOrderMode.Escort => new Color(0.55f, 0.95f, 0.4f, 1f),
-                AirOrderMode.Rtb => new Color(0.55f, 0.7f, 1f, 1f),
-                _ => new Color(1f, 0.8f, 0.25f, 1f)
+                AirOrderMode.Patrol => new Color(0f, 1f, 1f, 1f),
+                AirOrderMode.AttackMove => new Color(1f, 0f, 0f, 1f),
+                AirOrderMode.Attack => new Color(1f, 0f, 0f, 1f),
+                AirOrderMode.Salvo => new Color(1f, 0f, 0f, 1f),
+                AirOrderMode.Escort => new Color(1f, 1f, 0f, 1f),
+                AirOrderMode.Rtb => new Color(0.4f, 0.29f, 0.76f, 1f),
+                _ => new Color(0f, 1f, 1f, 1f)
             };
 
         /// <summary>Глобальная точка на земле.</summary>
@@ -765,46 +907,56 @@ namespace SupremeNuclear
             return new Vector3(l.x, GameApi.GroundY(l.x, l.z), l.z);
         }
 
-        /// <summary>Лента цепочки вейпоинтов: углы скруглены (Util.RoundChainCorners),
+        /// <summary>Лента цепочки вейпоинтов: ноги — кубические Эрмит-кривые
+        /// (Util.HermiteChain, порт канона Moho UICommandGraph: тангенс узла — митр
+        /// смежных ног, длина — min(¼ ноги, 50·толщина) — «текучие» повороты SupCom),
         /// вся цепочка — ОДНА непрерывная полоса экраных трапеций (соседние куски делят
         /// вершины — швов и «лесенок» на стыках ног нет), полуширина адаптивна к
         /// дистанции до камеры, вдоль всей цепочки бежит шеврон-точка.
         /// legCols/legAlphas — по одной записи на ногу цепочки: цвет и яркость
-        /// (hover-подсветка) переключаются на границе ног.</summary>
+        /// (hover-подсветка) переключаются на границе ног. legWidths — множитель
+        /// полуширины на ногу (канон SupCom: групповая магистраль √n юнитов толще
+        /// личной ветки; null — все единица).</summary>
         private static void DrawChainRibbon(Camera cam, IReadOnlyList<Vector3> pts,
-            List<Color> legCols, List<float> legAlphas)
+            List<Color> legCols, List<float> legAlphas, List<float> legWidths = null,
+            List<bool> legFlow = null, bool meshGated = true)
         {
+            // Меш-режим (порт рендера FA): ленты рисует RouteRibbonMesh мировым
+            // мешом с текстурами — IMGUI-ленты не дублируем. meshGated=false —
+            // маршруты, которых НЕТ в меше (ралли фабрик), остаются в IMGUI.
+            if (meshGated && Settings.RouteUseMesh)
+                return;
             Color prevColor = GUI.color;
             Matrix4x4 prevMatrix = GUI.matrix;
-            const float minZ = 50f;
+            // Близкий зум: гасим только ЗА камерой (раньше 50 м — при приближении
+            // лента исчезала прямо под камерой, плейтест v0.114).
+            const float minZ = 1.5f;
             float pxPerRad = Screen.height / (2f * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad));
             // Полуширина (SupCom-принцип): у камеры — ТОНКАЯ экранная линия
             // (~24px на 1440p, но не тоньше 1.5 м мира), с дистанцией плавно растёт
             // до мирового размера RouteRibbonWidthM (стратегический зум). Прежний
             // экраный потолок 110px прижимал ленту к константе на ЛЮБОМ приближении —
             // рядом с юнитами она была нереально широкой.
+            // Толщина: FA-нить — экранный потолок ~12px на 1440p (плейтест v0.114:
+            // прежние 24px+ читались жирным слэбом против тонкой линии оригинала);
+            // в стратзуме рулит мировая RouteRibbonWidthM.
             float maxHalfAt(float dist) => Mathf.Min(
                 Settings.RouteRibbonWidthM * 0.5f,
-                Mathf.Max(1.5f, 12f * (Screen.height / 1440f) * dist / pxPerRad));
+                Mathf.Max(1.5f, 6f * (Screen.height / 1440f) * dist / pxPerRad));
 
-            // Радиус скругления — с экраным минимумом: мировые 120 м на стратегическом
-            // зуме — пара пикселей, угол без этого выглядит лесенкой. Как и ширина,
-            // скругление подстраивается под камеру; настройка — нижний порог.
-            float camDist = float.MaxValue;
-            for (int i = 0; i < pts.Count; i++)
-            {
-                float d = (cam.transform.position - pts[i]).magnitude;
-                if (d < camDist)
-                    camDist = d;
-            }
-            float radiusEff = Mathf.Max(Settings.RouteCornerRadiusM,
-                28f * (Screen.height / 1440f) * camDist / pxPerRad);
-            int n = Util.RoundChainCorners(pts, radiusEff, RibbonPts, RibbonLegs);
+            // Сглаживание ног — Эрмит-кривые канона Moho (порт command_curve):
+            // повороты «текут», как в SupCom; кламп тангенса привязан к МИРОВОЙ
+            // ширине ленты (RouteRibbonWidthM × множитель ноги — как width у FA).
+            int n = Util.HermiteChain(pts, legWidths, Settings.RouteRibbonWidthM,
+                Settings.RouteSampleStepM, RibbonPts, RibbonLegs);
             if (n < 2)
                 return;
 
-            // Сечение ленты в точке j: перпендикуляр из соседних точек, полуширина по дистанции.
-            Vector3 Section(int j, out Vector3 left, out Vector3 right)
+            // Сечение ленты в точке j: перпендикуляр из соседних точек, полуширина по
+            // дистанции и множителю ноги, которой принадлежит точка.
+            float WidthMulOf(int legIdx) =>
+                legWidths != null && legIdx >= 0 && legIdx < legWidths.Count ? legWidths[legIdx] : 1f;
+            Vector3 Section(int j, int legIdx, out Vector3 left, out Vector3 right)
             {
                 Vector3 c = RibbonPts[j];
                 Vector3 prev = RibbonPts[j > 0 ? j - 1 : 0];
@@ -815,13 +967,20 @@ namespace SupremeNuclear
                     ? Vector3.right
                     : new Vector3(-flat.z, 0f, flat.x).normalized;
                 Vector3 sp = cam.WorldToScreenPoint(c);
-                float half = maxHalfAt(Mathf.Max(sp.z, 1f));
+                float half = maxHalfAt(Mathf.Max(sp.z, 1f)) * WidthMulOf(legIdx);
                 left = c - perp * half;
                 right = c + perp * half;
                 return sp;
             }
 
-            void Quad(Vector3 aL, Vector3 aR, Vector3 bL, Vector3 bR, Color col)
+
+            /// <summary>Текстурный квад ленты: ОСЬ X матрицы — ВДОЛЬ пути (u = дистанция
+            /// в тайлах, тайл = 5 ширин ленты), ось Y — поперёк (v — профиль полосы);
+            /// шевроны и glow живут в альфе текстуры, GUI.color тинтит видом ноги.
+            /// Без полупиксельного расширения: края полосы в текстуре прозрачны,
+            /// швов между кусками не видно (UV непрерывен по пути).</summary>
+            void TexQuad(Vector3 aL, Vector3 aR, Vector3 bL, Vector3 bR, Color col,
+                Texture2D tex, float u0, float du)
             {
                 Vector3 spL = cam.WorldToScreenPoint(aL);
                 Vector3 spR = cam.WorldToScreenPoint(aR);
@@ -832,52 +991,29 @@ namespace SupremeNuclear
                 Vector2 p1 = new Vector2(spL.x, Screen.height - spL.y);
                 Vector2 p2 = new Vector2(spR.x, Screen.height - spR.y);
                 Vector2 p3 = new Vector2(spCl.x, Screen.height - spCl.y);
-                Vector2 p4 = new Vector2(spCr.x, Screen.height - spCr.y);
-                // Соседние куски идут через РАЗНЫЕ GUI.matrix: общие вершины расходятся
-                // на доли пикселя, и на полупрозрачной ленте проступают светлые щели.
-                // Расширяем квад от центроида на полпикселя — щель закрывает лёгкое
-                // перекрытие (чуть темнее линия вместо разрыва).
-                Vector2 cen = (p1 + p2 + p3 + p4) * 0.25f;
-                Vector2 Expand(Vector2 p)
-                {
-                    Vector2 d = p - cen;
-                    return p + d * (0.5f / Mathf.Max(d.magnitude, 0.01f));
-                }
-                p1 = Expand(p1);
-                p2 = Expand(p2);
-                p3 = Expand(p3);
-                p4 = Expand(p4);
-                float minX = Mathf.Min(Mathf.Min(p1.x, p2.x), Mathf.Min(p3.x, p4.x));
-                float maxX = Mathf.Max(Mathf.Max(p1.x, p2.x), Mathf.Max(p3.x, p4.x));
-                float minY = Mathf.Min(Mathf.Min(p1.y, p2.y), Mathf.Min(p3.y, p4.y));
-                float maxY = Mathf.Max(Mathf.Max(p1.y, p2.y), Mathf.Max(p3.y, p4.y));
-                if (maxX - minX >= Screen.width * 2f || maxY - minY >= Screen.height * 2f)
-                    return;
-                Vector2 xAxis = p2 - p1;
-                Vector2 yAxis = p3 - p1;
-                if (xAxis.sqrMagnitude <= 1e-6f || yAxis.sqrMagnitude <= 1e-6f)
+                Vector2 along = p3 - p1;   // вдоль пути (u)
+                Vector2 across = p2 - p1;  // поперёк ленты (v)
+                if (along.sqrMagnitude <= 1e-6f || across.sqrMagnitude <= 1e-6f)
                     return;
                 var m = Matrix4x4.identity;
-                m.SetColumn(0, new Vector4(xAxis.x, xAxis.y, 0f, 0f));
-                m.SetColumn(1, new Vector4(yAxis.x, yAxis.y, 0f, 0f));
+                m.SetColumn(0, new Vector4(along.x, along.y, 0f, 0f));
+                m.SetColumn(1, new Vector4(across.x, across.y, 0f, 0f));
                 m.SetColumn(3, new Vector4(p1.x, p1.y, 0f, 1f));
                 GUI.matrix = m;
                 GUI.color = col;
-                GUI.DrawTexture(new Rect(0f, 0f, 1f, 1f), _white);
+                GUI.DrawTextureWithTexCoords(new Rect(0f, 0f, 1f, 1f), tex,
+                    new Rect(u0, 0f, du, 1f), true);
                 GUI.matrix = prevMatrix;
             }
 
-            float total = 0f;
-            for (int i = 1; i < n; i++)
-                total += Vector3.Distance(RibbonPts[i - 1], RibbonPts[i]);
-            float chevronAt = Mathf.Repeat(Time.unscaledTime * 0.45f, 1f) * total;
-            bool chevronDone = total <= 0f;
-
+            // «Живой» поток канона FA: шевроны ЖИВУТ В ТЕКСТУРЕ ленты (стрелочный
+            // тайл = 5 ширин, uv_aspect FA 0.2), анимация = сдвиг UV по пути
+            // (orderline_anim_rate 0.25); статичные ноги — мягкая полоса + наконечник.
             int legCount = legCols.Count;
             int legIdx = 0;
             Vector3 prevL = Vector3.zero, prevR = Vector3.zero, prevC = RibbonPts[0];
             bool hasPrev = false;
-            float passed = 0f;
+            float uCarry = 0f; // накопленная UV-фаза пути (в тайлах)
 
             for (int i = 1; i < n; i++)
             {
@@ -887,14 +1023,21 @@ namespace SupremeNuclear
                     legIdx++;
                 Color c = legIdx < legCount ? legCols[legIdx] : Color.white;
                 float alpha = legIdx < legAlphas.Count ? legAlphas[legIdx] : 1f;
-                var ribbon = new Color(c.r, c.g, c.b, alpha * 0.5f);
+                // Текстурная лента FA: glow-профиль (ядро+ореол) и шевроны — В АЛЬФЕ
+                // текстуры, RGB белый; тинт — цвет вида ноги на полной альфе.
+                var lineCol = new Color(c.r, c.g, c.b, alpha);
+                bool flow = legFlow != null && legIdx < legFlow.Count && legFlow[legIdx];
+                Texture2D tex = flow ? _ribbonArrow : _ribbonSoft;
+                float shift = flow ? Time.unscaledTime * 0.25f : 0f; // anim_rate FA
+                bool legEndsHere = i + 1 >= n ||
+                    (legIdx + 1 < legCount && i >= RibbonLegs[legIdx + 1]);
 
                 float xzLen = new Vector2(b.x - a.x, b.z - a.z).magnitude;
                 if (xzLen < 1e-3f)
                     continue;
                 int pieces = Mathf.Clamp(Mathf.CeilToInt(xzLen / 200f), 1, 80);
-                Vector3 spA = Section(i - 1, out Vector3 startL, out Vector3 startR);
-                Section(i, out Vector3 endL, out Vector3 endR);
+                Vector3 spA = Section(i - 1, legIdx, out Vector3 startL, out Vector3 startR);
+                Section(i, legIdx, out Vector3 endL, out Vector3 endR);
                 for (int s = 1; s <= pieces; s++)
                 {
                     float t = s / (float)pieces;
@@ -904,17 +1047,50 @@ namespace SupremeNuclear
                     Vector3 sp = cam.WorldToScreenPoint(curC);
                     bool visible = sp.z > minZ;
 
-                    if (hasPrev && visible)
-                        Quad(prevL, prevR, curL, curR, ribbon);
-
-                    // Шеврон: бегущая точка вдоль всей цепочки.
-                    passed += Vector3.Distance(prevC, curC);
-                    if (!chevronDone && passed >= chevronAt)
+                    float pieceLen = Vector3.Distance(prevC, curC);
+                    if (hasPrev && visible && pieceLen > 1e-3f)
                     {
-                        chevronDone = true;
-                        if (sp.z > minZ)
-                            DrawRect(new Rect(sp.x - 2f, Screen.height - sp.y - 2f, 4f, 4f),
-                                new Color(c.r, c.g, c.b, alpha));
+                        // Тайл шеврона = 5 × ВИЗУАЛЬНАЯ ширина КУСКА (канон FA: тайл
+                        // привязан к рисуемой ширине линии; на близком зуме стрелки
+                        // сжимаются до экранных пропорций, а не растягиваются на сотни
+                        // метров). Фаза копится по кускам — непрерывна при смене ширины.
+                        float wStart = Vector3.Distance(prevL, prevC);
+                        float wEnd = Vector3.Distance(curL, curC);
+                        float tileM = Mathf.Max(8f, 5f * (wStart + wEnd));
+                        if (flow)
+                        {
+                            float u0 = uCarry;
+                            float u1 = u0 + pieceLen / tileM;
+                            float ua = u0;
+                            for (int k = Mathf.FloorToInt(u0) + 1; ; k++)
+                            {
+                                float ub = Mathf.Min(k, u1);
+                                float fa = (ua - u0) / (u1 - u0);
+                                float fb = (ub - u0) / (u1 - u0);
+                                TexQuad(
+                                    Vector3.LerpUnclamped(prevL, curL, fa),
+                                    Vector3.LerpUnclamped(prevR, curR, fa),
+                                    Vector3.LerpUnclamped(prevL, curL, fb),
+                                    Vector3.LerpUnclamped(prevR, curR, fb),
+                                    lineCol, tex, Mathf.Repeat(ua - shift, 1f), ub - ua);
+                                ua = ub;
+                                if (ub >= u1 - 1e-5f)
+                                    break;
+                            }
+                            uCarry = u1;
+                        }
+                        else
+                        {
+                            // Мягкая полоса: вдоль u текстура однородна — UV не важен.
+                            TexQuad(prevL, prevR, curL, curR, lineCol, tex, 0f, 1f);
+                        }
+                    }
+                    if (!flow && legEndsHere && s == pieces && visible)
+                    {
+                        // Наконечник в конце статичной ноги: направление a→b.
+                        DrawRibbonChevron(new Vector2(sp.x, Screen.height - sp.y),
+                            new Vector2(sp.x - spA.x, spA.y - sp.y),
+                            new Color(c.r, c.g, c.b, Mathf.Min(1f, alpha + 0.1f)));
                     }
                     prevC = curC;
                     prevL = curL;
@@ -926,8 +1102,107 @@ namespace SupremeNuclear
             GUI.color = prevColor;
         }
 
-        /// <summary>Вейпоинт с цветом записи очереди (движение/стройка).</summary>
-        private static void DrawWorldWaypointColored(Camera cam, Vector3 wp, Color color, float alpha)
+        /// <summary>Шеврон направления «∨» в экранных координатах: две тонкие линии-
+        /// руки из точки p под ±140° к направлению dir (указывает ПО ходу движения;
+        /// бегущие ряды — на ногах атаки-движения/патруля, одиночный — наконечник
+        /// статичной ноги). Без аллокаций (локальные GUI.matrix).</summary>
+        private static void DrawRibbonChevron(Vector2 p, Vector2 dir, Color c)
+        {
+            float dl = dir.magnitude;
+            if (dl < 1e-3f)
+                return;
+            float heading = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
+            Matrix4x4 prev = GUI.matrix;
+            Color prevC = GUI.color;
+            GUI.color = c;
+            const float arm = 9f, thick = 2f;
+            for (int s = -1; s <= 1; s += 2)
+            {
+                var m = Matrix4x4.identity;
+                m.SetColumn(3, new Vector4(p.x, p.y, 0f, 1f));
+                var rot = Matrix4x4.TRS(Vector3.zero,
+                    Quaternion.Euler(0f, 0f, heading + s * 140f), Vector3.one);
+                GUI.matrix = m * rot * prev;
+                GUI.DrawTexture(new Rect(0f, -thick * 0.5f, arm, thick), _white);
+            }
+            GUI.matrix = prev;
+            GUI.color = prevC;
+        }
+
+        /// <summary>Форма маркера вейпоинта — вид приказа без цвета (канон SupCom
+        /// «цвет ног + форма маркеров»): квадрат — движение, ромб — атака-движение,
+        /// двойная рамка — патрульный цикл.</summary>
+        private enum WaypointShape
+        {
+            Square,
+            Diamond,
+            Loop
+        }
+
+        private static WaypointShape ShapeOf(GroundOrderKind kind) =>
+            kind switch
+            {
+                GroundOrderKind.AttackMove => WaypointShape.Diamond,
+                GroundOrderKind.Patrol => WaypointShape.Loop,
+                _ => WaypointShape.Square
+            };
+
+        private static WaypointShape ShapeOf(AirOrderMode mode) =>
+            mode switch
+            {
+                AirOrderMode.AttackMove => WaypointShape.Diamond,
+                AirOrderMode.Patrol => WaypointShape.Loop,
+                _ => WaypointShape.Square
+            };
+
+        /// <summary>Маркер вейпоинта в точке экрана p: форма по виду приказа, размер
+        /// sizeMul (групповой узел √n юнитов — SupCom DrawNode). Ромб — квадрат,
+        /// повёрнутый на 45° локальной GUI.matrix (без аллокаций).</summary>
+        private static void DrawWaypointMarkerAt(Vector2 p, float half, Color color, float alpha,
+            WaypointShape shape)
+        {
+            Color frame = new Color(color.r, color.g, color.b, Mathf.Min(1f, alpha + 0.15f));
+            Color core = new Color(color.r, color.g, color.b, alpha);
+            switch (shape)
+            {
+                case WaypointShape.Diamond:
+                {
+                    Matrix4x4 prev = GUI.matrix;
+                    var m = Matrix4x4.identity;
+                    m.SetColumn(3, new Vector4(p.x, p.y, 0f, 1f)); // перенос в центр
+                    var rot = Matrix4x4.identity;
+                    float c = Mathf.Cos(Mathf.PI * 0.25f), s = Mathf.Sin(Mathf.PI * 0.25f);
+                    rot.m00 = c; rot.m01 = -s;
+                    rot.m10 = s; rot.m11 = c;
+                    GUI.matrix = m * rot * prev;
+                    DrawBoxOutline(new Rect(-half, -half, half * 2f, half * 2f), 2.5f, frame);
+                    GUI.matrix = prev;
+                    DrawRect(new Rect(p.x - 3.5f, p.y - 3.5f, 7f, 7f), core);
+                    break;
+                }
+                case WaypointShape.Loop:
+                {
+                    var outer = new Rect(p.x - half, p.y - half, half * 2f, half * 2f);
+                    DrawBoxOutline(outer, 2.5f, frame);
+                    float innerHalf = half * 0.5f;
+                    DrawBoxOutline(new Rect(p.x - innerHalf, p.y - innerHalf,
+                        innerHalf * 2f, innerHalf * 2f), 2f, core);
+                    break;
+                }
+                default:
+                {
+                    var r = new Rect(p.x - half, p.y - half, half * 2f, half * 2f);
+                    DrawBoxOutline(r, 2.5f, frame);
+                    float dot = half * 0.4f;
+                    DrawRect(new Rect(p.x - dot, p.y - dot, dot * 2f, dot * 2f), core);
+                    break;
+                }
+            }
+        }
+
+        /// <summary>Вейпоинт с цветом записи очереди (движение/стройка) и формой вида.</summary>
+        private static void DrawWorldWaypointColored(Camera cam, Vector3 wp, Color color, float alpha,
+            WaypointShape shape = WaypointShape.Square, float sizeMul = 1f)
         {
             Vector3 sp = cam.WorldToScreenPoint(wp);
             if (sp.z <= 0f)
@@ -935,25 +1210,13 @@ namespace SupremeNuclear
             Vector2 p = new Vector2(sp.x, Screen.height - sp.y);
             if (UnderMinimapWindow(p))
                 return;
-            var r = new Rect(p.x - 10f, p.y - 10f, 20f, 20f);
-            DrawBoxOutline(r, 2.5f, new Color(color.r, color.g, color.b, Mathf.Min(1f, alpha + 0.15f)));
-            DrawRect(new Rect(p.x - 4f, p.y - 4f, 8f, 8f), new Color(color.r, color.g, color.b, alpha));
+            DrawWaypointMarkerAt(p, 10f * sizeMul, color, alpha, shape);
         }
 
         private static void DrawWorldWaypoints(Camera cam, IEnumerable<Vector3> waypoints, Color color, float alpha)
         {
             foreach (Vector3 wp in waypoints)
-            {
-                Vector3 sp = cam.WorldToScreenPoint(wp);
-                if (sp.z <= 0f)
-                    continue;
-                Vector2 p = new Vector2(sp.x, Screen.height - sp.y);
-                if (UnderMinimapWindow(p))
-                    continue;
-                var r = new Rect(p.x - 10f, p.y - 10f, 20f, 20f);
-                DrawBoxOutline(r, 2.5f, new Color(color.r, color.g, color.b, Mathf.Min(1f, alpha + 0.15f)));
-                DrawRect(new Rect(p.x - 4f, p.y - 4f, 8f, 8f), new Color(color.r, color.g, color.b, alpha));
-            }
+                DrawWorldWaypointColored(cam, wp, color, alpha);
         }
 
         /// <summary>Индекс вейпоинта под курсором (единый пик-радиус вейпоинтов) или -1.</summary>
@@ -1020,8 +1283,8 @@ namespace SupremeNuclear
                 ChainCols.Add(c);
                 ChainAlphas.Add(a);
             }
-            DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
-            DrawWorldWaypoints(cam, RallyWps, c, a);
+            DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas, meshGated: false);
+            DrawWorldWaypoints(cam, RallyWps, Color.white, a); // маркеры белые — канон FA
         }
 
         /// <summary>Якорь ралли-ленты фабрики (её корпус); мёртвая/чужеродная
@@ -1065,6 +1328,15 @@ namespace SupremeNuclear
         // (рисует и крест — дедуп на цель для всей группы приказа).
         private static readonly List<Unit> ChainNodeTargets = new List<Unit>();
         private static readonly List<bool> ChainNodeOwned = new List<bool>();
+        // Per-point вид (v0.114): вид точки-узла (цели — Attack) и её абсолютный
+        // индекс в очереди (-1 у целей) — цвет ноги входа, форма маркера, подсказка
+        // конвертации хвостом. Толщина ноги: √n юнитов группы приказа (канон SupCom).
+        private static readonly List<GroundOrderKind> NodeKinds = new List<GroundOrderKind>();
+        private static readonly List<int> NodeAbs = new List<int>();
+        private static readonly List<float> ChainWidths = new List<float>();
+        // «Живой» поток канона FA: бегущие шевроны только на ногах атаки-движения
+        // и патруля (orderline_anim_rate); статичные ноги — наконечник на конце.
+        private static readonly List<bool> ChainFlow = new List<bool>();
         private static readonly HashSet<Unit> DrawnTargetExits = new HashSet<Unit>();
         // Очереди инженеров (все с записями — групповое слияние не зависит от выделения).
         private static readonly List<Unit> EngSeqUnits = new List<Unit>();
@@ -1097,7 +1369,11 @@ namespace SupremeNuclear
         private static long PairKey(int a, int b) => (long)a << 32 | (uint)b;
 
         /// <summary>Групповой маркер-центроид (26px) — один на приказ группы.</summary>
-        private static void DrawGroupWaypointMarker(Camera cam, Vector3 world)
+        /// <summary>Групповой вейпоинт (один на приказ, в центроиде): крупнее
+        /// индивидуального — размер растёт как √n юнитов приказа (канон SupCom
+        /// DrawNode, кламп 1..1.6×), форма/цвет — вид приказа точки.</summary>
+        private static void DrawGroupWaypointMarker(Camera cam, Vector3 world, Color color, float alpha,
+            WaypointShape shape, float sizeMul = 1f)
         {
             Vector3 sp = cam.WorldToScreenPoint(world);
             if (sp.z <= 0f)
@@ -1105,9 +1381,7 @@ namespace SupremeNuclear
             Vector2 p = new Vector2(sp.x, Screen.height - sp.y);
             if (UnderMinimapWindow(p))
                 return;
-            var r = new Rect(p.x - 13f, p.y - 13f, 26f, 26f);
-            DrawBoxOutline(r, 3f, new Color(1f, 0.8f, 0.25f, 0.95f));
-            DrawRect(new Rect(p.x - 6f, p.y - 6f, 12f, 12f), new Color(1f, 0.8f, 0.25f, 0.9f));
+            DrawWaypointMarkerAt(p, 13f * sizeMul, color, alpha, shape);
         }
 
         /// <summary>Цепочка наземки с групповым слиянием: групповые точки (groupId≠0)
@@ -1120,15 +1394,22 @@ namespace SupremeNuclear
         /// вместе); текущая цель погони — яркая, с пульсирующим крестом, ждущие свою
         /// позицию — приглушённые, со статичным крестом. Hover подсвечивает путь до узла.</summary>
         private static void DrawGroundChain(Camera cam, Unit unit, IReadOnlyList<GlobalPosition> queue,
-            int qi, Color c, float a, bool loop = false)
+            int qi, Color c, float a, int loopStartAbs = -1)
         {
             // Узлы очереди В ПОРЯДКЕ КЛИКОВ: дозревшие/текущие цели — в голове,
             // дальше точки, с целями, вставленными после своей позиции серии.
+            // Каждый узел несёт вид своей точки (per-point, v0.114): нога красится
+            // цветом ВХОДА в узел (канон SupCom: attack-move нога красная), маркер —
+            // формой вида. loopStartAbs ≥ 0 — патрульный цикл, замыкающая нога идёт
+            // на начало хвоста (конвертация «от точки»), не на первый узел.
             var targets = GroundOrders.TargetQueueOf(unit);
             ChainNodes.Clear();
             NodeGids.Clear();
             ChainNodeTargets.Clear();
             ChainNodeOwned.Clear();
+            NodeKinds.Clear();
+            NodeAbs.Clear();
+            int loopNode = -1;
             if (targets != null)
                 for (int q = 0; q < targets.Count; q++)
                 {
@@ -1141,11 +1422,14 @@ namespace SupremeNuclear
                     NodeGids.Add(0);
                     ChainNodeTargets.Add(t);
                     ChainNodeOwned.Add(false);
+                    NodeKinds.Add(GroundOrderKind.Attack);
+                    NodeAbs.Add(-1);
                 }
             for (int i = qi; i < queue.Count; i++)
             {
                 // Групповая точка — узел-центроид группы приказа, индивидуальная — своя.
                 int gid = GroundOrders.GroupIdOf(unit, i);
+                GroundOrderKind kind = GroundOrders.KindOfPoint(unit, i);
                 Vector3 wp = GroundVec(queue[i]);
                 ChainNodes.Add(gid != 0 && GidPointSums.TryGetValue(gid, out Vector4 acc)
                     ? new Vector3(acc.x / acc.w, acc.y / acc.w, acc.z / acc.w)
@@ -1153,6 +1437,10 @@ namespace SupremeNuclear
                 NodeGids.Add(gid);
                 ChainNodeTargets.Add(null);
                 ChainNodeOwned.Add(false);
+                NodeKinds.Add(kind);
+                NodeAbs.Add(i);
+                if (i == loopStartAbs)
+                    loopNode = ChainNodes.Count - 1;
                 if (targets == null)
                     continue;
                 for (int q = 0; q < targets.Count; q++)
@@ -1166,12 +1454,51 @@ namespace SupremeNuclear
                     NodeGids.Add(0);
                     ChainNodeTargets.Add(t);
                     ChainNodeOwned.Add(false);
+                    NodeKinds.Add(GroundOrderKind.Attack);
+                    NodeAbs.Add(-1);
+                }
+            }
+            // Патруль (loopStartAbs = ТЕКУЩАЯ точка): обёртка хвоста цикла
+            // [LoopStart..qi) — весь цикл нарисован, голова ленты = куда юнит идёт.
+            if (loopStartAbs >= 0)
+            {
+                int wrapFrom = GroundOrders.PatrolLoopStartOf(unit);
+                for (int i = wrapFrom; i < loopStartAbs; i++)
+                {
+                    int gid = GroundOrders.GroupIdOf(unit, i);
+                    ChainNodes.Add(gid != 0 && GidPointSums.TryGetValue(gid, out Vector4 acc)
+                        ? new Vector3(acc.x / acc.w, acc.y / acc.w, acc.z / acc.w)
+                        : GroundVec(queue[i]));
+                    NodeGids.Add(gid);
+                    ChainNodeTargets.Add(null);
+                    ChainNodeOwned.Add(false);
+                    NodeKinds.Add(GroundOrderKind.Patrol);
+                    NodeAbs.Add(i);
                 }
             }
             if (ChainNodes.Count == 0)
                 return;
+            // Начало хвоста уже пройдено (Index > LoopStart): цикл замыкаем на первый
+            // РИСУЕМЫЙ узел — петля видна на любом участке цикла (меш-лента делает
+            // тот же кламп max(LoopStart, DrawStart)).
+            if (loopNode < 0 && loopStartAbs >= 0 && ChainNodes.Count >= 2)
+                loopNode = 0;
 
             Color attackC = ModeColor(AirOrderMode.Attack);
+            Color attackMoveC = ModeColor(AirOrderMode.AttackMove);
+            Color patrolC = ModeColor(AirOrderMode.Patrol);
+            // Цвет ноги ВХОДА в точку — вид самой точки (канон SupCom: нога красится
+            // цветом приказа, к которому ведёт; attack-move нога красная).
+            Color KindColor(GroundOrderKind kind) =>
+                kind == GroundOrderKind.AttackMove ? attackMoveC
+                : kind == GroundOrderKind.Patrol ? patrolC
+                : c;
+            // Толщина групповой магистрали: √n юнитов приказа (кламп настройки),
+            // личные ветки — единица.
+            float GroupWidth(int gid) =>
+                gid != 0 && GidPointSums.TryGetValue(gid, out Vector4 acc)
+                    ? Mathf.Min(Mathf.Sqrt(Mathf.Max(acc.w, 1f)), Settings.RouteGroupWidthMax)
+                    : 1f;
             bool pursuing = GroundOrders.KindOf(unit) == GroundOrderKind.Attack;
             Unit curTarget = GroundOrders.TargetOf(unit);
 
@@ -1182,6 +1509,8 @@ namespace SupremeNuclear
             ChainPts.Clear();
             ChainCols.Clear();
             ChainAlphas.Clear();
+            ChainWidths.Clear();
+            ChainFlow.Clear();
             Vector3 prev = anchor;
             int prevGid = 0;
             Unit prevTarget = null;
@@ -1193,6 +1522,7 @@ namespace SupremeNuclear
                 bool drawLeg = true;
                 Color legC = c;
                 float legA = a;
+                float legW = 1f;
                 if (nodeTarget != null)
                 {
                     // Нога ДО цели — один раз на цель; владелец ноги рисует и крест.
@@ -1201,22 +1531,27 @@ namespace SupremeNuclear
                     legC = attackC;
                     legA = pursuing && nodeTarget == curTarget ? a : a * 0.6f;
                 }
-                else if (prevTarget != null)
-                    // Нога ОТ цели — тоже один раз на цель (выход из боевого узла).
-                    drawLeg = DrawnTargetExits.Add(prevTarget);
-                else if (i == 0 && gid != 0)
+                else
                 {
-                    // Вход в группу — от центроида якорей её членов, один раз на группу.
-                    if (GidAnchorSums.TryGetValue(gid, out Vector4 aa))
+                    legC = KindColor(NodeKinds[i]);
+                    legW = GroupWidth(gid);
+                    if (prevTarget != null)
+                        // Нога ОТ цели — тоже один раз на цель (выход из боевого узла).
+                        drawLeg = DrawnTargetExits.Add(prevTarget);
+                    else if (i == 0 && gid != 0)
                     {
-                        prev = new Vector3(aa.x / aa.w, 0f, aa.z / aa.w);
-                        prev.y = GameApi.GroundY(prev.x, prev.z);
+                        // Вход в группу — от центроида якорей её членов, один раз на группу.
+                        if (GidAnchorSums.TryGetValue(gid, out Vector4 aa))
+                        {
+                            prev = new Vector3(aa.x / aa.w, 0f, aa.z / aa.w);
+                            prev.y = GameApi.GroundY(prev.x, prev.z);
+                        }
+                        drawLeg = DrawnGidEntries.Add(gid);
                     }
-                    drawLeg = DrawnGidEntries.Add(gid);
+                    else if (prevGid != 0 && gid != 0)
+                        // Сегмент магистрали: рисует первый встретивший юнит группы.
+                        drawLeg = DrawnGidLegs.Add(PairKey(prevGid, gid));
                 }
-                else if (prevGid != 0 && gid != 0)
-                    // Сегмент магистрали: рисует первый встретивший юнит группы.
-                    drawLeg = DrawnGidLegs.Add(PairKey(prevGid, gid));
 
                 if (drawLeg)
                 {
@@ -1224,48 +1559,62 @@ namespace SupremeNuclear
                         ChainPts.Add(prev);
                     ChainPts.Add(node);
                     ChainCols.Add(legC);
-                    ChainAlphas.Add(hover >= i ? Mathf.Max(legA, 1f) : legA);
+                    // Hover-подсветка ХВОСТА от наведённого узла (v0.114): конвертация
+                    // в патруль замыкает хвост — игрок видит, что станет циклом.
+                    ChainAlphas.Add(hover >= 0 && i >= hover ? Mathf.Max(legA, 1f) : legA);
+                    ChainWidths.Add(legW);
+                    ChainFlow.Add(NodeKinds[i] == GroundOrderKind.AttackMove ||
+                                  NodeKinds[i] == GroundOrderKind.Patrol);
                 }
                 else if (ChainPts.Count > 0)
                 {
                     // Разрыв: общий сегмент уже нарисован другим членом группы.
-                    DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                    DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas, ChainWidths, ChainFlow);
                     ChainPts.Clear();
                     ChainCols.Clear();
                     ChainAlphas.Clear();
+                    ChainWidths.Clear();
+                    ChainFlow.Clear();
                 }
                 prev = node;
                 prevGid = gid;
                 prevTarget = nodeTarget;
             }
-            // Замыкающая нога патруля: последний узел → первый. Магистральные
-            // групповые сегменты дедуплицированы тем же PairKey (каждый член
-            // группы не рисует её дважды), индивидуальные — своя у каждого.
-            if (loop && ChainNodes.Count >= 2)
+            // Замыкающая нога патруля: последний узел хвоста → его НАЧАЛО (узел
+            // loopStartAbs, не первый узел очереди — конвертация «от точки»).
+            // Магистральные групповые сегменты дедуплицированы тем же PairKey.
+            if (loopNode >= 0 && ChainNodes.Count >= 2)
             {
                 int lastGid = NodeGids[NodeGids.Count - 1];
-                int firstGid = NodeGids[0];
-                bool closeLeg = lastGid != 0 && firstGid != 0
-                    ? DrawnGidLegs.Add(PairKey(lastGid, firstGid))
+                int loopGid = NodeGids[loopNode];
+                Color loopC = KindColor(NodeKinds[loopNode]);
+                float loopW = GroupWidth(loopGid);
+                bool closeLeg = lastGid != 0 && loopGid != 0
+                    ? DrawnGidLegs.Add(PairKey(lastGid, loopGid))
                     : true;
                 if (closeLeg)
                 {
                     if (ChainPts.Count == 0)
                     {
                         ChainPts.Add(ChainNodes[ChainNodes.Count - 1]);
-                        ChainCols.Add(c);
+                        ChainCols.Add(loopC);
                         ChainAlphas.Add(a);
+                        ChainWidths.Add(loopW);
                     }
-                    ChainPts.Add(ChainNodes[0]);
-                    ChainCols.Add(c);
-                    ChainAlphas.Add(a);
+                    ChainPts.Add(ChainNodes[loopNode]);
+                    ChainCols.Add(loopC);
+                    ChainAlphas.Add(hover >= 0 && loopNode >= hover ? Mathf.Max(a, 1f) : a);
+                    ChainWidths.Add(loopW);
+                    ChainFlow.Add(true); // цикл патруля — бегущие шевроны
                 }
             }
             if (ChainPts.Count >= 2)
-                DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas, ChainWidths, ChainFlow);
 
-            // Маркеры: групповые — один на приказ (в центроиде), индивидуальные — свои;
-            // цели — крестики: текущая погоня — пульсирующий двойной, ждущие — статичные.
+            // Маркеры: групповые — один на приказ (в центроиде, крупнее — √n юнитов),
+            // индивидуальные — свои; форма = вид точки (квадрат/ромб/цикл), цвет —
+            // цвет вида; наведённый — крупнее и ярче + подсказка конвертации хвоста.
+            // Цели — крестики: текущая погоня — пульсирующий двойной, ждущие — статичные.
             for (int i = 0; i < ChainNodes.Count; i++)
             {
                 Unit t = ChainNodeTargets[i];
@@ -1287,13 +1636,36 @@ namespace SupremeNuclear
                         DrawCross(scr, 14f, attackC);
                     continue;
                 }
+                GroundOrderKind kind = NodeKinds[i];
+                WaypointShape shape = ShapeOf(kind);
+                bool hovered = i == hover;
+                // Маркер — БЕЛЫЙ (канон FA: waypoint_color 44/88/ff ffffff), вид
+                // приказа несёт ФОРМА маркера и цвет НОГИ.
                 if (NodeGids[i] != 0)
                 {
                     if (DrawnGidMarkers.Add(NodeGids[i]))
-                        DrawGroupWaypointMarker(cam, ChainNodes[i]);
+                    {
+                        float n = GidPointSums.TryGetValue(NodeGids[i], out Vector4 acc) ? acc.w : 1f;
+                        float sizeMul = Mathf.Min(Mathf.Sqrt(Mathf.Max(n, 1f)), 1.6f);
+                        DrawGroupWaypointMarker(cam, ChainNodes[i], Color.white,
+                            hovered ? 1f : a, shape, hovered ? sizeMul * 1.25f : sizeMul);
+                    }
                 }
                 else
-                    DrawWorldWaypointColored(cam, ChainNodes[i], c, a);
+                {
+                    DrawWorldWaypointColored(cam, ChainNodes[i], Color.white,
+                        hovered ? 1f : a, shape, hovered ? 1.25f : 1f);
+                }
+                // Подсказка конвертации (выделенным): хвост от этой точки можно
+                // замкнуть в патруль — говорим прямо у маркера, как Moho cursor text.
+                if (hovered && a > 0.5f && NodeAbs[i] >= 0 &&
+                    GroundOrders.CanConvertPatrolAt(unit, NodeAbs[i]))
+                {
+                    Vector3 sp = cam.WorldToScreenPoint(ChainNodes[i]);
+                    if (sp.z > 0f)
+                        GUI.Label(new Rect(sp.x + 14f, Screen.height - sp.y - 10f, 320f, 20f),
+                            Loc.Tr("ПКМ — патруль отсюда"), _small);
+                }
             }
         }
 
@@ -1324,7 +1696,7 @@ namespace SupremeNuclear
                 Unit target = EscortTargetsBuf[i];
                 if (target == null || target.disabled)
                     continue;
-                float a = own ? 0.85f : 0.3f;
+                float a = own ? 0.87f : 0.2f;
                 if (!DrawnEscortMarkers.Add(target))
                     continue; // ногу и маркер на цель уже нарисовал первый эскорт
                 Vector3 anchor = new Vector3(unit.transform.position.x, 0f, unit.transform.position.z);
@@ -1337,7 +1709,7 @@ namespace SupremeNuclear
                 ChainCols.Add(c);
                 ChainAlphas.Add(a);
                 DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
-                DrawWorldWaypointColored(cam, TargetGround(target), c, a);
+                DrawWorldWaypointColored(cam, TargetGround(target), Color.white, a); // канон FA
             }
         }
 
@@ -1369,6 +1741,11 @@ namespace SupremeNuclear
                 Unit unit = gUnits[gi];
                 IReadOnlyList<GlobalPosition> queue = gQueues[gi];
                 int qi = gIdx[gi];
+                // Патруль — цикл: центроид групповой точки должен учитывать её у ВСЕХ
+                // членов, независимо от того, кто где в цикле (иначе маркер «уезжал»,
+                // когда один член проходил точку, и возвращался при замыкании).
+                if (GroundOrders.KindOf(unit) == GroundOrderKind.Patrol)
+                    qi = Mathf.Min(qi, GroundOrders.PatrolLoopStartOf(unit));
                 SeenGids.Clear();
                 for (int i = qi; i < queue.Count; i++)
                 {
@@ -1410,12 +1787,16 @@ namespace SupremeNuclear
                     if (BuildTasks.ChainIsIssuedHead(unit))
                         continue;
                     // Смешанная очередь (точки + цели на позициях серии) рисуется
-                    // ЕДИНОЙ лентой через цель — DrawGroundChain. Патруль — цветом
-                    // цикла и с замыкающей ногой (последняя точка → первая).
+                    // ЕДИНОЙ лентой через цель — DrawGroundChain, каждая нога — цвет
+                    // вида своей точки. Патруль — циклом с замыкающей ногой на начало
+                    // хвоста (PatrolLoopStart, конвертация «от точки»).
                     bool patrol = GroundOrders.KindOf(unit) == GroundOrderKind.Patrol;
+                    // Патруль: лента от юнита к ТЕКУЩЕЙ точке, весь цикл — обёрткой
+                    // (внутри DrawGroundChain), замыкание на текущую точку.
                     DrawGroundChain(cam, unit, gQueues[gi], GroundOrders.DrawStartIndex(unit),
                         patrol ? ModeColor(AirOrderMode.Patrol) : routeC,
-                        own ? 0.85f : 0.3f, patrol);
+                        own ? 0.87f : 0.2f,
+                        patrol ? GroundOrders.DrawStartIndex(unit) : -1);
                 }
 
             // Связи сопровождения наземки/флота (v0.97): эскорт-цепочки без точек —
@@ -1467,7 +1848,7 @@ namespace SupremeNuclear
                 bool own = controller.Selection.Selected.Contains(unit);
                 if (!own && !shiftHeld)
                     continue;
-                float a = own ? 0.85f : 0.3f;
+                float a = own ? 0.87f : 0.2f;
                 IReadOnlyList<BuildTasks.SeqEntry> seq = EngSeqs[ei];
                 Vector3 prev = new Vector3(unit.transform.position.x, 0f, unit.transform.position.z);
                 prev.y = GameApi.GroundY(prev.x, prev.z);
@@ -1529,7 +1910,7 @@ namespace SupremeNuclear
                     }
                     else if (sharedMove && !DrawnGroupMoves.Add(gid))
                         continue; // маркер группового движения — один на приказ группы
-                    DrawWorldWaypointColored(cam, pts[i], cols[i], a);
+                    DrawWorldWaypointColored(cam, pts[i], Color.white, a); // канон FA
                 }
                 if (ChainPts.Count >= 2)
                     DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
@@ -1547,7 +1928,7 @@ namespace SupremeNuclear
             RallySeenPts.Clear();
             RallySeenLens.Clear();
             if (selAirbase != null)
-                DrawFactoryRally(cam, selAirbase.transform.position, selAirbase, rallyColor, 0.85f);
+                DrawFactoryRally(cam, selAirbase.transform.position, selAirbase, rallyColor, 0.87f);
             // Недострой-фабрика: ралли площадки видно как у готовой (v0.107).
             if (BuildTasks.IsFactorySite(BuildTasks.SelectedTask))
                 DrawFactoryRally(cam, BuildTasks.SelectedTask.Site.ToLocalPosition(),
@@ -1557,7 +1938,7 @@ namespace SupremeNuclear
                 if (unit == null)
                     continue;
                 if (unit is VehicleDepot depot)
-                    DrawFactoryRally(cam, unit.transform.position, depot, rallyColor, 0.85f);
+                    DrawFactoryRally(cam, unit.transform.position, depot, rallyColor, 0.87f);
                 else if (unit is Building b)
                 {
                     Hangar hangar = b.GetComponent<Hangar>();
@@ -1631,7 +2012,7 @@ namespace SupremeNuclear
                 bool own = controller.Selection.Selected.Contains(unit);
                 if (!own && !shiftHeld)
                     continue;
-                DrawPlanCurve(cam, unit, airPlans[ai], own ? 0.85f : 0.3f);
+                DrawPlanCurve(cam, unit, airPlans[ai], own ? 0.87f : 0.2f);
             }
         }
 
@@ -1646,6 +2027,8 @@ namespace SupremeNuclear
             ChainPts.Clear();
             ChainCols.Clear();
             ChainAlphas.Clear();
+            ChainWidths.Clear();
+            ChainFlow.Clear();
             AirOrderMode runMode = AirOrderMode.Transit;
             bool runOpen = false;
             // Групповое слияние (SupCom-магистраль, зеркально наземке): групповая
@@ -1668,11 +2051,13 @@ namespace SupremeNuclear
                 {
                     if (runOpen)
                     {
-                        DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                        DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas, ChainWidths, ChainFlow);
                         runOpen = false;
                         ChainPts.Clear();
                         ChainCols.Clear();
                         ChainAlphas.Clear();
+                        ChainWidths.Clear();
+                        ChainFlow.Clear();
                     }
                     Vector3 tp = seg.Target.transform.position;
                     Vector3 tgt = new Vector3(tp.x, GameApi.GroundY(tp.x, tp.z), tp.z);
@@ -1709,11 +2094,13 @@ namespace SupremeNuclear
                     // цели (один на цель — дедуп общий с наземными связями).
                     if (runOpen)
                     {
-                        DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                        DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas, ChainWidths, ChainFlow);
                         runOpen = false;
                         ChainPts.Clear();
                         ChainCols.Clear();
                         ChainAlphas.Clear();
+                        ChainWidths.Clear();
+                        ChainFlow.Clear();
                     }
                     Vector3 etp = seg.Target.transform.position;
                     Vector3 etgt = new Vector3(etp.x, GameApi.GroundY(etp.x, etp.z), etp.z);
@@ -1727,7 +2114,7 @@ namespace SupremeNuclear
                         ChainPts.Clear();
                         ChainCols.Clear();
                         ChainAlphas.Clear();
-                        DrawWorldWaypointColored(cam, etgt, c, alpha);
+                        DrawWorldWaypointColored(cam, etgt, Color.white, alpha); // белый — канон FA
                     }
                     anchor = etgt;
                     prevGid = 0;
@@ -1792,8 +2179,16 @@ namespace SupremeNuclear
                             ChainPts.Add(anchor); // нога от конца предыдущего сегмента прогона
                         ChainPts.Add(node);
                         ChainCols.Add(c);
-                        ChainAlphas.Add((i == 0 ? hover >= 0 : hover >= i - 1)
+                        // Hover подсвечивает ХВОСТ от наведённого узла (единая
+                        // семантика с наземкой, v0.114).
+                        ChainAlphas.Add(hover >= 0 && i >= hover
                             ? Mathf.Max(alpha, 1f) : alpha);
+                        // Магистраль группы — толще: √n бортов приказа (кламп настройки).
+                        ChainWidths.Add(gid != 0 && AirGidCentroids.TryGetValue(gid, out Vector4 gc)
+                            ? Mathf.Min(Mathf.Sqrt(Mathf.Max(gc.w, 1f)), Settings.RouteGroupWidthMax)
+                            : 1f);
+                        ChainFlow.Add(seg.Mode == AirOrderMode.AttackMove ||
+                                      seg.Mode == AirOrderMode.Patrol);
                     }
                     else if (ChainPts.Count > 0)
                     {
@@ -1819,12 +2214,19 @@ namespace SupremeNuclear
                         ChainPts.Add(firstNodePos);
                         ChainCols.Add(c);
                         ChainAlphas.Add(alpha);
+                        ChainWidths.Add(firstGid != 0 && AirGidCentroids.TryGetValue(firstGid, out Vector4 fc)
+                            ? Mathf.Min(Mathf.Sqrt(Mathf.Max(fc.w, 1f)), Settings.RouteGroupWidthMax)
+                            : 1f);
+                        ChainFlow.Add(seg.Mode == AirOrderMode.AttackMove ||
+                                      seg.Mode == AirOrderMode.Patrol);
                     }
                 }
                 // Маркеры: групповая точка (groupId≠0) — ОДНА на приказ группы бортов
-                // (в центроиде их формационных точек), индивидуальная — своя.
+                // (в центроиде их формационных точек, крупнее — √n), индивидуальная —
+                // своя; форма = вид сегмента (квадрат/ромб/цикл, v0.114).
                 // Служебные точки — НЕ вейпоинты приказа: маркер не рисуем (единое
                 // правило со сканером — AircraftOrders.IsServicePoint).
+                WaypointShape shape = ShapeOf(seg.Mode);
                 for (int i = 0; i < wps.Count; i++)
                 {
                     int gid = AircraftOrders.GroupIdOf(unit, si, i);
@@ -1836,22 +2238,27 @@ namespace SupremeNuclear
                             continue;
                         if (AirGidCentroids.TryGetValue(gid, out Vector4 acc))
                             DrawWorldWaypointColored(cam,
-                                new Vector3(acc.x / acc.w, acc.y / acc.w, acc.z / acc.w), c, alpha);
+                                new Vector3(acc.x / acc.w, acc.y / acc.w, acc.z / acc.w),
+                                Color.white, alpha, // маркер белый — вид несёт форма (канон FA)
+                                shape,
+                                Mathf.Min(Mathf.Sqrt(Mathf.Max(acc.w, 1f)), 1.6f));
                     }
                     else
-                        DrawWorldWaypointColored(cam, wps[i], c, alpha);
+                        DrawWorldWaypointColored(cam, wps[i], Color.white, alpha, shape);
                 }
                 if (loop)
                 {
-                    DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                    DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas, ChainWidths, ChainFlow);
                     runOpen = false;
                     ChainPts.Clear();
                     ChainCols.Clear();
                     ChainAlphas.Clear();
+                    ChainWidths.Clear();
+                    ChainFlow.Clear();
                 }
             }
             if (runOpen)
-                DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas, ChainWidths, ChainFlow);
         }
 
         // ---------- служебное ----------
@@ -1914,6 +2321,7 @@ namespace SupremeNuclear
             _white = new Texture2D(1, 1);
             _white.SetPixel(0, 0, Color.white);
             _white.Apply();
+            EnsureRibbonTextures();
             _label = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold };
             _small = new GUIStyle(GUI.skin.label) { fontSize = 12 };
             for (int i = 0; i < FanNumbers.Length; i++) // номера целей веера — без аллокаций в OnGUI

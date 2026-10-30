@@ -417,6 +417,16 @@ namespace SupremeNuclear
                     color = friendly ? MissileFriendly : Hostile;
                     sizePx = 6f;
                 }
+                else if (EconomyService.IsSiteMarker(unit))
+                {
+                    // Точка месторождения (v3): свободные «недра» — фича карты, видны
+                    // всегда; масса — жёлтый ромб, уголь — оранжевый.
+                    color = unit.NetworkUniqueName.StartsWith(EconomyService.CoalMarker)
+                        ? new Color(1f, 0.55f, 0.2f)
+                        : Deposit;
+                    diamond = true;
+                    sizePx = 8f;
+                }
                 else if (EconomyService.IsExtractor(unit))
                 {
                     // Ничейные месторождения — фича карты, видны всегда (жёлтый ромб);

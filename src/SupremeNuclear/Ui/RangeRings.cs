@@ -115,14 +115,26 @@ namespace SupremeNuclear
         private static readonly Stack<FineProfile> FinePool = new Stack<FineProfile>();
         private static int _heightsVersion; // растёт с каждой НОВОЙ ячейкой кэша — дальние профили обновляются
 
-        // ВРЕМЕННАЯ диагностика (убрать после разбора «нет голубого кольца ВВ на ЛА»):
-        // раз в 5 с дампим станции первого выделенного самолёта.
-        private static float _nextDiag;
-
         // Кэш сенсорных дальностей (разведка): не ходить по иерархии детекторов 10 раз/с;
         // развёрнутый радар появится с задержкой кэша (2 с).
         private static readonly Dictionary<Unit, Vector2> VisionCache = new Dictionary<Unit, Vector2>();
         private const float VisionCacheSec = 2f;
+
+        /// <summary>Дальность станции для кольца. У РАКЕТ targetRequirements.maxRange —
+        /// НОМИНАЛ требований станции, НЕ предел пуска: ИИ кораблей/наземки берёт цели
+        /// с релаксацией ×100 за горизонт (CombatAI.ChooseHQTarget, только ×0.5 к оценке
+        /// за пределами 1.2×номинала — диагностика 2026-10-30: AGM-48 на корабле
+        /// номинал 10 км, пуски много дальше). Истинной дальности полёта в данных игры
+        /// нет (у ракеты только кинематика: тяга/горение/топливо). Кольцо = оценка
+        /// номинал × коэффициент из настроек; 1 — как в подсказках самой игры.</summary>
+        private static float RangeOf(WeaponInfo wi)
+        {
+            float mr = wi.targetRequirements.maxRange;
+            float k = Settings.RangeRingMissileFactor;
+            if (wi.missile && k > 1f)
+                mr *= k;
+            return mr;
+        }
 
         /// <summary>Сбор кругов 10 Гц (радиусы/классы меняются редко) — из
         /// CommanderHud.Update; позиции юнитов читаются при отрисовке, поэтому
@@ -642,31 +654,6 @@ namespace SupremeNuclear
                 // делала); где рельеф снят — вершины ложатся на местность.
                 float planeY = Datum.LocalSeaY;
 
-                // ВРЕМЕННАЯ диагностика: станции первого выделенного ЛА/корабля (см. поле _nextDiag)
-                if (Time.unscaledTime >= _nextDiag && (unit is Aircraft || unit is Ship) && unit.weaponStations != null)
-                {
-                    _nextDiag = Time.unscaledTime + 5f;
-                    var sb = new System.Text.StringBuilder("RangeRings-диагностика (").Append(unit.name).Append("):");
-                    foreach (WeaponStation st in unit.weaponStations)
-                    {
-                        if (st == null || st.WeaponInfo == null)
-                        {
-                            sb.Append(" [станция/WeaponInfo null]");
-                            continue;
-                        }
-                        var e = st.WeaponInfo.effectiveness;
-                        sb.Append(" [").Append(st.WeaponInfo.shortName ?? st.WeaponInfo.weaponName ?? "?")
-                            .Append(" аВВ=").Append(e.antiAir).Append(" аЗ=").Append(e.antiSurface)
-                            .Append(" дальность=").Append(st.WeaponInfo.targetRequirements.maxRange)
-                            .Append(WeaponGateService.IsAllowed(unit, st) ? "" : " ГЕЙТ-ВЫКЛ")
-                            .Append(']');
-                    }
-                    sb.Append(" || настройки: Атака=").Append(Settings.RangeRingAttack)
-                        .Append(" Воздух=").Append(Settings.RangeRingAir)
-                        .Append(" Оружие=").Append(Settings.RangeRingWeapons);
-                    Log.Info(sb.ToString());
-                }
-
                 if (Settings.RangeRingWeapons)
                 {
                     // Режим «Оружие»: кольца по КЛАССАМ (как кнопки гейтов «Разрешить
@@ -678,7 +665,7 @@ namespace SupremeNuclear
                         {
                             if (st == null || st.WeaponInfo == null || !WeaponGateService.IsAllowed(unit, st))
                                 continue;
-                            float mr = st.WeaponInfo.targetRequirements.maxRange;
+                            float mr = RangeOf(st.WeaponInfo);
                             if (mr < 1f)
                                 continue;
                             switch (Catalog.ClassOf(st.WeaponInfo))
@@ -714,7 +701,7 @@ namespace SupremeNuclear
                         {
                             if (st == null || st.WeaponInfo == null || !WeaponGateService.IsAllowed(unit, st))
                                 continue;
-                            float mr = st.WeaponInfo.targetRequirements.maxRange;
+                            float mr = RangeOf(st.WeaponInfo);
                             if (mr < 1f)
                                 continue;
                             var eff = st.WeaponInfo.effectiveness; // RoleIdentity-структура, не бывает null

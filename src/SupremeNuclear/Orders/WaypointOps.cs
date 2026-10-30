@@ -102,11 +102,14 @@ namespace SupremeNuclear
         }
 
         /// <summary>ПКМ по вейпоинту — превратить в патруль: сегмент плана борта
-        /// становится патрульным циклом, цепочка наземки/флота (≥2 точки) замыкается
-        /// в цикл. Поиск — единым сканом (земля-проекция, служебные точки не
-        /// отдаются); гард «атака/залп/RTB не конвертятся» — внутри конвертаций,
-        /// в одном месте. Конвертация пер-бортовая: у группы приказа сегменты
-        /// асинхронны.</summary>
+        /// становится патрульным циклом, цепочка наземки/флота замыкается в цикл
+        /// ХВОСТОМ от пикнутой точки (канон SupCom: точки до неё проходятся линейно
+        /// один раз, дальше цикл). Групповой вейпоинт конвертируется у ВСЕХ членов
+        /// группы приказа — каждый от своей точки этой группы (как Moho RestartMoveCommandAsPatrol:
+        /// конвертация приказа идёт всем юнитам, получившим его вместе).
+        /// Поиск — единым сканом (земля-проекция, служебные точки не отдаются);
+        /// гард «атака/залп/RTB не конвертятся» — внутри конвертаций, в одном месте.
+        /// Авиация пер-бортовая: у группы приказа сегменты асинхронны.</summary>
         public static bool ConvertToPatrolAt(CommanderModeController controller, Camera cam,
             Vector2 mouse, bool allUnits, out WaypointHit hit)
         {
@@ -114,18 +117,27 @@ namespace SupremeNuclear
             if (hit.Kind == WaypointKind.AirPoint)
                 return AircraftOrders.ConvertToPatrol(hit.Owner, hit.Segment);
             if (hit.Kind == WaypointKind.GroundPoint)
-                return GroundOrders.ConvertToPatrol(hit.Owner);
+            {
+                int gid = GroundOrders.GroupIdOf(hit.Owner, hit.Index);
+                if (gid == 0)
+                    return GroundOrders.ConvertToPatrol(hit.Owner, hit.Index);
+                GroundOrders.CollectGroup(gid, GroupUnits, GroupIdx);
+                bool any = false;
+                for (int m = 0; m < GroupUnits.Count; m++)
+                    any |= GroundOrders.ConvertToPatrol(GroupUnits[m], GroupIdx[m]);
+                return any;
+            }
             return false;
         }
 
         /// <summary>Переместить вейпоинт (одиночный драг/запись): dispatch по kind.
-        /// Сюда же guard площадки «начатая не двигается» (Paid).</summary>
+        /// Сюда же guard площадки «начатая не двигается» (PaidMass).</summary>
         public static void Move(WaypointHit hit, Vector3 world)
         {
             switch (hit.Kind)
             {
                 case WaypointKind.BuildSite:
-                    if (hit.Task != null && hit.Task.Paid <= 0f)
+                    if (hit.Task != null && hit.Task.PaidMass <= 0f)
                         BuildTasks.MoveSite(hit.Task, world);
                     break;
                 case WaypointKind.SequenceMove:

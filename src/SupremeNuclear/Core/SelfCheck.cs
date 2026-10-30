@@ -2,6 +2,8 @@ using System.Collections.Generic;
 using NuclearOption.MissionEditorScripts;
 using NuclearOption.Networking;
 using NuclearOption.SavedMission;
+using NuclearOption.SavedMission.Objectives;
+using NuclearOption.SavedMission.Outcomes;
 using UnityEngine;
 
 namespace SupremeNuclear
@@ -262,6 +264,48 @@ namespace SupremeNuclear
                     throw new System.Exception("WeaponStation.LastFiredTime не найден (блок Ready)");
                 if (HarmonyLib.AccessTools.Method(typeof(Turret), "GetWeaponStation") == null)
                     throw new System.Exception("Turret.GetWeaponStation не найден (гейт турели)");
+            });
+            Check("Генератор сценариев (Mission/objectives/SaveLoad)", () =>
+            {
+                var probe = new NuclearOption.SavedMission.Mission("SN-probe", skipAfterLoad: true);
+                if (probe.objectives == null || probe.outcomes == null || probe.objectives.Count == 0)
+                    throw new System.Exception("Mission-конструктор не создал objectives/outcomes");
+                var obj = NuclearOption.SavedMission.SavedObjective.CreateSavedObjective(
+                    ObjectiveType.CaptureAirbase, "SN-probe-cap");
+                if (!(obj is CaptureAirbaseSavedObjective cap) || cap.targetAirbases == null)
+                    throw new System.Exception("CaptureAirbaseSavedObjective не создан");
+                var outcome = NuclearOption.SavedMission.SavedOutcome.CreateSaved(
+                    OutcomeType.EndGame, "SN-probe-end");
+                if (!(outcome is EndGameSavedOutcome end) ||
+                    !System.Enum.IsDefined(typeof(EndType), end.endType))
+                    throw new System.Exception("EndGameSavedOutcome не создан");
+                if (string.IsNullOrEmpty(MissionTag.SinglePlayer.Tag))
+                    throw new System.Exception("MissionTag.SinglePlayer пуст");
+            });
+            Check("Спец-карты (MapSettings/MapLoader/BattlefieldGrid)", () =>
+            {
+                foreach (string field in new[] { "NetworkMap", "MapSize", "TerrainColorMap",
+                     "OceanBasecolor", "OceanDepthmap", "MapImage", "CameraPositionRotation",
+                     "RoadNetwork", "SeaLanes" })
+                    if (HarmonyLib.AccessTools.Field(typeof(MapSettings), field) == null)
+                        throw new System.Exception("MapSettings." + field + " не найден (спец-карты)");
+                foreach (string field in new[] { "Maps", "DefaultMap" })
+                    if (HarmonyLib.AccessTools.Field(typeof(NuclearOption.SceneLoading.MapLoader), field) == null)
+                        throw new System.Exception("MapLoader." + field + " не найден (регистрация спец-карт)");
+                if (HarmonyLib.AccessTools.Method(typeof(BattlefieldGrid), "GenerateGrid") == null)
+                    throw new System.Exception("BattlefieldGrid.GenerateGrid не найден (размер спец-карты)");
+                if (HarmonyLib.AccessTools.Field(typeof(FactionRegistry), "HQLookup") == null)
+                    throw new System.Exception("FactionRegistry.HQLookup не найден (спавн HQ)");
+                // AI-командир (v1): фракция без игроков = HQ с пустым factionPlayers.
+                if (HarmonyLib.AccessTools.Field(typeof(FactionHQ), "factionPlayers") == null)
+                    throw new System.Exception("FactionHQ.factionPlayers не найден (распознавание AI-фракций)");
+                // Месторождения v3: скрытие маркера-«недр» застройкой (сетевой despawn
+                // без обломка) и смена владельца постройки при инженерном захвате.
+                if (HarmonyLib.AccessTools.Method(typeof(Unit), nameof(Unit.DisableUnit)) == null)
+                    throw new System.Exception("Unit.DisableUnit не найден (скрытие маркера точки)");
+                if (HarmonyLib.AccessTools.Field(typeof(Unit), "NetworkHQ") == null &&
+                    HarmonyLib.AccessTools.Property(typeof(Unit), "NetworkHQ") == null)
+                    throw new System.Exception("Unit.NetworkHQ не найден (инженерный захват)");
             });
             Log.Info("SelfCheck(startup): " + (Failures.Count == 0 ? "все проверки пройдены" : "ПРОВАЛОВ: " + Failures.Count));
         }

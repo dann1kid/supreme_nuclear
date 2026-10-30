@@ -28,7 +28,11 @@ namespace SupremeNuclear
     /// <summary>Цепочки вейпоинтов для наземки/флота: SetDestination выдаёт следующую точку,
     /// когда юнит доехал до текущей (90 м). Все точки — GlobalPosition (origin-proof).
     /// AttackMove — со стоп-энд-файр; Attack — преследование цели без цепочки.
-    /// Смешанные Shift-серии исполняются В ПОРЯДКЕ КЛИКОВ (точка → цель → точка),
+    /// Вид приказа несёт КАЖДАЯ ТОЧКА (PointKinds, канон SupCom/Moho v0.114):
+    /// смешанная Shift-серия «движение + атака-движение» в одной ленте легальна,
+    /// Kind линейной цепочки = вид текущей точки; конвертация в патруль замыкает
+    /// ХВОСТ от пикнутой точки (PatrolLoopStart).
+    /// Смешанные Shift-серии с целями исполняются В ПОРЯДКЕ КЛИКОВ (точка → цель → точка),
     /// как планы авиации: каждая цель несёт позицию серии (TargetAfter — сколько
     /// точек стояло в очереди на момент клика), дозревшая атака поднимается
     /// промоушеном, после её смерти маршрут продолжается с места промоушена.
@@ -50,6 +54,17 @@ namespace SupremeNuclear
             public readonly List<GlobalPosition> Points = new List<GlobalPosition>();
             /// <summary>Группа приказа каждой точки, параллельно Points (0 — индивидуальная).</summary>
             public readonly List<int> PointGroups = new List<int>();
+            /// <summary>Вид КАЖДОЙ точки (Move/AttackMove/Patrol), параллельно Points —
+            /// как у Moho: каждая точка очереди несёт свой тип приказа, смешанные
+            /// Shift-серии «движение + атака-движение» в одной ленте легальны
+            /// (канон SupCom, подтверждён исходниками OpenSupCom 2026-10-30).
+            /// Инвариант: Kind линейной цепочки = вид ТЕКУЩЕЙ точки (синхронизируется
+            /// при продвижении/удалениях через SyncLinearKind).</summary>
+            public readonly List<GroundOrderKind> PointKinds = new List<GroundOrderKind>();
+            /// <summary>Патруль: индекс точки, с которой начинается цикл (конвертация
+            /// «хвостом от точки» замыкает в цикл точки [LoopStart..end); 0 — цикл
+            /// всех точек, как у патруля, выданного целиком).</summary>
+            public int PatrolLoopStart;
             /// <summary>Очередь целей атаки (Shift+ПКМ по целям): в атакующей цепочке
             /// [0] — текущая (Target). Каждая цель стоит на СВОЕЙ позиции серии:
             /// TargetAfter[i] — сколько точек было в очереди на момент клика цели
@@ -112,9 +127,11 @@ namespace SupremeNuclear
         public static void Set(Unit unit, GlobalPosition destination, bool attackMove, int groupId)
         {
             Version++;
-            var ch = new Chain { Kind = attackMove ? GroundOrderKind.AttackMove : GroundOrderKind.Move };
+            GroundOrderKind kind = attackMove ? GroundOrderKind.AttackMove : GroundOrderKind.Move;
+            var ch = new Chain { Kind = kind };
             ch.Points.Add(destination);
             ch.PointGroups.Add(groupId);
+            ch.PointKinds.Add(kind);
             Chains[unit] = ch;
             unit.GetComponent<UnitCommand>()?.SetDestination(destination, playerCommand: true);
         }
@@ -212,8 +229,14 @@ namespace SupremeNuclear
                 Set(unit, destination, attackMove, groupId);
                 return;
             }
+            // Вид несёт каждая точка (канон SupCom): флаг attackMove больше НЕ
+            // теряется — смешанная серия «движение + атака-движение» рисуется
+            // ногами своего цвета и исполняется stop-and-fire только на своих ногах.
             ch.Points.Add(destination);
             ch.PointGroups.Add(groupId);
+            ch.PointKinds.Add(ch.Kind == GroundOrderKind.Patrol
+                ? GroundOrderKind.Patrol
+                : attackMove ? GroundOrderKind.AttackMove : GroundOrderKind.Move);
         }
 
         /// <summary>Патруль наземки/флота: цикл точек (последняя замыкается на первую).
@@ -224,6 +247,7 @@ namespace SupremeNuclear
             var ch = new Chain { Kind = GroundOrderKind.Patrol };
             ch.Points.Add(destination);
             ch.PointGroups.Add(groupId);
+            ch.PointKinds.Add(GroundOrderKind.Patrol);
             Chains[unit] = ch;
             unit.GetComponent<UnitCommand>()?.SetDestination(destination, playerCommand: true);
         }
@@ -237,45 +261,78 @@ namespace SupremeNuclear
                 Version++;
                 ch.Points.Add(destination);
                 ch.PointGroups.Add(groupId);
+                ch.PointKinds.Add(GroundOrderKind.Patrol);
                 return;
             }
             SetPatrol(unit, destination, groupId);
         }
 
-        /// <summary>ПКМ по вейпоинту цепочки: маршрут замыкается в патрульный цикл.
-        /// Атака (погоня) не конвертится; меньше двух точек замыкать нечего.</summary>
-        public static bool ConvertToPatrol(Unit unit)
+        /// <summary>Можно ли замкнуть патрульный цикл с точки fromIndex: линейная
+        /// цепочка (движение/атака-движение), точка не последняя (циклу нужно ≥2
+        /// точек) и в очереди нет ждущих целей серии (как Moho: конвертация только
+        /// чисто-движительной очереди). Чистая — тестируется.</summary>
+        public static bool CanClosePatrol(GroundOrderKind kind, int pointCount, int fromIndex,
+            int waitingTargets) =>
+            (kind == GroundOrderKind.Move || kind == GroundOrderKind.AttackMove) &&
+            fromIndex >= 0 && fromIndex < pointCount - 1 && waitingTargets == 0;
+
+        /// <summary>ПКМ по вейпоинту цепочки: ХВОСТ от точки fromIndex замыкается в
+        /// патрульный цикл (канон SupCom/Moho RestartMoveCommandAsPatrol: конвертация
+        /// «от пикнутой точки до конца», не вся цепочка). Точки до fromIndex
+        /// проходятся линейно один раз; дальше цикл [fromIndex..end). Групповой
+        /// вейпоинт конвертируется у всех членов группы приказа — каждый от СВОЕЙ
+        /// точки этой группы (фан-аут в WaypointOps).</summary>
+        public static bool ConvertToPatrol(Unit unit, int fromIndex)
         {
             if (!Chains.TryGetValue(unit, out Chain ch) ||
-                ch.Kind == GroundOrderKind.Attack || ch.Kind == GroundOrderKind.Patrol ||
-                ch.Points.Count < 2)
+                !CanClosePatrol(ch.Kind, ch.Points.Count, fromIndex, ch.TargetQueue.Count))
                 return false;
             Version++;
             ch.Kind = GroundOrderKind.Patrol;
+            ch.PatrolLoopStart = fromIndex;
+            // Точки хвоста СТАНОВЯТСЯ патрульными и по виду (KindOfPoint): иначе
+            // IMGUI-фолбэк красил цикл цветами движения/атаки и менял формы маркеров.
+            for (int i = fromIndex; i < ch.PointKinds.Count; i++)
+                ch.PointKinds[i] = GroundOrderKind.Patrol;
+            // Патруль дерётся как атака-движение: снять возможный стоп прошлой ноги.
+            ch.Holding = false;
+            if (ch.Index < ch.Points.Count)
+                unit.GetComponent<UnitCommand>()?.SetDestination(ch.Points[ch.Index], playerCommand: true);
             return true;
+        }
+
+        /// <summary>Можно ли замкнуть патруль с точки index цепочки юнита (подсказка
+        /// hover в HUD: рисуем «ПКМ — патруль отсюда», только если действие реально).</summary>
+        public static bool CanConvertPatrolAt(Unit unit, int index)
+        {
+            return Chains.TryGetValue(unit, out Chain ch) &&
+                   index >= ch.Index && index < ch.Points.Count &&
+                   CanClosePatrol(ch.Kind, ch.Points.Count, index, ch.TargetQueue.Count);
         }
 
         /// <summary>Снимок патрульной цепочки (авто-достройка снимает патруль на время
         /// стройки и возвращает после). true — юнит в живом патрульном цикле.</summary>
         public static bool TryGetPatrolSnapshot(Unit unit, List<GlobalPosition> points,
-            List<int> groups, out int index)
+            List<int> groups, out int index, out int loopStart)
         {
             points.Clear();
             groups.Clear();
             index = 0;
+            loopStart = 0;
             if (!Chains.TryGetValue(unit, out Chain ch) ||
                 ch.Kind != GroundOrderKind.Patrol || ch.Points.Count == 0)
                 return false;
             points.AddRange(ch.Points);
             groups.AddRange(ch.PointGroups);
             index = ch.Index;
+            loopStart = ch.PatrolLoopStart;
             return true;
         }
 
         /// <summary>Вернуть снятый патруль (восстановление после авто-достройки):
         /// цикл ставится на сохранённую точку маршрута.</summary>
         public static void RestorePatrol(Unit unit, IReadOnlyList<GlobalPosition> points,
-            IReadOnlyList<int> groups, int index)
+            IReadOnlyList<int> groups, int index, int loopStart = 0)
         {
             if (points == null || points.Count == 0)
                 return;
@@ -283,11 +340,14 @@ namespace SupremeNuclear
             var ch = new Chain
             {
                 Kind = GroundOrderKind.Patrol,
-                Index = Mathf.Clamp(index, 0, points.Count - 1)
+                Index = Mathf.Clamp(index, 0, points.Count - 1),
+                PatrolLoopStart = Mathf.Clamp(loopStart, 0, points.Count - 1)
             };
             ch.Points.AddRange(points);
             if (groups != null)
                 ch.PointGroups.AddRange(groups);
+            for (int i = 0; i < points.Count; i++)
+                ch.PointKinds.Add(GroundOrderKind.Patrol);
             Chains[unit] = ch;
             unit.GetComponent<UnitCommand>()?.SetDestination(ch.Points[ch.Index], playerCommand: true);
         }
@@ -558,6 +618,7 @@ namespace SupremeNuclear
             Version++;
             Chains.Clear();
             EscortTrails.Clear();
+            EngageRanges.Clear();
         }
 
         public static void Tick()
@@ -607,7 +668,10 @@ namespace SupremeNuclear
 
                 ch.Index++;
                 if (ch.Kind == GroundOrderKind.Patrol && ch.Index >= ch.Points.Count)
-                    ch.Index = 0; // цикл: последняя точка замыкается на первую
+                    // цикл: последняя точка хвоста замыкается на его начало; кламп —
+                    // удалениями точек начало могло выпасть за границу (пустой хвост)
+                    ch.Index = Mathf.Clamp(ch.PatrolLoopStart, 0, ch.Points.Count - 1);
+                SyncLinearKind(ch); // per-point вид: на новой точке — свои правила (stop-and-fire)
                 if (ch.Index < ch.Points.Count)
                     unit.GetComponent<UnitCommand>()?.SetDestination(ch.Points[ch.Index], playerCommand: true);
                 // цепочка пройдена: очередь ОСТАЁТСЯ (для отрисовки), тик её больше не трогает
@@ -715,8 +779,11 @@ namespace SupremeNuclear
                 if (ch.Index < ch.Points.Count)
                 {
                     // Атака на своей позиции серии закончилась — маршрут продолжается
-                    // (точки, кликнутые ПОСЛЕ цели в Shift-серии).
-                    ch.Kind = ch.ResumeKind;
+                    // (точки, кликнутые ПОСЛЕ цели в Shift-серии) с видом ТОЧКИ,
+                    // на которую вернулись (per-point: нога могла стать атакой-движением).
+                    ch.Kind = ch.ResumeKind == GroundOrderKind.Escort
+                        ? ch.ResumeKind
+                        : LinearKindAt(ch, ch.Index);
                     ch.Target = null;
                     ch.Holding = false;
                     unit.GetComponent<UnitCommand>()?.SetDestination(ch.Points[ch.Index], playerCommand: true);
@@ -797,12 +864,44 @@ namespace SupremeNuclear
         /// <summary>Дальность ПРИГОДНОГО для цели вооружения: максимум дальности станций,
         /// которые могут бить ЭТУ цель (нативный fit-чек CalcOpportunityThreat), а не
         /// любой станции — иначе ПВО-ракеты (землю не бьющие) отгоняли корабль от берега,
-        /// который он и должен был обстрелять AGM.</summary>
+        /// который он и должен был обстрелять AGM.
+        /// Кэш по (юнит → ТИП цели) с чексуммой «у каких станций есть боезапас»
+        /// (§12-45ж, v0.113): раньше fit-чек гонялся на КАЖДОГО кандидата в скане
+        /// 0.5 с, а зависит он только от пары (станции юнита, тип цели) —
+        /// расстрел/перевооружение меняет чексумму и чистит кэш.</summary>
+        private sealed class EngageRangeCache
+        {
+            public int Checksum = int.MinValue;
+            public readonly Dictionary<UnitDefinition, float> Ranges =
+                new Dictionary<UnitDefinition, float>();
+        }
+
+        private static readonly Dictionary<Unit, EngageRangeCache> EngageRanges =
+            new Dictionary<Unit, EngageRangeCache>();
+
+        private static int StationsChecksum(Unit unit)
+        {
+            int sum = 17;
+            foreach (WeaponStation st in unit.weaponStations)
+                sum = sum * 31 + (st == null || st.Ammo <= 0 ? 0 : 1);
+            return sum;
+        }
+
         private static float EngageRange(Unit unit, Unit target)
         {
-            float r = 0f;
             if (target == null || target.definition == null)
                 return 0f;
+            if (!EngageRanges.TryGetValue(unit, out EngageRangeCache cache))
+                EngageRanges[unit] = cache = new EngageRangeCache();
+            int checksum = StationsChecksum(unit);
+            if (checksum != cache.Checksum)
+            {
+                cache.Checksum = checksum;
+                cache.Ranges.Clear();
+            }
+            else if (cache.Ranges.TryGetValue(target.definition, out float cached))
+                return cached;
+            float r = 0f;
             foreach (WeaponStation st in unit.weaponStations)
             {
                 if (st == null || st.Cargo || st.WeaponInfo == null || st.Ammo <= 0)
@@ -811,6 +910,7 @@ namespace SupremeNuclear
                     continue; // этим оружием цель не бьётся
                 r = Mathf.Max(r, st.WeaponInfo.targetRequirements.maxRange);
             }
+            cache.Ranges[target.definition] = r;
             return r;
         }
 
@@ -848,20 +948,27 @@ namespace SupremeNuclear
         }
 
         /// <summary>Ядро удаления точки (общее для одиночного и группового удаления):
-        /// снос точки, сдвиг позиций серий целей (TargetAfter), корректировка
-        /// курсора — при удалении точки ДО текущей он сдвигается, при удалении
-        /// текущей остаётся, указывая на следующую. Чистая — тестируется.</summary>
+        /// снос точки (со своим видом), сдвиг позиций серий целей (TargetAfter),
+        /// корректировка курсора — при удалении точки ДО текущей он сдвигается, при
+        /// удалении текущей остаётся, указывая на следующую. Kind линейной цепочки
+        /// пересинхронизируется на вид новой текущей точки. Чистая — тестируется.</summary>
         public static void RemoveAtCore(Chain ch, int index)
         {
             if (index < 0 || index >= ch.Points.Count)
                 return;
             ch.Points.RemoveAt(index);
             ch.PointGroups.RemoveAt(index);
+            if (index < ch.PointKinds.Count)
+                ch.PointKinds.RemoveAt(index);
             for (int t = 0; t < ch.TargetAfter.Count; t++)
                 if (ch.TargetAfter[t] > index)
                     ch.TargetAfter[t]--;
             if (index < ch.Index)
                 ch.Index--;
+            // Патрульный хвост не выпал из цикла — начало цикла сдвигается вместе с очередью.
+            if (ch.PatrolLoopStart > index)
+                ch.PatrolLoopStart--;
+            SyncLinearKind(ch);
         }
 
         /// <summary>Удалить точку цепочки (Ctrl+Shift+ПКМ). Единые с групповым
@@ -935,6 +1042,37 @@ namespace SupremeNuclear
                    index >= 0 && index < ch.PointGroups.Count ? ch.PointGroups[index] : 0;
         }
 
+        /// <summary>Вид точки очереди (Move/AttackMove/Patrol) — отрисовка красит
+        /// ногу цветом ВХОДА в точку (канон SupCom: attack-move нога красная).
+        /// Точки нет — вид текущей цепочки.</summary>
+        public static GroundOrderKind KindOfPoint(Unit unit, int index)
+        {
+            if (!Chains.TryGetValue(unit, out Chain ch))
+                return GroundOrderKind.Move;
+            return index >= 0 && index < ch.PointKinds.Count ? ch.PointKinds[index] : ch.Kind;
+        }
+
+        /// <summary>Индекс начала патрульного цикла (замыкающая нога рисуется на него;
+        /// 0 — цикл всех точек).</summary>
+        public static int PatrolLoopStartOf(Unit unit) =>
+            Chains.TryGetValue(unit, out Chain ch) && ch.Kind == GroundOrderKind.Patrol
+                ? ch.PatrolLoopStart
+                : 0;
+
+        /// <summary>Вид линейной цепочки на точке index: у точки свой вид, нет точки —
+        /// Move. Чистая — тестируется.</summary>
+        public static GroundOrderKind LinearKindAt(Chain ch, int index) =>
+            index >= 0 && index < ch.PointKinds.Count ? ch.PointKinds[index] : GroundOrderKind.Move;
+
+        /// <summary>Инвариант per-point вида: Kind линейной цепочки = вид ТЕКУЩЕЙ
+        /// точки (патруль/атака/эскорт не трогаем — их Kind несёт сама цепочка).</summary>
+        private static void SyncLinearKind(Chain ch)
+        {
+            if (ch.Kind != GroundOrderKind.Move && ch.Kind != GroundOrderKind.AttackMove)
+                return;
+            ch.Kind = LinearKindAt(ch, ch.Index);
+        }
+
         /// <summary>Члены группового приказа среди ОСТАВШИХСЯ точек всех цепочек:
         /// для каждой цепочки с точкой groupId — юнит и её индекс (индексы у каждого свои).</summary>
         public static void CollectGroup(int groupId, List<Unit> units, List<int> indices)
@@ -948,7 +1086,10 @@ namespace SupremeNuclear
                 if (kv.Key == null || kv.Key.disabled)
                     continue;
                 Chain ch = kv.Value;
-                for (int i = ch.Index; i < ch.PointGroups.Count; i++)
+                int from = ch.Kind == GroundOrderKind.Patrol
+                    ? Mathf.Min(ch.Index, ch.PatrolLoopStart) // цикл: все точки живы
+                    : ch.Index;
+                for (int i = from; i < ch.PointGroups.Count; i++)
                     if (ch.PointGroups[i] == groupId)
                     {
                         units.Add(kv.Key);
@@ -1014,12 +1155,14 @@ namespace SupremeNuclear
                 // срезаем точки между текущей и выжившей (индивидуальные вклинивания)
                 ch.Points.RemoveRange(ch.Index, keep - ch.Index);
                 ch.PointGroups.RemoveRange(ch.Index, keep - ch.Index);
+                ch.PointKinds.RemoveRange(ch.Index, keep - ch.Index);
             }
             if (ch.Points.Count > ch.Index + 1)
             {
                 int tail = ch.Points.Count - ch.Index - 1;
                 ch.Points.RemoveRange(ch.Index + 1, tail);
                 ch.PointGroups.RemoveRange(ch.Index + 1, tail);
+                ch.PointKinds.RemoveRange(ch.Index + 1, tail);
             }
             ch.Holding = false; // stop-and-fire атакы-движения снимается на новый вектор
             unit.GetComponent<UnitCommand>()?.SetDestination(ch.Points[ch.Index], playerCommand: true);
@@ -1065,6 +1208,14 @@ namespace SupremeNuclear
             if (dead != null)
                 foreach (Unit unit in dead)
                     Clear(unit);
+            // Кэш дальностей оружия мёртвых юнитов (Unity fake-null)
+            List<Unit> deadEngage = null;
+            foreach (Unit unit in EngageRanges.Keys)
+                if (unit == null || unit.disabled)
+                    (deadEngage ??= new List<Unit>()).Add(unit);
+            if (deadEngage != null)
+                foreach (Unit unit in deadEngage)
+                    EngageRanges.Remove(unit);
             PruneEscortTrails();
         }
     }

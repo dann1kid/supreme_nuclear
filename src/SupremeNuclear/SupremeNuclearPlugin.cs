@@ -35,6 +35,9 @@ namespace SupremeNuclear
                 // умершей сцены, сбрасываем здесь (см. ARCHITECTURE §4).
                 GameApi.ResetSceneCache();
                 EconomyService.Reset();
+                SalvageService.Reset(); // прогресс разбора обломков привязан к сцене
+                CaptureService.Reset(); // прогресс инженерного захвата привязан к сцене
+                AiCommanderService.Reset(); // планы AI-фракций привязаны к юнитам сцены
                 BuildTasks.Reset();
                 BuildGhosts.Reset();
                 ProductionTasks.Reset();

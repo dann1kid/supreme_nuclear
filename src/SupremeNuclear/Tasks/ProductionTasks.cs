@@ -29,13 +29,16 @@ namespace SupremeNuclear
             public Loadout Loadout;             // лодаут авиазаказа (null = «Стандарт») — запечён при постановке
             public float Fuel = 1f;             // уровень топлива заказа (FuelRatio пресета)
             public float Cost;
-            public float Paid;
+            public float PaidMass;   // налито массы (factionFunds)
+            public float PaidEnergy; // налито энергии (сток EconomyService)
+            /// <summary>Полная энергопотребность позиции = стоимость × фактор профиля.</summary>
+            public float EnergyCost => Cost * EconomyService.EnergyCostFactor;
             public object Factory => Depot != null ? (object)Depot
                 : Hangar != null ? (object)Hangar
                 : Dock != null ? (object)Dock : (object)Site;
             public UnitDefinition UnitDef => (UnitDefinition)GroundDef
                 ?? (UnitDefinition)AirDef ?? NavalDef;
-            public float Progress01 => Cost > 0f ? Mathf.Clamp01(Paid / Cost) : 0f;
+            public float Progress01 => Cost > 0f ? Mathf.Clamp01(PaidMass / Cost) : 0f;
         }
 
         private sealed class FactoryState
@@ -570,8 +573,19 @@ namespace SupremeNuclear
             if (!IsHost || item == null || !Queue.Remove(item))
                 return;
             Version++;
-            if (item.Paid > 0f)
-                FactionOf(item)?.AddFunds(item.Paid);
+            Refund(item);
+        }
+
+        /// <summary>Возврат уплаченного позицией: масса — в фонд, энергия — в сток.</summary>
+        private static void Refund(QueueItem item)
+        {
+            if (item.PaidMass <= 0f && item.PaidEnergy <= 0f)
+                return;
+            FactionHQ hq = FactionOf(item);
+            if (hq == null)
+                return;
+            hq.AddFunds(item.PaidMass);
+            EconomyService.Refund(hq, item.PaidEnergy);
         }
 
         /// <summary>Добавить count копий позиции СРАЗУ после якоря — визуально в тот же
@@ -615,8 +629,7 @@ namespace SupremeNuclear
                     continue;
                 Queue.RemoveAt(i);
                 Version++;
-                if (item.Paid > 0f)
-                    FactionOf(item)?.AddFunds(item.Paid);
+                Refund(item);
                 count--;
             }
         }
@@ -1062,7 +1075,7 @@ namespace SupremeNuclear
                             (item.Dock != null && item.Dock.disabled);
                 if (dead)
                 {
-                    hq?.AddFunds(item.Paid); // фабрика умерла — возврат
+                    Refund(item); // фабрика умерла — возврат
                     Queue.RemoveAt(i);
                     Version++;
                     continue;
@@ -1076,7 +1089,7 @@ namespace SupremeNuclear
                 {
                     if (!BuildTasks.IsActive(item.Site))
                     {
-                        hq?.AddFunds(item.Paid);
+                        Refund(item);
                         Queue.RemoveAt(i);
                         Version++;
                         DropSiteState(item.Site);
@@ -1108,15 +1121,17 @@ namespace SupremeNuclear
                         ? Settings.NavalProductionSecondsPerItem
                         : Settings.ProductionSecondsPerItem;
                     float rate = item.Cost / Mathf.Max(1f, seconds);
-                    float pay = Mathf.Min(rate * dt, item.Cost - item.Paid, hq.factionFunds);
-                    if (pay > 0f)
-                    {
-                        item.Paid += pay;
-                        hq.AddFunds(-pay);
-                    }
+                    float massWant = Mathf.Min(rate * dt, item.Cost - item.PaidMass);
+                    // Налив двух валют: дефицит энергии режет массу пропорционально
+                    // (EconomyService.Drain → EcoFlow.DrainStep, DESIGN §2.2).
+                    EcoFlow.Paid paid = EconomyService.Drain(
+                        hq, massWant, massWant * EconomyService.EnergyCostFactor);
+                    item.PaidMass += paid.Mass;
+                    item.PaidEnergy += paid.Energy;
                 }
 
-                if (item.Paid >= item.Cost - 0.01f && !state.Paused)
+                if (item.PaidMass >= item.Cost - 0.01f &&
+                    item.PaidEnergy >= item.EnergyCost - 0.01f && !state.Paused)
                 {
                     bool spawned = false;
                     Ship launched = null;

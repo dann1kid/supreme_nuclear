@@ -44,14 +44,19 @@ namespace SupremeNuclear
         public static float StaleContactSec = 30f;      // сколько секунд показывать врага без контакта
         public static float SelectionRingMinPx = 12f;   // минимальный радиус кольца выделения, px
         public static float RouteRibbonWidthM = 40f;
-        public static bool RouteUseMesh = false;    // экспериментальный меш-рендер лент (фолбэк — IMGUI)
+        public static bool RouteUseMesh = true;     // ленты мировым мешом (порт command_graph_renderer FA: UV вдоль пути, текстуры, анимация) — фолбэк IMGUI
         public static bool RouteDebugQuad = false;  // отладочная рамка 2 км над центром карты
-        public static float RouteSampleStepM = 200f;        // шаг сэмплирования рельефа вдоль пути, м
-        public static float RouteCornerRadiusM = 120f;      // радиус скругления углов ленты у вейпоинта, м
+        public static float RouteSampleStepM = 200f;        // шаг сэмплирования рельефа и сегментов Эрмит-кривых ленты, м
+        public static float RouteGroupWidthMax = 3f;   // макс. толщина групповой магистрали, × от одиночной (√n юнитов приказа; канон SupCom)
 
         // Экономика v1
         public static bool EconomyEnabled = true;
         public static string EconomyProfile = "default";
+
+        // Генератор сценариев (MapGen): дуэльные раскладки на стоковых картах
+        public static KeyCode MapGenKey = KeyCode.G;   // в редакторе миссий: Ctrl+G
+        public static string MapGenTemplate = "duel";
+        public static int MapGenSeed = 0;              // 0 — случайный каждый запуск
 
         // Выделение
         public static float BoxDragThresholdPx = 8f;
@@ -91,6 +96,7 @@ namespace SupremeNuclear
         public static float AirbaseServiceSeconds = 20f;  // время перевооружения/заправки на земле, с
         public static int AirbaseLaunchSlots = 1;         // самолётов одновременно в выкате с аэродрома
         public static float AirbaseRearmCost = 150f;      // цена обслуживания вылета
+        public static float AirbaseRearmDamageFactor = 0.25f; // доля ценности борта за полный ремонт
 
         // Стройка (Task-API v1)
         public static float BuildSecondsPerBuilder = 20f; // время постройки одним инженером, с
@@ -229,16 +235,23 @@ namespace SupremeNuclear
             IconSizePx = config.Bind("Icons", "IconSizePx", 18f, Loc.Tr("Базовый размер иконки при 1440p, px")).Value;
             IconMaxUnits = config.Bind("Icons", "IconMaxUnits", 500).Value;
             RouteDebugQuad = config.Bind("Routes", "RouteDebugQuad", false, Loc.Tr("Отладочная рамка 2 км над центром карты")).Value;
-            RouteUseMesh = config.Bind("Routes", "RouteUseMesh", false, Loc.Tr("Рисовать ленты мировым мешом (эксперимент)")).Value;
+            RouteUseMesh = config.Bind("Routes", "RouteUseMesh", true, Loc.Tr("Ленты маршрутов мировым мешом (текстурные, как в SupCom); выкл — экранный вариант")).Value;
             RouteRibbonWidthM = config.Bind("Routes", "RouteLegWidthM", 40f, Loc.Tr("Ширина ленты маршрута на земле, м")).Value;
-            RouteSampleStepM = config.Bind("Routes", "RouteSampleStepM", 200f, Loc.Tr("Шаг сэмплирования рельефа вдоль маршрута, м")).Value;
-            RouteCornerRadiusM = config.Bind("Routes", "RouteCornerRadiusM", 120f, Loc.Tr("Радиус скругления углов ленты маршрута у вейпоинта, м")).Value;
+            RouteSampleStepM = config.Bind("Routes", "RouteSampleStepM", 200f, Loc.Tr("Шаг сэмплирования рельефа и сегментов Эрмит-кривых ленты маршрута, м")).Value;
+            RouteGroupWidthMax = config.Bind("Routes", "RouteGroupWidthMax", 3f, Loc.Tr("Максимальная толщина групповой ленты маршрута, × от одиночной (растёт как корень из числа юнитов приказа)")).Value;
             StaleContactSec = config.Bind("Icons", "StaleContactSec", 30f,
                 Loc.Tr("Сколько секунд показывать вражеский контакт без обновления разведки, с")).Value;
 
             EconomyEnabled = config.Bind("Economy", "Enabled", true, Loc.Tr("Включить экономику v1 (месторождения + экстракторы)")).Value;
             EconomyProfile = config.Bind("Economy", "Profile", "default",
                 Loc.Tr("Имя JSON-профиля в BepInEx/plugins/SupremeNuclear/Economy/")).Value;
+
+            MapGenKey = config.Bind("MapGen", "Key", KeyCode.G,
+                Loc.Tr("Клавиша генерации сценария в редакторе миссий (Ctrl + клавиша)")).Value;
+            MapGenTemplate = config.Bind("MapGen", "Template", "duel",
+                Loc.Tr("Шаблон сценария (JSON в BepInEx/plugins/SupremeNuclear/MapGen/)")).Value;
+            MapGenSeed = config.Bind("MapGen", "Seed", 0,
+                Loc.Tr("Сид генерации (0 — случайный каждый запуск; один сид = одна и та же раскладка)")).Value;
 
             BoxDragThresholdPx = config.Bind("Selection", "BoxDragThresholdPx", 8f).Value;
             DoubleClickSec = config.Bind("Selection", "DoubleClickSec", 0.35f).Value;
@@ -298,6 +311,8 @@ namespace SupremeNuclear
                     new AcceptableValueRange<int>(1, 4))).Value;
             AirbaseRearmCost = config.Bind("Orders", "AirbaseRearmCost", 150f,
                 Loc.Tr("Цена обслуживания вылета (перевооружение + заправка; интерим до логистики)")).Value;
+            AirbaseRearmDamageFactor = config.Bind("Orders", "AirbaseRearmDamageFactor", 0.25f,
+                Loc.Tr("Наценка за ремонт при обслуживании: доля ценности борта за восстановление с нуля (DESIGN §3-10)")).Value;
 
             BuildDefaultCost = config.Bind("Build", "DefaultCost", 250f,
                 Loc.Tr("Цена постройки, если у здания в каталоге не задана value")).Value;

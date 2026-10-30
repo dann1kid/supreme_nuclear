@@ -47,9 +47,11 @@ namespace SupremeNuclear
                 return;
             }
 
-            // Ралли проверяется ПЕРВЫМ: выделение аэродрома живёт отдельно от списка
-            // юнитов (Selected при этом пуст — ранний return его съедал).
-            if (RtsInput.RightDown && !RtsInput.PointerOverUi && TrySetRallyForFactorySelection())
+            // Ралли проверяется ПЕРВЫМ (ПКМ, только БЕЗ заряженного режима — у заряда
+            // ПКМ = отмена): выделение аэродрома живёт отдельно от списка юнитов
+            // (Selected при этом пуст — ранний return его съедал).
+            if (OrderModes.Pending == OrderMode.None &&
+                RtsInput.RightDown && !RtsInput.PointerOverUi && TrySetRallyForFactorySelection())
                 return;
 
             if (_controller.Selection.Selected.Count == 0)
@@ -58,38 +60,52 @@ namespace SupremeNuclear
                 return;
             }
 
-            // ПКМ ставит вейпоинт в текущем режиме; Shift удерживает режим (серия),
-            // без Shift после точки режим возвращается к дефолтному «Движение».
-            if (RtsInput.RightDown && !RtsInput.PointerOverUi)
+            // === ЗАРЯЖЕННЫЙ РЕЖИМ (хоткей/панель; SupCom-схема, v0.114): ЛКМ выдаёт
+            // приказ (Shift — очередь), режим ОСТАЁТСЯ заряженным — можно накликать
+            // серию точек/целей («раскидал»); ПКМ гасит заряд БЕЗ выдачи. Дефолтные
+            // контекстные действия (эскорт/посадка/ралли/достройка/конвертация
+            // вейпоинта) в заряде не работают — только в дефолте по ПКМ. ===
+            if (OrderModes.Pending != OrderMode.None)
             {
-                if (OrderModes.Pending == OrderMode.Cancel)
+                if (RtsInput.RightDown && !RtsInput.PointerOverUi)
                 {
-                    CancelAll(_controller.Selection.Selected);
-                    OrderModes.Pending = OrderMode.Move;
+                    OrderModes.Pending = OrderMode.None; // ПКМ — отмена заряда
+                    FanTargets.Clear();
                     return;
                 }
-                if (OrderModes.Pending == OrderMode.None)
-                    OrderModes.Pending = OrderMode.Move; // первый после старта клик = движение
+                if (RtsInput.LeftDown && !RtsInput.PointerOverUi)
+                {
+                    if (OrderModes.Pending == OrderMode.Cancel)
+                    {
+                        CancelAll(_controller.Selection.Selected);
+                        return; // заряд держится: стоп можно прокликать по каждому выделению
+                    }
+                    GameApi.TryGetLocalHQ(out FactionHQ chargeHq);
+                    Unit chargeEnemy = TryPickEnemyAt(chargeHq);
+                    if (OrderModes.Pending == OrderMode.DisperseAttack && chargeEnemy != null)
+                    {
+                        // «Распределение»: копим цели (дедуп), заряд держим —
+                        // раздача ЛКМ по земле.
+                        if (!FanTargets.Contains(chargeEnemy))
+                            FanTargets.Add(chargeEnemy);
+                        CommanderHud.Notice(Loc.F("Распределение: целей — {0}", FanTargets.Count));
+                        return;
+                    }
+                    IssuePending(_controller.Selection.Selected, RtsInput.Shift);
+                }
+                return;
+            }
 
+            // === ДЕФОЛТ (заряда нет): ПКМ — контекстные приказы, Pending==None
+            // трактуется как «Движение». ===
+            if (RtsInput.RightDown && !RtsInput.PointerOverUi)
+            {
                 // ПКМ прямо по врагу — атака (раньше правки вейпоинтов/недостроев:
                 // клик по цели не должен съедаться смежными экраными действиями).
                 GameApi.TryGetLocalHQ(out FactionHQ localHq);
                 Unit enemy = TryPickEnemyAt(localHq);
-                if (OrderModes.Pending == OrderMode.DisperseAttack && enemy != null)
-                {
-                    // «Распределение»: копим цели (дедуп), режим держим заряженным —
-                    // раздача по ПКМ по земле.
-                    if (!FanTargets.Contains(enemy))
-                        FanTargets.Add(enemy);
-                    CommanderHud.Notice(Loc.F("Распределение: целей — {0}", FanTargets.Count));
-                    return;
-                }
                 if (enemy != null && IssueAttackOrders(enemy))
-                {
-                    if (!RtsInput.Shift)
-                        OrderModes.Pending = OrderMode.Move;
                     return;
-                }
 
                 // Ралли фабрик: выделение только из фабрик → ПКМ задаёт маршрут вышедшим
                 // войскам (Shift — дописать точку), как приказы юнитам.
@@ -111,22 +127,17 @@ namespace SupremeNuclear
                 // ПКМ по СОЮЗНОМУ мобильному юниту = СОПРОВОЖДЕНИЕ/АССИСТ (v0.97,
                 // канон SupCom: ПКМ по своему — assist/escort): боевые следуют за
                 // целью и защищают её, инженеры вливаются в её стройки, авиация
-                // сопровождает полётом. Только в дефолтном режиме «Движение» —
-                // заряженные спец-режимы сохраняют свою семантику.
-                if (OrderModes.Pending == OrderMode.Move && TryIssueEscortOrders(localHq))
+                // сопровождает полётом.
+                if (TryIssueEscortOrders(localHq))
                     return;
 
-                // ПКМ по ПОЛОТНУ своей ВПП = посадка НА ЭТУ базу (v0.107): тоже
-                // только дефолтный «Движение» — заряженные спец-режимы сохраняют
-                // свою семантику.
-                if (OrderModes.Pending == OrderMode.Move && TryIssueLandingOrders(localHq))
+                // ПКМ по ПОЛОТНУ своей ВПП = посадка НА ЭТУ базу (v0.107).
+                if (TryIssueLandingOrders(localHq))
                     return;
 
                 IssuePending(_controller.Selection.Selected, RtsInput.Shift);
-                if (!RtsInput.Shift)
-                    OrderModes.Pending = OrderMode.Move;
             }
-            // Приказы выдаются ТОЛЬКО по ПКМ — ничего на каждый кадр.
+            // Приказы выдаются ТОЛЬКО по событиям ввода — ничего на каждый кадр.
         }
 
         /// <summary>Удаление вейпоинта под курсором (Ctrl+Shift+ПКМ): цепочки наземки,
@@ -258,6 +269,7 @@ namespace SupremeNuclear
 
             switch (OrderModes.Pending)
             {
+                case OrderMode.None: // дефолт по ПКМ без заряда = «Движение»
                 case OrderMode.Move:
                     if (!hasTarget)
                         return;
@@ -305,7 +317,9 @@ namespace SupremeNuclear
                     break;
 
                 case OrderMode.DisperseAttack:
-                    // сюда доходит только ПКМ по земле (цели съедены веткой Tick выше)
+                    // сюда доходит только клик по земле (цели съедены веткой заряда
+                    // в Tick выше): копили ЛКМ по врагам — раздаём, не копили —
+                    // деградация в атаку-движение.
                     if (FanTargets.Count > 0)
                         IssueFanAttack(selected);
                     else if (hasTarget)
@@ -336,15 +350,13 @@ namespace SupremeNuclear
                 // у якоря, наземка — attack-move (stop-and-fire).
                 IssueSalvoArea(selected, target, RtsInput.Shift);
                 Markers.Add(new Marker(target, Time.unscaledTime));
-                if (!RtsInput.Shift)
-                    OrderModes.Pending = OrderMode.Move;
                 return;
             }
             IssueForTarget(selected, mode, target, RtsInput.Shift);
             if (mode != OrderMode.Patrol)
                 Markers.Add(new Marker(target, Time.unscaledTime));
-            if (!RtsInput.Shift)
-                OrderModes.Pending = OrderMode.Move;
+            // Заряд не сбрасываем (SupCom-схема): выдача не гасит режим — только
+            // ПКМ/Esc/пустое выделение.
         }
 
         /// <summary>Общий путь выдачи: режим + точка + очередь (ПКМ по миру и миникарта).</summary>
@@ -370,18 +382,25 @@ namespace SupremeNuclear
                     {
                         if (unit is Aircraft a)
                         {
-                            if (queue) AircraftOrders.Enqueue(a, AirOrderMode.Patrol, target, _moveGroupId);
-                            else AircraftOrders.Set(a, AirOrderMode.Patrol, target, _moveGroupId);
+                            // Патруль ДОПИСЫВАЕТ точку в живой цикл (канон SupCom
+                            // IssuePatrol — аппенд, не замена): заряд держится, юнит
+                            // накликивает маршрут; не в патруле — новый цикл.
+                            bool airPatrol = AircraftOrders.TryGetPlan(a, out var airPlan) &&
+                                             airPlan.Count > 0 &&
+                                             airPlan[airPlan.Count - 1].Mode == AirOrderMode.Patrol;
+                            if (airPatrol)
+                                AircraftOrders.Enqueue(a, AirOrderMode.Patrol, target, _moveGroupId);
+                            else
+                                AircraftOrders.Set(a, AirOrderMode.Patrol, target, _moveGroupId);
                             anyAir = true;
                             continue;
                         }
                         if (!(unit is GroundVehicle || unit is Ship))
                             continue;
                         bool engineer = GameApi.IsEngineer(unit);
-                        if (engineer && !(queue &&
-                                          GroundOrders.KindOf(unit) == GroundOrderKind.Patrol))
-                            BuildTasks.ClearFor(unit); // патруль = новая очередь (Shift дописывает только в цикл)
-                        if (queue && GroundOrders.KindOf(unit) == GroundOrderKind.Patrol)
+                        if (engineer && GroundOrders.KindOf(unit) != GroundOrderKind.Patrol)
+                            BuildTasks.ClearFor(unit); // патруль инженера = новая очередь (точки дописываются ниже)
+                        if (GroundOrders.KindOf(unit) == GroundOrderKind.Patrol)
                             GroundOrders.EnqueuePatrol(unit, target.ToGlobalPosition(), _moveGroupId);
                         else
                             GroundOrders.SetPatrol(unit, target.ToGlobalPosition(), _moveGroupId);

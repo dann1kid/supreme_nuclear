@@ -26,9 +26,16 @@ namespace SupremeNuclear
             public float RollDeg;
             public bool IsRunway;   // задача-ВПП: по готовности спавнит аэродром
             public bool IsDock;     // задача-ВЕРФЬ: платформа на воде + корпус-депо (v0.92)
+            public EconomyService.DepositSite Deposit; // точка месторождения (v3): экстрактор —
+                                                       // только на точке массы; генератор на угле — буст
+            public EconomyService.DepositSite CoalDeposit => Deposit != null && Deposit.Kind == EconomyService.DepositKind.Coal
+                ? Deposit : null;
             public GlobalPosition RunwayEnd; // второй торец полосы
             public float Cost;
-            public float Paid;
+            public float PaidMass;   // налито массы (factionFunds)
+            public float PaidEnergy; // налито энергии (сток EconomyService)
+            /// <summary>Полная энергопотребность задачи = стоимость × фактор профиля.</summary>
+            public float EnergyCost => Cost * EconomyService.EnergyCostFactor;
             public readonly List<Unit> Builders = new List<Unit>();
             /// <summary>Стабильные азимуты кольца подхода (веер строителей вокруг
             /// площадки, v0.95): пересчитываются при каждом изменении состава
@@ -41,7 +48,7 @@ namespace SupremeNuclear
             /// (юниты едут) — полусекундной свежести достаточно (§12-перф).</summary>
             public Unit ZoneBlockerCache;
             public float NextZoneScanAt;
-            public float Progress01 => Cost > 0f ? Mathf.Clamp01(Paid / Cost) : 0f;
+            public float Progress01 => Cost > 0f ? Mathf.Clamp01(PaidMass / Cost) : 0f;
             public string Label => IsRunway ? Loc.Tr("ВПП") : IsDock ? Loc.Tr("Верфь") : Definition?.unitName;
         }
 
@@ -750,9 +757,33 @@ namespace SupremeNuclear
                 return false;
             }
 
+            // Месторождения v3: экстрактор — ТОЛЬКО снапом на свободную точку массы
+            // (SupCom-канон: «видишь точку — инженер строит мекс»); генератор — где
+            // угодно, но при свободном угле рядом — снап на него (буст). Спейсинг
+            // для снапа НЕ применяется: точка — единственное законное место.
+            EconomyService.DepositSite deposit = null;
+            bool isExtractor = def == EconomyService.ExtractorDefinition;
+            bool isHydro = def == EconomyService.HydroDefinition;
+            float snapRadius = EconomyService.Profile != null ? EconomyService.Profile.siteSnapRadiusM : 150f;
+            if (isExtractor || isHydro) // Т1-ген (Fuel Depot) строится где угодно
+            {
+                var kind = isExtractor ? EconomyService.DepositKind.Mass : EconomyService.DepositKind.Coal;
+                EconomyService.DepositSite site = EconomyService.FreeSiteNear(groundPoint, kind, snapRadius);
+                if (site == null)
+                {
+                    if (notice)
+                        CommanderHud.Notice(isExtractor
+                            ? Loc.Tr("Экстрактор — только на месторождение")
+                            : Loc.Tr("Гидрокарбонка — только на угольной точке"));
+                    return false;
+                }
+                deposit = site;
+                groundPoint = site.Pos.ToLocalPosition();
+            }
+
             // Анти-стены: площадки ближе минимальной дистанции раздвигаются (снап):
             // новая точка отталкивается от существующих, пока не встанет свободно.
-            Vector3 placed = EnforceSpacing(groundPoint);
+            Vector3 placed = deposit != null ? groundPoint : EnforceSpacing(groundPoint);
 
             // Ангары достраиваются ТОЛЬКО к своему аэродрому в радиусе: без него ангар —
             // сирота вне мультифабрики. Рулёжку от ангара мод дорисовывает сам (по
@@ -778,6 +809,7 @@ namespace SupremeNuclear
                 Faction = hq,
                 Definition = def,
                 Site = placed.ToGlobalPosition(),
+                Deposit = deposit,
                 Cost = cost,
                 YawDeg = yawDeg,
                 PitchDeg = pitch,
@@ -1335,6 +1367,15 @@ namespace SupremeNuclear
             {
                 if (u == null || u.disabled || builders != null && builders.Contains(u))
                     continue;
+                if (u is Building && EconomyService.IsSiteMarker(u))
+                {
+                    // Точка месторождения (v3): «недра» занимают место — прочие постройки
+                    // не кладутся на точку (многозначность запрещена каноном).
+                    Vector3 mp = u.transform.position;
+                    if (new Vector2(mp.x - site.x, mp.z - site.z).sqrMagnitude < radiusSq)
+                        return true;
+                    continue;
+                }
                 if (!(u is GroundVehicle || u is Ship))
                     continue;
                 if (GameApi.IsEngineer(u))
@@ -1508,6 +1549,7 @@ namespace SupremeNuclear
             public readonly List<GlobalPosition> Points = new List<GlobalPosition>();
             public readonly List<int> Groups = new List<int>();
             public int Index;
+            public int LoopStart; // начало цикла хвоста (конвертация «от точки», v0.114)
         }
 
         private static readonly Dictionary<Unit, PatrolAssist> PatrolAssists =
@@ -1537,7 +1579,8 @@ namespace SupremeNuclear
                         // своей очереди поверх (тогда живёт его очередь, не цикл).
                         if (!HasSequence(u))
                         {
-                            GroundOrders.RestorePatrol(u, kv.Value.Points, kv.Value.Groups, kv.Value.Index);
+                            GroundOrders.RestorePatrol(u, kv.Value.Points, kv.Value.Groups,
+                                kv.Value.Index, kv.Value.LoopStart);
                             Sequences.Remove(u); // пустой остаток ассист-записи
                             Version++;
                             Log.Info("Build: патруль-ассист — патруль возвращён: " + u.NetworkunitName);
@@ -1586,9 +1629,11 @@ namespace SupremeNuclear
                 if (best == null)
                     continue;
                 var rec = new PatrolAssist { Task = best };
-                if (!GroundOrders.TryGetPatrolSnapshot(u, rec.Points, rec.Groups, out int idx))
+                if (!GroundOrders.TryGetPatrolSnapshot(u, rec.Points, rec.Groups, out int idx,
+                        out int loopStart))
                     continue;
                 rec.Index = idx;
+                rec.LoopStart = loopStart;
                 PatrolAssists[u] = rec;
                 best.Builders.Add(u);
                 AssignApproachBearings(best);
@@ -1861,19 +1906,23 @@ namespace SupremeNuclear
                 if (onSite > 0 && !t.ZoneBlocked)
                 {
                     float rate = t.Cost / Mathf.Max(1f, Settings.BuildSecondsPerBuilder) * onSite;
-                    float pay = Mathf.Min(rate * dt, t.Cost - t.Paid, t.Faction.factionFunds);
-                    if (pay > 0f)
+                    float massWant = Mathf.Min(rate * dt, t.Cost - t.PaidMass);
+                    // Налив двух валют: дефицит энергии режет массу пропорционально
+                    // (EconomyService.Drain → EcoFlow.DrainStep, DESIGN §2.2).
+                    EcoFlow.Paid paid = EconomyService.Drain(
+                        t.Faction, massWant, massWant * EconomyService.EnergyCostFactor);
+                    if (paid.Mass > 0f)
                     {
                         // Первая капля — отметка в лог: плейтест-диагностика «не строится»
                         // (нет записи = инженеры не дошли/не остановились).
-                        if (t.Paid <= 0f)
+                        if (t.PaidMass <= 0f)
                             Log.Info($"Build: оплата начата — {t.Label}" +
                                      $" ({onSite} инженер. на площадке)");
-                        t.Paid += pay;
-                        t.Faction.AddFunds(-pay);
+                        t.PaidMass += paid.Mass;
+                        t.PaidEnergy += paid.Energy;
                     }
                 }
-                else if (t.Paid <= 0f && Time.unscaledTime -
+                else if (t.PaidMass <= 0f && Time.unscaledTime -
                          (StallDiagAt.TryGetValue(t, out float diagAt) ? diagAt : -99f) > 5f)
                 {
                     // Площадка стоит без оплаты — раз в 5 с снимок причин в лог:
@@ -1895,7 +1944,7 @@ namespace SupremeNuclear
                              $"деньги={t.Faction.factionFunds:F0} | {why}");
                 }
 
-                if (t.Paid >= t.Cost - 0.01f)
+                if (t.PaidMass >= t.Cost - 0.01f && t.PaidEnergy >= t.EnergyCost - 0.01f)
                 {
                     // Очередь недостроя-фабрики переезжает на живую фабрику
                     // (null — спавн не удался: ProductionTasks чистит своё сам).
@@ -1982,7 +2031,8 @@ namespace SupremeNuclear
             if (spawner == null)
             {
                 Log.Error("Build: Spawner недоступен — здание не создано, деньги возвращены");
-                t.Faction.AddFunds(t.Paid);
+                t.Faction.AddFunds(t.PaidMass);
+                EconomyService.Refund(t.Faction, t.PaidEnergy);
                 return null;
             }
             Vector3 local = t.Site.ToLocalPosition();
@@ -1998,7 +2048,8 @@ namespace SupremeNuclear
                 if (airbase == null)
                 {
                     Log.Warn("Build: аэродром потерян за время стройки ангара — возврат денег");
-                    t.Faction.AddFunds(t.Paid);
+                    t.Faction.AddFunds(t.PaidMass);
+                    EconomyService.Refund(t.Faction, t.PaidEnergy);
                     return null;
                 }
                 // Апрон строим ПЕРВЫМ и ПЛОСКИМ (МАКС рельефа площадки + юбки —
@@ -2014,7 +2065,8 @@ namespace SupremeNuclear
                 if (hangar == null)
                 {
                     Log.Error("Build: ангар не создан — возврат денег");
-                    t.Faction.AddFunds(t.Paid);
+                    t.Faction.AddFunds(t.PaidMass);
+                    EconomyService.Refund(t.Faction, t.PaidEnergy);
                     return null;
                 }
                 ConnectTaxiway(airbase, hangar, padY);
@@ -2034,11 +2086,41 @@ namespace SupremeNuclear
             if (unit == null)
             {
                 Log.Error("Build: здание не создано — возврат денег");
-                t.Faction.AddFunds(t.Paid);
+                t.Faction.AddFunds(t.PaidMass);
+                EconomyService.Refund(t.Faction, t.PaidEnergy);
                 return null;
             }
+            // Нативная Factory (Large/Vertical): без FactoryOptions здание мертво —
+            // конфигурируем под дешёвый MBT; ProduceUnit кладёт юнита в саплай
+            // фракции, DeployUnits сама выкатывает через депо (медленный интервал
+            // — нативный тик бесплатен, деньги берёт постройка; экономика-интеграция — §12).
+            Factory factory = unit.GetComponent<Factory>();
+            if (factory != null)
+            {
+                VehicleDefinition tank = AiCommanderService.TankDefinition();
+                if (tank != null)
+                {
+                    factory.SetFactory(tank.jsonKey, Settings.ProductionSecondsPerItem * 10f);
+                    Log.Info("Build: нативная фабрика → " + tank.jsonKey);
+                }
+            }
+            // Построенная энергопостройка попадает в энергосистему (имя-маркер
+            // «Generator N»): гидрокарбонка — с угольным бустом, Т1-ген — базовая.
+            if (t.Definition == EconomyService.HydroDefinition ||
+                t.Definition == EconomyService.GeneratorDefinition)
+                EconomyService.RegisterGenerator(unit, t.Definition == EconomyService.HydroDefinition);
+            // Экстрактор — в реестр дохода с тиrom ТОЧКИ; точка занимается
+            // (маркер-«недра» скрывается у всех).
+            if (t.Definition == EconomyService.ExtractorDefinition)
+            {
+                EconomyService.RegisterExtractor(unit, t.Deposit?.Tier ?? 1);
+                if (t.Deposit != null)
+                    EconomyService.TakeSite(t.Deposit);
+            }
+            else if (t.CoalDeposit != null)
+                EconomyService.TakeSite(t.CoalDeposit);
             CommanderHud.Notice(Loc.F("Построено: {0}", t.Definition.unitName));
-            Log.Info($"Build: готово {t.Definition.unitName} на ({local.x:F0},{local.z:F0}) за {t.Paid:F0}");
+            Log.Info($"Build: готово {t.Definition.unitName} на ({local.x:F0},{local.z:F0}) за {t.PaidMass:F0}");
             return unit;
         }
 
@@ -2053,7 +2135,8 @@ namespace SupremeNuclear
             if (mission == null || net == null || net.Server == null || !net.Server.Active)
             {
                 Log.Error("Build: ВПП — миссия/сервер не готовы, возврат денег");
-                t.Faction.AddFunds(t.Paid);
+                t.Faction.AddFunds(t.PaidMass);
+                EconomyService.Refund(t.Faction, t.PaidEnergy);
                 return;
             }
             Vector3 a = t.Site.ToLocalPosition();
@@ -2130,7 +2213,8 @@ namespace SupremeNuclear
             {
                 Log.Error("Build: ВПП — аэродром не создан, возврат денег");
                 mission.airbases.Remove(saved);
-                t.Faction.AddFunds(t.Paid);
+                t.Faction.AddFunds(t.PaidMass);
+                EconomyService.Refund(t.Faction, t.PaidEnergy);
                 return;
             }
             // Доворот съездов: FromSaved создаёт exit-трансформы с единичной
@@ -2169,7 +2253,8 @@ namespace SupremeNuclear
             if (spawner == null || hull == null)
             {
                 Log.Error("Build: Верфь — Spawner/корпус недоступны, возврат денег");
-                t.Faction.AddFunds(t.Paid);
+                t.Faction.AddFunds(t.PaidMass);
+                EconomyService.Refund(t.Faction, t.PaidEnergy);
                 return null;
             }
             Vector3 local = t.Site.ToLocalPosition();
@@ -2183,7 +2268,8 @@ namespace SupremeNuclear
             if (unit == null)
             {
                 Log.Error("Build: Верфь — корпус не создан, возврат денег");
-                t.Faction.AddFunds(t.Paid);
+                t.Faction.AddFunds(t.PaidMass);
+                EconomyService.Refund(t.Faction, t.PaidEnergy);
                 return null;
             }
             unit.NetworkunitName = Loc.Tr("Верфь");
