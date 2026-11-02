@@ -864,8 +864,18 @@ namespace SupremeNuclear
                 }
                 else if (unit is GroundVehicle && !GameApi.IsEngineer(unit))
                 {
-                    _attackFan.Add(unit); // сектора разносятся вторым проходом
-                    any = true;
+                    if (salvo && FleetSalvo.UnitHasMissiles(unit))
+                    {
+                        // РСЗО/ПУ наземки — в общий залп по точке/цели (v0.133:
+                        // SupCom-тактики для батарей; пушечная техника — атакой)
+                        _fleetSalvo.Add(unit);
+                        any = true;
+                    }
+                    else
+                    {
+                        _attackFan.Add(unit); // сектора разносятся вторым проходом
+                        any = true;
+                    }
                 }
             }
             if (_fleetSalvo.Count > 0)
@@ -1211,19 +1221,20 @@ namespace SupremeNuclear
         private void IssueSalvoArea(List<Unit> selected, Vector3 target, bool queue)
         {
             target = GameApi.OnSurface(target); // залп «в воду» — в точку ПОВЕРХНОСТИ
-            // Флот — РУЧНОЙ пуск по ТОЧКЕ (SupCom-нул, v0.117): волна уходит сразу,
-            // цель-юнит не нужна (ракета летит в точку, ГСН может захватить цель
-            // у неё по пути). Корабль не двигается и НЕ участвует в решётке
-            // залпа авиации — дальше разбираем только остальных.
+            // Флот и РСЗО/ПУ наземки — РУЧНОЙ пуск по ТОЧКЕ (SupCom-нул, v0.117/v0.133):
+            // волна уходит сразу, цель-юнит не нужна (ракета летит в точку, ГСН может
+            // захватить цель у неё по пути). Пусковые не двигаются и НЕ участвуют в
+            // решётке залпа авиации — дальше разбираем только остальных.
             _fleetSalvo.Clear();
-            bool anyShip = false;
+            bool anyLauncher = false;
             foreach (Unit unit in selected)
-                if (unit is Ship)
+                if (unit is Ship || (unit is GroundVehicle && !GameApi.IsEngineer(unit) &&
+                                     FleetSalvo.UnitHasMissiles(unit)))
                 {
                     _fleetSalvo.Add(unit);
-                    anyShip = true;
+                    anyLauncher = true;
                 }
-            if (anyShip)
+            if (anyLauncher)
             {
                 // Пуск ПО ТОЧКЕ (SupCom-нул): ракета ведётся в координату
                 // (отложенное Missile.SetAimpoint после спавна), цель-юнит не нужна —
@@ -1234,7 +1245,7 @@ namespace SupremeNuclear
                 SalvoNotice(fired);
                 _salvoRest.Clear();
                 foreach (Unit unit in selected)
-                    if (!(unit is Ship))
+                    if (!(unit is Ship || (unit is GroundVehicle && FleetSalvo.UnitHasMissiles(unit))))
                         _salvoRest.Add(unit);
                 selected = _salvoRest;
             }
@@ -1409,7 +1420,14 @@ namespace SupremeNuclear
                 if (queue)
                     GroundOrders.Enqueue(unit, pos.ToGlobalPosition(), attackMove, _moveGroupId);
                 else
+                {
+                    // Явное движение (без Shift) СНИМАЕТ ждущие залпы НАЗЕМНОЙ
+                    // пусковой (v0.134: батарея уезжает — по точкам больше не бьёт;
+                    // кораблям канон оставляет «веду и обстреливаю параллельно»)
+                    if (unit is GroundVehicle)
+                        FleetSalvo.CancelWavesOf(unit);
                     GroundOrders.Set(unit, pos.ToGlobalPosition(), attackMove, _moveGroupId);
+                }
                 LastDestinations[unit] = pos.ToGlobalPosition();
             }
         }

@@ -417,11 +417,12 @@ namespace SupremeNuclear
                 return false;
             if (_engineerDef.TryGetValue(def, out bool isEngineer))
                 return isEngineer;
+            // Инженер = ТИП, не имя: ростер юнитов (Roster/units.json) может
+            // переименовать грузовик — имя-детект «jack» ломался (TRUCK в игре один).
             if (def is ShipDefinition sea && sea.shipType == ShipType.LC)
                 isEngineer = true;
             else if (def is VehicleDefinition vd)
-                isEngineer = vd.vehicleType == VehicleType.TRUCK ||
-                             (vd.unitName ?? vd.jsonKey ?? "").ToLowerInvariant().Contains("jack");
+                isEngineer = vd.vehicleType == VehicleType.TRUCK;
             else
                 isEngineer = false;
             _engineerDef[def] = isEngineer;

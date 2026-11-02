@@ -1,30 +1,27 @@
 using System;
 using System.Collections.Generic;
+using UnityEngine;
 
 namespace SupremeNuclear
 {
-    /// <summary>Тир-фильтр каталога (DESIGN 2.10): пул режется по цене на три равные части.
-    /// Чистая функция — тестируется тест-раннером.</summary>
+    /// <summary>Тир-фильтр каталога (DESIGN 2.10): явные тиры ростера под
+    /// потолком контекста (фабрика/инженер, §2.3а). Чистая функция —
+    /// тестируется тест-раннером.</summary>
     internal static class Catalog
     {
-        /// <summary>tier: 0 — без фильтра, 1..3 — терциль по цене (1 — дешёвый).
-        /// Список правится на месте (сортировка по цене).</summary>
-        public static void ApplyTierFilter<T>(List<T> defs, Func<T, float> valueOf, int tier)
+        /// <summary>Фильтр по ЯВНЫМ тирам ростера (UnitRoster, §2.13): selected 0
+        /// («Все») → все с тиром ≤ ceiling (тир контекста: фабрика/инженер);
+        /// 1..3 — точное равенство (выбранный выше потолка клампится вниз).
+        /// Чистая — тестируется.</summary>
+        public static void TierFilterByTier<T>(List<T> defs, Func<T, int> tierOf, int selected, int ceiling)
         {
-            if (tier <= 0 || defs.Count == 0)
+            int n = defs?.Count ?? 0;
+            if (n == 0)
                 return;
-            defs.Sort((a, b) => valueOf(a).CompareTo(valueOf(b)));
-            int n = defs.Count;
-            // Границы терцилей с защитой от крошечных каталогов: i1>=1, i1<i2<=n
-            // (при n=1: T1=[единственный], T2/T3 пусты — но не падаем).
-            int i1 = Math.Max(1, n / 3);
-            int i2 = Math.Min(Math.Max(i1 + 1, n * 2 / 3), n);
-            List<T> keep = tier == 1
-                ? defs.GetRange(0, i1)
-                : tier == 2 ? defs.GetRange(i1, i2 - i1)
-                : defs.GetRange(i2, n - i2);
-            defs.Clear();
-            defs.AddRange(keep);
+            int sel = selected <= 0 ? 0 : Math.Min(selected, Math.Max(1, Math.Min(3, ceiling)));
+            defs.RemoveAll(d => sel == 0
+                ? Mathf.Clamp(tierOf(d), 1, 3) > ceiling
+                : Mathf.Clamp(tierOf(d), 1, 3) != sel);
         }
 
         /// <summary>Короткая подпись плитки каталога/очереди: бортовой код

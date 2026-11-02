@@ -151,6 +151,19 @@ namespace SupremeNuclear
                 if (HarmonyLib.AccessTools.Field(typeof(VehicleDepot), "spawnTransform") == null)
                     throw new System.Exception("VehicleDepot.spawnTransform не найден — выход депо берётся по габариту");
             });
+            Check("Тиры фабрик/инженеров (VehicleDepot.TrySpawnVehicle, Hangar.parentAirbase)", () =>
+            {
+                // Клоны инженеров T2/T3 спавнятся нативным депо как обычные
+                // определения — если сигнатура уплыла, апнутые депо «не строят».
+                if (HarmonyLib.AccessTools.Method(typeof(VehicleDepot), "TrySpawnVehicle") == null)
+                    throw new System.Exception("VehicleDepot.TrySpawnVehicle не найден — клоны инженеров не спавнятся");
+                if (HarmonyLib.AccessTools.Field(typeof(Hangar), nameof(Hangar.parentAirbase)) == null)
+                    throw new System.Exception("Hangar.parentAirbase не найден — тир авиации не найдёт аэродром");
+                if (HarmonyLib.AccessTools.Field(typeof(Airbase), "hangars") == null)
+                    throw new System.Exception("Airbase.hangars не найден — живость/владелец тира аэродрома мертвы");
+                if (HarmonyLib.AccessTools.Field(typeof(Encyclopedia), "buildings") == null)
+                    throw new System.Exception("Encyclopedia.buildings не найден — ростер зданий пуст");
+            });
             Check("SpawnCustomAirbase (постройка ВПП-аэродрома)", () =>
             {
                 if (HarmonyLib.AccessTools.Property(typeof(MissionManager), "CurrentMission") == null)
@@ -584,6 +597,26 @@ namespace SupremeNuclear
                 Log.Info("  [INFO]  бортов с пресетами лодаутов: " + withPresets +
                          ", с хардпоинтами на префабе: " + withHardpoints +
                          " из " + encyclopedia2.aircraft.Count);
+            });
+            Check("Командирский борт: детонация/победа/EMCON (разведка)", () =>
+            {
+                if (HarmonyLib.AccessTools.Method(typeof(DamageEffects), "BlastFrag") == null)
+                    throw new System.Exception("DamageEffects.BlastFrag не найден — детонация борта мертва");
+                if (HarmonyLib.AccessTools.Method(typeof(FactionHQ), "DeclareEndGame") == null)
+                    throw new System.Exception("FactionHQ.DeclareEndGame не найден — победа по борту мертва");
+                if (HarmonyLib.AccessTools.Method(typeof(FactionHQ), "DeregisterTrackedUnit") == null)
+                    throw new System.Exception("FactionHQ.DeregisterTrackedUnit не найден — EMCON не сотрёт контакты");
+                if (HarmonyLib.AccessTools.Field(typeof(Aircraft), "radar") == null)
+                    throw new System.Exception("Aircraft.radar не найден — EMCON не погасит радар");
+                if (HarmonyLib.AccessTools.Field(typeof(Unit), "RCS") == null)
+                    throw new System.Exception("Unit.RCS не найден — EMCON не снизит ЭПР");
+                if (typeof(Unit).GetEvent("onDisableUnit") == null)
+                    throw new System.Exception("Unit.onDisableUnit не найден — смерть борта не отследится");
+                if (HarmonyLib.AccessTools.Method(typeof(UnitDefinition), "IsAllowed") == null)
+                    throw new System.Exception("UnitDefinition.IsAllowed не найден — автоподбор борта возьмёт ивентовый UFO");
+                foreach (string f in new[] { "playerControlled", "fuel", "skill", "startingSpeed", "savedLoadout" })
+                    if (HarmonyLib.AccessTools.Field(typeof(SavedAircraft), f) == null)
+                        throw new System.Exception("SavedAircraft." + f + " не найден — сценарный спавн борта сломается");
             });
             Log.Info("SelfCheck(activation): " + (Failures.Count == 0 ? "ОК" : "ПРОВАЛОВ: " + Failures.Count));
         }

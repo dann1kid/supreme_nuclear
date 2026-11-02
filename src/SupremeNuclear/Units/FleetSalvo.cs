@@ -307,6 +307,10 @@ namespace SupremeNuclear
             WeaponStation st = PickStation(ship, target);
             if (st == null)
                 return false;
+            // Слой 2 (§2.14): ракетный пуск стоит массу+энергию — нет ресурсов,
+            // ракета не уходит (кулдаун не ставится, попытка повторится).
+            if (!SupplyService.TryPaySalvo(ship))
+                return false;
             if (target == null)
             {
                 // снимок живых ракет владельца ДО пуска — новорождённую опознаем
@@ -393,16 +397,43 @@ namespace SupremeNuclear
             return false;
         }
 
-        /// <summary>Есть ли у корабля хоть одна рабочая ракетная станция (кнопка
-        /// «Залп» в панели для флотских выделений).</summary>
-        public static bool ShipHasMissiles(Unit ship)
+        /// <summary>Есть ли у юнита хоть одна рабочая ракетная станция (кнопка
+        /// «Залп» для флотских/батарейных выделений).</summary>
+        public static bool UnitHasMissiles(Unit unit)
         {
-            if (ship == null || ship.weaponStations == null)
+            if (unit == null || unit.weaponStations == null)
                 return false;
-            foreach (WeaponStation st in ship.weaponStations)
+            foreach (WeaponStation st in unit.weaponStations)
                 if (st != null && st.WeaponInfo != null && st.WeaponInfo.missile && st.Ammo > 0)
                     return true;
             return false;
+        }
+
+        /// <summary>Участник общего ручного залпа (v0.133: флот + РСЗО/ПУ наземки;
+        /// пушечная техника — нативным боем, авиация — своим залпом V).</summary>
+        public static bool IsSalvoUnit(Unit unit) =>
+            unit is Ship ||
+            (unit is GroundVehicle && !GameApi.IsEngineer(unit) && UnitHasMissiles(unit));
+
+        /// <summary>Снять юнита со ВСЕХ ждущих волн (v0.134: явное движение наземной
+        /// пусковой = батарея уезжает, по точкам больше не бьёт; опустевшие волны
+        /// завершаются обычным порядком — отметка угасает).</summary>
+        public static void CancelWavesOf(Unit unit)
+        {
+            if (unit == null)
+                return;
+            for (int i = Queue.Count - 1; i >= 0; i--)
+            {
+                QueuedWave wave = Queue[i];
+                wave.Ships.RemoveAll(u => u == unit);
+                if (wave.Ships.Count == 0)
+                {
+                    Queue.RemoveAt(i);
+                    TouchMark(wave.MarkId, Time.unscaledTime + MarkTtlSec);
+                }
+                else
+                    Queue[i] = wave;
+            }
         }
 
         /// <summary>Станция для волны: ракетная, с боеприпасом, готовая (интервал/

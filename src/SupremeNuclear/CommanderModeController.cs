@@ -71,13 +71,17 @@ namespace SupremeNuclear
 
             GameApi.TickOriginShiftMonitor();
             GameApi.TickHpCache();
+            UnitRoster.EnsureApplied(); // ростер юнитов/зданий (тиры/цены/имена) — ДО всех потребителей
+            EngineerService.EnsureCreated(); // клоны инженеров T2/T3 — после ростера (host-агностично)
             EconomyService.Tick();
             SalvageService.Tick(); // салваж обломков — та же экономика (масса инженерам)
             ShipPadService.Tick(); // вертолётные палубы кораблей без Airbase (host)
             CaptureService.Tick(); // инженерный захват построек (энергия, v3)
+            FactoryTierService.Tick(UnityEngine.Time.deltaTime); // налив апгрейдов фабрик (host)
             BuildTasks.Tick();
             ProductionTasks.Tick();
             SortieService.Tick(); // миссии вылетов живут и со закрытым столом командира
+            CommanderBoardService.Tick(); // командирский борт: орбита/EMCON/ремонт/победа (host)
             SalvoService.Tick();  // залп-приказы — тоже (пуски на хосте)
             WeaponGateService.Tick(); // гейты вооружения — блок Ready() выключенных станций
             AiCommanderService.Tick(); // AI-фракции играют тем же Task-API (до ворот режима)
@@ -352,6 +356,11 @@ namespace SupremeNuclear
             // (урон по деталям, обломки), площадка-недострой сносится. Хост.
             if (RtsInput.Ctrl && RtsInput.KeyDown(KeyCode.K))
                 SelfDestructSelection();
+
+            // Ctrl+E — EMCON своего командирского борта (радиомолчание: слеп, но
+            // невидим для пеленга; DESIGN §2.1). Хост.
+            if (RtsInput.Ctrl && RtsInput.KeyDown(KeyCode.E))
+                CommanderBoardService.ToggleEmcon();
 
             // Ctrl+M — отладочные деньги (плейтесты стройки/производства без гринда)
             // + энергия до капа: без генераторов фонового потока на стройку не хватает

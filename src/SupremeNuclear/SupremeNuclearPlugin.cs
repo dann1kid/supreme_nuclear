@@ -42,6 +42,7 @@ namespace SupremeNuclear
                 BuildTasks.Reset();
                 BuildGhosts.Reset();
                 ProductionTasks.Reset();
+                FactoryTierService.Reset(); // тиры/апгрейды фабрик умерли вместе со сценой
                 AircraftOrders.Reset();
                 AircraftTargetPinPatch.ResetClaims(); // реестр занятости целей бортов сцены
                 GroundOrders.Reset();
@@ -53,6 +54,8 @@ namespace SupremeNuclear
                 AirbaseReserve.Reset(); // резервы ангаров умершей сцены недействительны
                 AirbaseAccess.Reset(); // тумблеры посадки/взлёта умершей сцены недействительны
                 SortieService.Reset(); // слоты выката привязаны к базам сцены
+                CommanderBoardService.Reset(); // борта-командиры умерли вместе со сценой
+                SupplyService.Reset(); // кэш станций снабжения умер вместе со сценой
                 SelectionService.ResetGroups();
                 RangeRings.Reset(); // кольца дальности: круги/буферы сцены
                 TaxiSurface.Reset(); // плиты дорисованных рулёжек умершей сцены

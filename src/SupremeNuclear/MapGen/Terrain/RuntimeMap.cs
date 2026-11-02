@@ -31,12 +31,19 @@ namespace SupremeNuclear
         internal static Heightmap LastHeightmap;
         internal static PassGraph LastPass;
 
+        /// <summary>Раскладка последней спец-карты (ScenarioWorld: базы/масса/уголь,
+        /// согласованная со штампованным рельефом).</summary>
+        internal static WorldGen LastWorld;
+
         public static bool IsOurKey(string mapName) =>
             !string.IsNullOrEmpty(mapName) && mapName.StartsWith(KeyPrefix);
 
-        /// <summary>Ключ карты по шаблону и сиду (стабильный формат: hex-сид).</summary>
+        /// <summary>Ключ карты по шаблону и сиду (стабильный формат: hex-сид).
+        /// Сид — ПОЛНЫЕ 32 бита (X8): усечение до 16 бит строило при загрузке мир
+        /// от другого сида — раскладка миссии (базы/точки) висела «в небе» и тонула
+        /// (плейтест 2026-11-01). Старые 4-символьные ключи парсятся как раньше.</summary>
         public static string MakeKey(string templateName, int seed) =>
-            $"{KeyPrefix}{templateName}-{seed & 0xFFFF:X}";
+            $"{KeyPrefix}{templateName}-{seed & 0xFFFFFFFF:X8}";
 
         /// <summary>Построить карту по ключу (если ещё не построена) и зарегистрировать
         /// в MapLoader. Идемпотентно; вызывается генератором и префиксом EnableMap.</summary>
@@ -66,8 +73,13 @@ namespace SupremeNuclear
                 return false;
             }
 
-            Heightmap hm = HeightmapGen.Generate(template.terrain, seed);
+            // ЕДИНЫЙ детерминированный пайплайн (как и при генерации в ScenarioBuild):
+            // выбор точек по маскам → ШТАМПЫ ровных площадок → пересчёт масок —
+            // иначе раскладка миссии разошлась бы с мешом (гарантия спавна 2026-10-31).
+            WorldGen world = ScenarioWorld.Generate(template, seed);
+            Heightmap hm = world.Hm;
             LastHeightmap = hm;
+            LastWorld = world;
             LastPass = PassGraph.Build(hm.Height, hm.W, hm.H, hm.Step, hm.SeaLevel, hm.Step * 0.75f);
             Texture2D colorTex = MapTextures.TerrainColor(hm, template.terrain);
             Sprite mapImage = MapTextures.MapSprite(hm, template.terrain);

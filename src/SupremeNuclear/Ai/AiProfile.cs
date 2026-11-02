@@ -24,6 +24,8 @@ namespace SupremeNuclear
         // Производство (очередь мода в депо; деньги — та же экономика).
         public int maxQueue = 3;            // позиций в депо
         public float massReserveFactor = 1.5f; // заказ при массе ≥ стоимость × фактор
+        public int engineersMin = 2;        // держать инженеров не меньше (погибли все → экономика мертва)
+        public string engineerJsonKey;      // переопределение автоподбора (первый TRUCK)
 
         // Волны (DESIGN §3-3 «экономика → фабрика → волны + гарнизон»).
         public int waveSize = 6;            // столько собравшихся → волна не дожидаясь таймера
@@ -39,6 +41,17 @@ namespace SupremeNuclear
         // Переопределения автоподбора (jsonKey определения).
         public string depotJsonKey;
         public string tankJsonKey;
+        public string fighterJsonKey;   // борт авиакрыла; пусто = самый дешёвый допустимый из каталога ангара
+
+        // Авиакрыло v1 (2026-10-31): CAP над базой + перехват + удары по экономике.
+        public bool airEnabled = true;
+        public int airCap = 4;              // держать живых бортов
+        public float airReserveFactor = 1.5f; // заказ при массе ≥ цена × фактор
+        public float capRadiusM = 3500f;    // кольцо CAP над своей базой
+        public int capPoints = 4;
+        public float interceptRadiusM = 6000f; // перехват воздушных угроз у базы
+        public float airStrikeIntervalSec = 240f;
+        public int airStrikeSize = 2;       // бортов в авиаударе по экономике
 
         public static AiProfile Load()
         {

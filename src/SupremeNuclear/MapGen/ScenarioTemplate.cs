@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.IO;
+using UnityEngine;
 using BepInEx;
 using Newtonsoft.Json;
 
@@ -29,7 +30,7 @@ namespace SupremeNuclear
         /// </summary>
         public sealed class TerrainSettings
         {
-            public float sizeM = 40000f;         // сторона карты, м
+            public float sizeM = 48000f;         // сторона карты, м (явная ручка; нативный эталон 81.9 км)
             public float stepM = 200f;           // клетка высот/меша, м
             public float plainHeight = 40f;      // базовая высота равнин над морем
             public float gentleAmp = 70f;        // амплитуда холмов равнин
@@ -60,7 +61,6 @@ namespace SupremeNuclear
         /// «дуэль на стоковой карте» — убрать секцию/оставить null в JSON шаблона.</summary>
         public TerrainSettings terrain = new TerrainSettings();
 
-        public int basesPerSide = 1;       // v1: 1 — дуэль; 2 (тыл+мид на сторону) — следующий пресет
         public float baseInset = 0.40f;    // доля полудиагонали карты: где стоят базы
         public int depositCount = 14;      // зеркальных ПАР точек массы (T1)
         public int centerRichCount = 2;    // пар жирного центра (T2)
@@ -70,7 +70,23 @@ namespace SupremeNuclear
         public float startFunds = 10000f; // запас на бутстрап: уголь + мекс + депо (поднят с 5000 для тестов, 2026-10-30)
         public float runwayLength = 1800f; // стартовая ВПП слота
         public float runwayWidth = 45f;
+        public bool commander = true;      // командирский борт — условие победы «убей борта» (DESIGN §2.1)
+        public string commanderJsonKey = ""; // модель борта; пусто = самый дорогой самолёт энциклопедии
+        public float commanderFuel = 1f;
+
+        // Адаптивность «под количество игроков» (юзер-канон 2026-10-31, уточнён
+        // им же: размер — отдельная ручка гибкости): players задаёт РАСКЛАДКУ —
+        // 2 команды по players/2 баз зеркально, точки/уголь ×пары; РАЗМЕР карты —
+        // явный terrain.sizeM (пресеты размеров под рандом-ладдер — долг лобби).
+        public int players = 2;
+        public float baseSpreadM = 2800f;  // разбег баз стороны по перпендикуляру к оси
+        public float engineerAirdropAltM = 150f; // аирдроп стартовой техники (нативные парашюты)
+        public float depositPadRadiusM = 130f; // штамп ровной площадки под точку массы/угля
+
         public List<StarterItem> starter = DefaultStarter();
+
+        /// <summary>Число «пар» (баз на сторону): players/2, минимум 1. Чистая.</summary>
+        public static int PairsOf(int players) => Mathf.Max(1, players / 2);
 
         public static ScenarioTemplate Load(string name)
         {

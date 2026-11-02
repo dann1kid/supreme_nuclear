@@ -77,6 +77,105 @@ namespace SupremeNuclear
             return !Water[i, j] && !Steep[i, j] && !Edge[i, j];
         }
 
+        /// <summary>Финальный фолбэк выбора точки: НЕ КРАЙ (воду/крутость под
+        /// точкой исправит штамп площадки). Край — единственное абсолютное
+        /// «нельзя» (краевые горы).</summary>
+        public bool StampableOk(float x, float z)
+        {
+            int i = Clamp((int)(x / Step + W * 0.5f), 0, W - 1);
+            int j = Clamp((int)(z / Step + H * 0.5f), 0, H - 1);
+            return !Edge[i, j];
+        }
+
+        /// <summary>Пересчёт масок Water/Plain/Steep/Edge + Min/Max по текущим
+        /// Height (тем же правилом, что и генератор). Вызывается после штампов
+        /// площадок — плоскость и суша внутри штампа становятся свойством масок.</summary>
+        public void RebuildMasks(ScenarioTemplate.TerrainSettings t)
+        {
+            float steepTan = (float)Math.Tan(t.steepDeg * Math.PI / 180.0);
+            int edgeCells = (int)(t.edgeM / Step);
+            float min = float.MaxValue, max = float.MinValue;
+            for (int j = 0; j < H; j++)
+                for (int i = 0; i < W; i++)
+                {
+                    float h = Height[i, j];
+                    if (h < min) min = h;
+                    if (h > max) max = h;
+                    Water[i, j] = h < SeaLevel;
+                    float dh = Math.Max(
+                        Math.Abs(h - Height[Math.Min(W - 1, i + 1), j]),
+                        Math.Abs(h - Height[i, Math.Min(H - 1, j + 1)]));
+                    Steep[i, j] = !Water[i, j] && dh / Step > steepTan;
+                    Plain[i, j] = !Water[i, j] && !Steep[i, j];
+                    Edge[i, j] = i < edgeCells || j < edgeCells ||
+                                 i >= W - edgeCells || j >= H - edgeCells;
+                }
+            Min = min;
+            Max = max;
+        }
+
+        /// <summary>ШТАМП круглой ровной площадки (гарантия спавна, юзер-канон
+        /// 2026-10-31 «ровная площадка, нет воды»): клетки радиуса выравниваются
+        /// на высоту центра (кламп ≥ море+5 — пруд под точкой становится сушей),
+        /// кромка в 2 клетки линейно сходит к исходному рельефу (ступень террасы
+        /// 70 м / 400 м кромки = 10° — ниже порога Steep). После штампов маски
+        /// пересчитывает RebuildMasks. Отклонение от Neroxis осознанное: он
+        /// выбирает точки по маскам без деформации (у него нет террас), нам
+        /// плоскость гарантирует только штамп.</summary>
+        public void StampPad(float cx, float cz, float radiusM)
+        {
+            int ci = Clamp((int)(cx / Step + W * 0.5f), 0, W - 1);
+            int cj = Clamp((int)(cz / Step + H * 0.5f), 0, H - 1);
+            float padH = Math.Max(Height[ci, cj], SeaLevel + 5f);
+            float rim = 2f * Step;
+            float rMax = Math.Max(1f * Step, radiusM);
+            int reach = (int)Math.Ceiling((rMax + rim) / Step);
+            for (int dj = -reach; dj <= reach; dj++)
+                for (int di = -reach; di <= reach; di++)
+                {
+                    int i = ci + di, j = cj + dj;
+                    if (i < 0 || j < 0 || i >= W || j >= H)
+                        continue;
+                    float dx = di * Step, dz = dj * Step;
+                    float d = (float)Math.Sqrt(dx * dx + dz * dz);
+                    if (d <= rMax)
+                        Height[i, j] = padH;
+                    else if (d <= rMax + rim)
+                        Height[i, j] = Lerp(Height[i, j], padH,
+                            1f - (d - rMax) / rim);
+                }
+        }
+
+        /// <summary>Штамп ПРЯМОУГОЛЬНОЙ площадки (базы: полоса вдоль оси — yaw
+        /// баз у нас 0°/90°, поворот не нужен; alongX — длинная сторона по X).
+        /// Семантика высот/кромки — как у StampPad.</summary>
+        public void StampPadRect(float cx, float cz, float halfAlongM, float halfAcrossM, bool alongX)
+        {
+            int ci = Clamp((int)(cx / Step + W * 0.5f), 0, W - 1);
+            int cj = Clamp((int)(cz / Step + H * 0.5f), 0, H - 1);
+            float padH = Math.Max(Height[ci, cj], SeaLevel + 5f);
+            float rim = 2f * Step;
+            float ha = Math.Max(1f * Step, halfAlongM), hc = Math.Max(1f * Step, halfAcrossM);
+            float halfLong = alongX ? ha : hc, halfShort = alongX ? hc : ha;
+            int reach = (int)Math.Ceiling((halfLong + rim) / Step);
+            for (int dj = -reach; dj <= reach; dj++)
+                for (int di = -reach; di <= reach; di++)
+                {
+                    int i = ci + di, j = cj + dj;
+                    if (i < 0 || j < 0 || i >= W || j >= H)
+                        continue;
+                    // «Прямоугольное расстояние» с раздельной кромкой по осям.
+                    float along = Math.Abs(di * Step) - halfLong;
+                    float across = Math.Abs(dj * Step) - halfShort;
+                    float tAlong = along <= 0f ? 0f : Math.Min(1f, along / rim);
+                    float tAcross = across <= 0f ? 0f : Math.Min(1f, across / rim);
+                    float t = Math.Max(tAlong, tAcross);
+                    Height[i, j] = t <= 0f
+                        ? padH
+                        : Lerp(Height[i, j], padH, 1f - t);
+                }
+        }
+
         /// <summary>Мягкое террасирование (SupCom-канон: «плоскости и плато»):
         /// плато по краям ступени, рампа — в середине. frac в [0, 0.5−s) → уровень
         /// ниже; (0.5+s, 1] → выше; между — сглаженный подъём (без излома
@@ -177,8 +276,6 @@ namespace SupremeNuclear
             };
 
             float half = w * 0.5f;
-            float steepTan = (float)Math.Tan(t.steepDeg * Math.PI / 180.0);
-            int edgeCells = (int)(t.edgeM / map.Step);
 
             // Ровни — низкочастотный fBm вокруг plainHeight + холмы центра
             // (без них середина карты «мёртвая»: gentleAmp на 40 км не читается);
@@ -221,24 +318,7 @@ namespace SupremeNuclear
             Heightmap.SmoothRamps(map.Height, w, t.stepM);
 
             // Классификация масок по финальным высотам (после зеркалирования).
-            float min = float.MaxValue, max = float.MinValue;
-            for (int j = 0; j < w; j++)
-                for (int i = 0; i < w; i++)
-                {
-                    float h = map.Height[i, j];
-                    if (h < min) min = h;
-                    if (h > max) max = h;
-                    map.Water[i, j] = h < map.SeaLevel;
-                    float dh = Math.Max(
-                        Math.Abs(h - map.Height[Math.Min(w - 1, i + 1), j]),
-                        Math.Abs(h - map.Height[i, Math.Min(w - 1, j + 1)]));
-                    map.Steep[i, j] = !map.Water[i, j] && dh / map.Step > steepTan;
-                    map.Plain[i, j] = !map.Water[i, j] && !map.Steep[i, j];
-                    map.Edge[i, j] = i < edgeCells || j < edgeCells ||
-                                     i >= w - edgeCells || j >= w - edgeCells;
-                }
-            map.Min = min;
-            map.Max = max;
+            map.RebuildMasks(t);
             return map;
         }
 

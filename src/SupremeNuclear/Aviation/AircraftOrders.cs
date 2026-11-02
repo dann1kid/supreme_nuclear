@@ -186,6 +186,12 @@ namespace SupremeNuclear
 
         public static int Count => Plans.Count;
 
+        /// <summary>План борта (живые ссылки на сегменты). Мутация планов — только
+        /// через API сервиса; исключение — CommanderBoardService перештамповывает
+        /// высоту орбиты (AltAgl) сразу после выдачи патруля.</summary>
+        internal static List<OrderSegment> PlanOf(Unit aircraft) =>
+            Plans.TryGetValue(aircraft, out List<OrderSegment> plan) ? plan : null;
+
         /// <summary>Стартовая точка сегмента (позиция борта, AGL сегмента) — группа 0:
         /// она принадлежит борту, а не приказу группы.</summary>
         private static GlobalPosition StartPoint(OrderSegment segment, Unit aircraft) =>
@@ -420,7 +426,9 @@ namespace SupremeNuclear
             plan.Add(MakeRtb(aircraft, airbase));
         }
 
-        private static OrderSegment MakeAttackSegment(Unit target, Vector3 anchorGround)
+        /// <summary>Attack-сегмент (Target + якорь подлёта). Internal — AI-авиация
+        /// вставляет его В ГОЛОВУ плана (InsertHeadSegment), не теряя Patrol-хвост.</summary>
+        internal static OrderSegment MakeAttackSegment(Unit target, Vector3 anchorGround)
         {
             var seg = new OrderSegment
             {

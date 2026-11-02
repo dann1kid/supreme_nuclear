@@ -747,6 +747,23 @@ namespace SupremeNuclear
             // Денежного гейта НЕТ (семантика SupCom): форма стройки — с любым
             // балансом, наливает сколько есть; темп = приток денег × инженеры.
 
+            // Тир здания ≤ тиру ЛУЧШЕГО инженера (канон SupCom, §2.3-1): T1-грузовик
+            // не ставит T2-здания — рост строек идёт инженерами с апнутых фабрик.
+            int engTier = 1;
+            foreach (Unit b in builders)
+            {
+                int t = EngineerService.TierOf(b != null ? b.definition : null);
+                if (t > engTier)
+                    engTier = t;
+            }
+            int buildTier = UnitRoster.BuildingTierOf(def);
+            if (buildTier > engTier)
+            {
+                if (notice)
+                    CommanderHud.Notice(Loc.F("Здание T{0}: нужен инженер T{0} или выше", buildTier));
+                return false;
+            }
+
             // Вода — только верфи: клик по воде даёт точку на ДНЕ (вода не ловится
             // лучом), обычное здание спавнилось бы на дне морском — техника из
             // такого депо рождалась «под землёй» (плейтест v0.94).
@@ -1413,6 +1430,16 @@ namespace SupremeNuclear
         {
             if (task == null)
                 return;
+            // Снап-роли НЕ переносятся: точка занимается при постановке, перенос
+            // уводил здание с точки (доход/буст оставался) — бесконечные ресурсы
+            // «переснапнул и увёл» (плейтест 2026-10-31). Хочешь на другой точке —
+            // снести и построить заново.
+            if (task.Definition == EconomyService.ExtractorDefinition ||
+                task.Definition == EconomyService.HydroDefinition)
+            {
+                CommanderHud.Notice(Loc.Tr("Экстрактор и гидрокарбонку нельзя переместить — построй на новой точке"));
+                return;
+            }
             Vector3 oldLocal = task.Site.ToLocalPosition();
             task.Site = groundPoint.ToGlobalPosition();
             Version++;
@@ -1870,6 +1897,7 @@ namespace SupremeNuclear
                 Vector3 site = t.Site.ToLocalPosition();
                 float radiusSq = Settings.BuildSiteRadiusM * Settings.BuildSiteRadiusM;
                 int onSite = 0;
+                float buildPower = 0f; // сумма факторов строй-мощи (T2 ×2, T3 ×4)
                 foreach (Unit b in t.Builders)
                 {
                     if (!focus.TryGetValue(b, out Task bFocus) || bFocus != t)
@@ -1887,6 +1915,7 @@ namespace SupremeNuclear
                         if (b is Ship sea)
                             sea.SetHoldPosition(true);
                         onSite++;
+                        buildPower += EngineerService.FactorOf(b.definition);
                     }
                 }
                 // Зона стройки: пока внутри чужая наземка/флот (кроме строителей;
@@ -1905,7 +1934,9 @@ namespace SupremeNuclear
 
                 if (onSite > 0 && !t.ZoneBlocked)
                 {
-                    float rate = t.Cost / Mathf.Max(1f, Settings.BuildSecondsPerBuilder) * onSite;
+                    // Мощь стройки = сумма факторов инженеров на площадке: T1-грузовик 1,
+                    // T2 ×2, T3 ×4 (SupCom: старший инженер строит быстрее).
+                    float rate = t.Cost / Mathf.Max(1f, Settings.BuildSecondsPerBuilder) * buildPower;
                     float massWant = Mathf.Min(rate * dt, t.Cost - t.PaidMass);
                     // Налив двух валют: дефицит энергии режет массу пропорционально
                     // (EconomyService.Drain → EcoFlow.DrainStep, DESIGN §2.2).
@@ -2095,7 +2126,7 @@ namespace SupremeNuclear
             // фракции, DeployUnits сама выкатывает через депо (медленный интервал
             // — нативный тик бесплатен, деньги берёт постройка; экономика-интеграция — §12).
             Factory factory = unit.GetComponent<Factory>();
-            if (factory != null)
+            if (factory != null && !EconomyService.IsRoleClone(t.Definition))
             {
                 VehicleDefinition tank = AiCommanderService.TankDefinition();
                 if (tank != null)

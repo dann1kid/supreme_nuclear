@@ -69,6 +69,12 @@ namespace SupremeNuclear
         public float salvageSeconds = 8f;   // база: один инженер; несколько — пропорционально быстрее
         public float salvageRadiusM = 120f;
 
+        // Снабжение v1 (§2.14): слой 1 — обычные БК наземки/флота/турелей бесконечны
+        // (событийный ресток патчем №13); слой 2 — ракетный пуск стоит массу+энергию.
+        public bool freeAmmoForGround = true;
+        public float salvoMassPerLaunch = 25f;
+        public float salvoEnergyPerLaunch = 20f;
+
         public static EconomyProfile Load(string name)
         {
             string dir = Path.Combine(Paths.PluginPath, "SupremeNuclear", "Economy");

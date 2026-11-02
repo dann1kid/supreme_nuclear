@@ -162,6 +162,10 @@ namespace SupremeNuclear
                 MarkFired(seg, idx);
                 return;
             }
+            // Слой 2 (§2.14): залп станции стоит массу+энергию; нет ресурсов —
+            // ждём следующий тик (сегмент НЕ помечаем стрелянным).
+            if (!SupplyService.TryPaySalvo(aircraft))
+                return;
 
             wm.SetActiveStation((byte)idx);
             wm.TargetListChanged();

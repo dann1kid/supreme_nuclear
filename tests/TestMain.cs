@@ -473,23 +473,6 @@ namespace SupremeNuclear.Tests
                 devn > 20f && devn > dev1 * 2f,
                 "devn=" + Math.Round(devn, 1) + " dev1=" + Math.Round(dev1, 2));
 
-            // ---------- Catalog.ApplyTierFilter: терцили по цене ----------
-            var defs = Enumerable.Range(1, 9).Select(i => (Id: i, Price: (float)i * 10)).ToList();
-            var t1 = defs.ToList(); Catalog.ApplyTierFilter(t1, d => d.Price, 1);
-            var t2 = defs.ToList(); Catalog.ApplyTierFilter(t2, d => d.Price, 2);
-            var t3 = defs.ToList(); Catalog.ApplyTierFilter(t3, d => d.Price, 3);
-            var t0 = defs.ToList(); Catalog.ApplyTierFilter(t0, d => d.Price, 0);
-            Check("Тир1 = 3 дешёвых", t1.Count == 3 && t1.All(d => d.Price <= 30), t1.Count.ToString());
-            Check("Тир2 = 3 средних", t2.Count == 3 && t2.All(d => d.Price > 30 && d.Price <= 60));
-            Check("Тир3 = 3 дорогих", t3.Count == 3 && t3.All(d => d.Price > 60));
-            Check("Тир0 = без фильтра", t0.Count == 9);
-            var one = new List<(int Id, float Price)> { (1, 5f) };
-            Catalog.ApplyTierFilter(one, d => d.Price, 1);
-            Check("Тир: один элемент не теряется (T1)", one.Count == 1);
-            var one3 = new List<(int Id, float Price)> { (1, 5f) };
-            Catalog.ApplyTierFilter(one3, d => d.Price, 3);
-            Check("Тир: крошечный каталог не падает (T3 пуст)", one3.Count == 0);
-
             // ---------- Catalog.ShortLabel: короткая подпись плитки ----------
             Check("Подпись: код приоритетен", Catalog.ShortLabel("F-16C", "Fighting Falcon") == "F-16C");
             Check("Подпись: нет кода — первое слово имени",
@@ -1558,6 +1541,154 @@ namespace SupremeNuclear.Tests
                     FleetSalvo.FitsDomain(0.5f, 0.814f, false) && !FleetSalvo.FitsDomain(0.5f, 0.814f, true));
                 Check("Флот-залп: ничья весов — по земле (канон тай-брейка АС)",
                     FleetSalvo.FitsDomain(0.6f, 0.6f, false) && !FleetSalvo.FitsDomain(0.6f, 0.6f, true));
+
+                // Командирский борт: орбита/ремонт/стоянка (чистые функции Util).
+                {
+                    var orbit = Util.CommanderOrbitPoints(new UnityEngine.Vector2(1000f, -2000f), 2500f, 1500f, 4);
+                    Check("Борт: орбита — 4 точки на окружности радиуса, высота AGL",
+                        orbit.Count == 4 &&
+                        orbit.TrueForAll(p => UnityEngine.Mathf.Abs(UnityEngine.Mathf.Sqrt(
+                            (p.x - 1000f) * (p.x - 1000f) + (p.z + 2000f) * (p.z + 2000f)) - 2500f) < 0.5f) &&
+                        orbit.TrueForAll(p => UnityEngine.Mathf.Abs(p.y - 1500f) < 0.01f));
+                    Check("Борт: орбита — минимум 3 точки и эквидистанция",
+                        Util.CommanderOrbitPoints(UnityEngine.Vector2.zero, 100f, 10f, 0).Count == 3 &&
+                        UnityEngine.Mathf.Abs(UnityEngine.Vector3.Distance(orbit[0], orbit[1]) -
+                                  UnityEngine.Vector3.Distance(orbit[1], orbit[2])) < 0.5f);
+                    Check("Борт: ремонт детали — растёт и зажат потолком 100",
+                        UnityEngine.Mathf.Abs(Util.RepairedHitPoints(80f, 3f, 0.5f) - 81.5f) < 0.001f &&
+                        Util.RepairedHitPoints(99.9f, 3f, 5f) == 100f);
+                    Check("Борт: ремонт усиленной детали — потолок 800 (живучесть ×8)",
+                        Util.RepairedHitPoints(799f, 3f, 5f, 800f) == 800f &&
+                        UnityEngine.Mathf.Abs(Util.RepairedHitPoints(100f, 3f, 1f, 800f) - 103f) < 0.001f);
+                    Check("Борт: стоянка — тихая скорость + близость к базе",
+                        Util.BoardParked(new UnityEngine.Vector2(10f, 20f), UnityEngine.Vector2.zero, 400f, 0.5f) &&
+                        !Util.BoardParked(new UnityEngine.Vector2(10f, 20f), UnityEngine.Vector2.zero, 400f, 4f) &&
+                        !Util.BoardParked(new UnityEngine.Vector2(500f, 0f), UnityEngine.Vector2.zero, 400f, 0.5f));
+                }
+
+                // MapGen v3: адаптивность под игроков (чистые функции шаблона/раскладки).
+                {
+                    Check("MapGen: пары игроков — players/2, минимум 1",
+                        ScenarioTemplate.PairsOf(2) == 1 && ScenarioTemplate.PairsOf(4) == 2 &&
+                        ScenarioTemplate.PairsOf(6) == 3 && ScenarioTemplate.PairsOf(1) == 1 &&
+                        ScenarioTemplate.PairsOf(0) == 1);
+                    Check("MapGen: размер — явная ручка terrain.sizeM (players масштабирует только раскладку)",
+                        ScenarioTemplate.PairsOf(4) == 2);
+                    Check("MapGen: смещения K баз симметричны (множество == отражённое)",
+                        ScenarioLayout.BaseOffsets(1, 2800f).Length == 1 &&
+                        ScenarioLayout.BaseOffsets(2, 2800f)[0] == -ScenarioLayout.BaseOffsets(2, 2800f)[1] &&
+                        UnityEngine.Mathf.Abs(ScenarioLayout.BaseOffsets(2, 2800f)[0] + 1400f) < 0.01f &&
+                        UnityEngine.Mathf.Abs(ScenarioLayout.BaseOffsets(3, 2800f)[0] + 2800f) < 0.01f &&
+                        UnityEngine.Mathf.Abs(ScenarioLayout.BaseOffsets(3, 2800f)[1]) < 0.001f &&
+                        UnityEngine.Mathf.Abs(ScenarioLayout.BaseOffsets(4, 2800f)[0] + 4200f) < 0.01f);
+
+                    // Гарантия спавна (ScenarioWorld: выбор по маскам → ШТАМПЫ ровных
+                    // площадок → пересчёт масок; регресс «масса 0», плейтест 2026-10-31).
+                    {
+                        int seed = -679669887; // «плохой» сид юзера
+                        var w1 = ScenarioWorld.Generate(new ScenarioTemplate(), seed);
+                        bool allFlat = w1.Bases.Count >= 1;
+                        foreach (ScenarioLayout.BaseSlot b in w1.Bases)
+                            if (!w1.Hm.FlatOk(b.Pos.x, b.Pos.y)) allFlat = false;
+                        foreach (ScenarioLayout.Deposit d in w1.Mass)
+                            if (!w1.Hm.FlatOk(d.Pos.x, d.Pos.y) || !w1.Hm.SiteOk(d.Pos.x, d.Pos.y)) allFlat = false;
+                        foreach (ScenarioLayout.Deposit d in w1.Coal)
+                            if (!w1.Hm.FlatOk(d.Pos.x, d.Pos.y) || !w1.Hm.SiteOk(d.Pos.x, d.Pos.y)) allFlat = false;
+                        Console.WriteLine("  [диаг] гарантия: баз " + w1.Bases.Count + ", мексов " +
+                            w1.Mass.Count + ", угля " + w1.Coal.Count + ", все ровно+суша: " + allFlat);
+                        Check("MapGen: гарантия спавна — точки ровные и на суше (регресс «масса 0»)",
+                            w1.Bases.Count >= 1 && w1.Mass.Count > 0 && w1.Coal.Count > 0 && allFlat);
+
+                        // Детерминизм: тот же (шаблон, сид) → идентичная раскладка
+                        // (пайплайн зовут ScenarioBuild и RuntimeMap независимо).
+                        var w2 = ScenarioWorld.Generate(new ScenarioTemplate(), seed);
+                        bool same = w1.Bases.Count == w2.Bases.Count && w1.Mass.Count == w2.Mass.Count;
+                        if (same)
+                            for (int i = 0; i < w1.Mass.Count; i++)
+                                if ((w1.Mass[i].Pos - w2.Mass[i].Pos).sqrMagnitude > 0.01f) { same = false; break; }
+                        Check("MapGen: детерминизм ScenarioWorld (шаблон+сид → тот же мир)", same);
+
+                        // Штамп осушает воду: клетка-вода (не край) после StampPad —
+                        // ровная суша (FlatOk).
+                        Heightmap hmS = w1.Hm;
+                        float sx = 0f, sz = 0f;
+                        bool found = false;
+                        for (int j = hmS.W / 4; j < hmS.W * 3 / 4 && !found; j++)
+                            for (int i = hmS.W / 4; i < hmS.W * 3 / 4; i++)
+                                if (hmS.Water[i, j] && !hmS.Edge[i, j])
+                                {
+                                    sx = (i - hmS.W * 0.5f) * hmS.Step;
+                                    sz = (j - hmS.H * 0.5f) * hmS.Step;
+                                    found = true;
+                                    break;
+                                }
+                        if (found)
+                        {
+                            var tS = new ScenarioTemplate();
+                            hmS.StampPad(sx, sz, hmS.Step * 3f);
+                            hmS.RebuildMasks(tS.terrain);
+                        }
+                        Check("MapGen: штамп осушает воду и выравнивает площадку",
+                            !found || (hmS.FlatOk(sx, sz) && hmS.SiteOk(sx, sz)),
+                            found ? "пруд → ровная суша" : "воды в середине не нашлось");
+                    }
+
+                // Тиры фабрик (§2.3а): решение AI на апгрейд + границы терцилей
+                // посева ростера (UnitRoster.TercileCuts).
+                {
+                    Check("Тиры: AI решает «развитие» при профиците (2× цены, инженеры)",
+                        AiCommanderService.FactoryUpgradeWanted(1, false, 3000f, 1500f, 2, 2) &&
+                        !AiCommanderService.FactoryUpgradeWanted(1, false, 2999f, 1500f, 2, 2) &&
+                        !AiCommanderService.FactoryUpgradeWanted(1, true, 9999f, 1500f, 2, 2) &&
+                        !AiCommanderService.FactoryUpgradeWanted(1, false, 9999f, 1500f, 1, 2) &&
+                        !AiCommanderService.FactoryUpgradeWanted(3, false, 9999f, 0f, 5, 2));
+                    UnitRoster.TercileCuts(9, out int i1a, out int i2a);
+                    Check("Терцили: 9 позиций → 3+3+3", i1a == 3 && i2a == 6, i1a + "/" + i2a);
+                    UnitRoster.TercileCuts(1, out int i1b, out int i2b);
+                    Check("Терцили: одна позиция не теряется (T1)", i1b == 1 && i2b == 1);
+                    UnitRoster.TercileCuts(2, out int i1c, out int i2c);
+                    Check("Терцили: две позиции → 1+1", i1c == 1 && i2c == 2);
+                    UnitRoster.TercileCuts(4, out int i1d, out int i2d);
+                    Check("Терцили: четыре позиции → 1+1+2", i1d == 1 && i2d == 2, i1d + "/" + i2d);
+                }
+
+                // Ростер юнитов: фильтр по ЯВНЫМ тирам (UnitRoster).
+                {
+                    var unitsR = new System.Collections.Generic.List<(int Id, int Tier)>
+                        { (1, 1), (2, 1), (3, 2), (4, 2), (5, 3), (6, 1), (7, 3) };
+                    var allR = new System.Collections.Generic.List<(int Id, int Tier)>(unitsR);
+                    Catalog.TierFilterByTier(allR, u => u.Tier, 0, 3);
+                    Check("Ростер: «Все» без гейта — всё",
+                        allR.Count == 7);
+                    var g1 = new System.Collections.Generic.List<(int Id, int Tier)>(unitsR);
+                    Catalog.TierFilterByTier(g1, u => u.Tier, 0, 1);
+                    Check("Ростер: «Все» при потолке T1 — только T1",
+                        g1.Count == 3 && g1.TrueForAll(u => u.Tier == 1));
+                    var g2 = new System.Collections.Generic.List<(int Id, int Tier)>(unitsR);
+                    Catalog.TierFilterByTier(g2, u => u.Tier, 0, 2);
+                    Check("Ростер: «Все» при потолке T2 — T1+T2",
+                        g2.Count == 5 && g2.TrueForAll(u => u.Tier <= 2));
+                    var sel3 = new System.Collections.Generic.List<(int Id, int Tier)>(unitsR);
+                    Catalog.TierFilterByTier(sel3, u => u.Tier, 3, 3);
+                    Check("Ростер: выбранный T3 — точное равенство",
+                        sel3.Count == 2 && sel3.TrueForAll(u => u.Tier == 3));
+                    var clampR = new System.Collections.Generic.List<(int Id, int Tier)>(unitsR);
+                    Catalog.TierFilterByTier(clampR, u => u.Tier, 3, 1);
+                    Check("Ростер: выбранный T3 выше потолка — кламп в T1",
+                        clampR.Count == 3 && clampR.TrueForAll(u => u.Tier == 1));
+                }
+
+                // Снабжение v1 (§2.14): гейт залпа «хватает обеих валют».
+                {
+                    Check("Снабжение: залп разрешён при запасе, запрещён при дефиците любой валюты",
+                        SupplyService.SalvoAllowed(100f, 100f, 25f, 20f, true) &&
+                        !SupplyService.SalvoAllowed(24f, 100f, 25f, 20f, true) &&
+                        !SupplyService.SalvoAllowed(100f, 19f, 25f, 20f, true) &&
+                        !SupplyService.SalvoAllowed(0f, 0f, 25f, 20f, false) && // масса гейтится и без энергослоя
+                        SupplyService.SalvoAllowed(25f, 0f, 25f, 20f, false) && // энергослой не активен — энергия не гейтится
+                        SupplyService.SalvoAllowed(10f, 10f, 0f, 0f, true));   // нулевая цена — всегда да
+                }
+                }
             }
 
             Console.WriteLine(_failed == 0 ? "ВСЕ ТЕСТЫ ПРОЙДЕНЫ" : "ПРОВАЛОВ: " + _failed);

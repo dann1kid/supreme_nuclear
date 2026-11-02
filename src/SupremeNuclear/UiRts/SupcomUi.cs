@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using NuclearOption.Networking;
 using NuclearOption.SavedMission;
 using UnityEngine;
 using UnityEngine.UI;
@@ -126,7 +127,8 @@ namespace SupremeNuclear
         private RectTransform _tierRoot;     // полоса выбора пула (тиры каталога)
         private readonly (Button btn, Image img, int tier)[] _tierButtons =
             new (Button, Image, int)[4];     // Все / T1 / T2 / T3
-        private int _prodTier;               // 0 — все, 1..3 — тир по цене каталога
+        private int _prodTier;               // 0 — все, 1..3 — фильтр-просмотр каталога
+        private int _ctxTier = 3;            // тир контекста: фабрика/аэродром или ЛУЧШИЙ инженер выделения
         private readonly (Button btn, Image img)[] _tabButtons = new (Button, Image)[4];
         private int _activeTab = TabRoster;
         private int _contextHash = -1;
@@ -728,7 +730,6 @@ step = "tiers";
                 b.gameObject.AddComponent<LayoutElement>().minWidth = 34f;
                 _tierButtons[i] = (b, b.GetComponent<Image>(), i);
             }
-
             // Две строки-ленты; по 56 px с каждого края — их кнопки листания.
 step = "strip1";
             _strip1 = UiKit.HStrip(panel, "strip1",
@@ -872,8 +873,57 @@ step = "arrows";
             return _ctxFactories;
         }
 
+        /// <summary>Плитка «переход на тир» в каталоге фабрики (канон SupCom,
+        /// v0.136): ПЕРВОЙ в списке СВОЕГО тира (и в «Все»); клик ставит апгрейд
+        /// ГОЛОВОЙ очереди — он занимает производство. Цепочка стакается (v0.137):
+        /// цель — от «пендящего» тира (в очереди T1→T2 → плитка «T2→T3»);
+        /// исчерпана (T3 в очереди) — плитки нет, состояние живёт в очереди.</summary>
+        private void UpgradeOrderTile(object factory)
+        {
+            if (factory == null)
+                return;
+            int from = ProductionTasks.PendingTierOf(factory);
+            if (from >= 3 || !FactoryTierService.NextCost(from, out float mass, out _, out _))
+                return;
+            if (_prodTier > 0 && _prodTier != from)
+                return; // плитка в списке СВОЕГО тира: T1-список → «→T2»
+            Tile(_strip1Content, new TileSpec
+            {
+                Caption = "T" + from + "→T" + (from + 1), // цифры/стрелка — не переводится
+                TypeBadge = Loc.Tr("АПГРЕЙД"),
+                Badge = mass.ToString("F0"),
+                OnLeft = () => ProductionTasks.EnqueueUpgrade(factory),
+            });
+        }
+
+        /// <summary>Позиции апгрейда в строке очереди (по плитке на звено цепочки,
+        /// порядок очереди): у наливаемого — полоса, ПКМ — отмена с возвратом.</summary>
+        private void EmitUpgradeQueueTile(object factory)
+        {
+            object key = FactoryTierService.KeyOfFactory(factory);
+            if (key == null)
+                return;
+            foreach (ProductionTasks.QueueItem up in ProductionTasks.All)
+            {
+                if (!up.IsUpgrade || up.Factory != key)
+                    continue;
+                ProductionTasks.QueueItem item = up;
+                Tile(_strip2Content, new TileSpec
+                {
+                    Caption = "T" + (item.ToTier - 1) + "→T" + item.ToTier,
+                    TypeBadge = Loc.Tr("АПГРЕЙД"),
+                    Progress = item.Progress01,
+                    OnRight = () => ProductionTasks.Cancel(item),
+                });
+            }
+        }
+
         private void SwitchTier(int tier)
         {
+            // Полоса — фильтр-ПРОСМОТР в пределах тира контекста (каталог и так
+            // ограничен тиром фабрики/инженера): выше просто нечего показывать.
+            if (tier >= 1 && tier > _ctxTier)
+                tier = _ctxTier;
             if (_prodTier == tier)
                 return;
             _prodTier = tier;
@@ -995,6 +1045,7 @@ step = "arrows";
                     Caption = Catalog.ShortLabel(def.code, def.unitName),
                     Badge = "×" + units.Count,
                     TypeBadge = TypeBadgeOf(def),
+                    TierBadge = "T" + UnitRoster.TierOf(def),
                     OnLeft = () => SelectionService.SelectTypeStatic(controller, d),
                     Def = def,
                 });
@@ -1552,11 +1603,15 @@ step = "arrows";
                 else if (unit is Ship)
                 {
                     hasGround = true;
-                    if (FleetSalvo.ShipHasMissiles(unit))
+                    if (FleetSalvo.UnitHasMissiles(unit))
                         hasMissileFleet = true;
                 }
                 else if (unit is GroundVehicle)
+                {
                     hasGround = true;
+                    if (FleetSalvo.UnitHasMissiles(unit)) // РСЗО/ПУ — общий залп (v0.133)
+                        hasMissileFleet = true;
+                }
             }
             if (selCount != 1)
                 singleAir = null;
@@ -2082,6 +2137,7 @@ step = "arrows";
             // очередей; представители выше — ПЕРВЫЕ своего типа (детерминизм).
             _ctxFactories.Clear();
             int selHash = 17;
+            int engTier = 1; // ЛУЧШИЙ инженер выделения: тир-потолок каталога строек
             foreach (Unit unit in selected)
             {
                 selHash = selHash * 31 + (unit != null ? unit.GetInstanceID() : 0);
@@ -2104,8 +2160,13 @@ step = "arrows";
                 }
                 else if (EconomyService.IsExtractor(unit) && extractor == null)
                     extractor = unit;
-                else if (!hasEngineer && GameApi.IsEngineer(unit))
+                else if (GameApi.IsEngineer(unit))
+                {
                     hasEngineer = true;
+                    int t = EngineerService.TierOf(unit != null ? unit.definition : null);
+                    if (t > engTier)
+                        engTier = t;
+                }
                 else if (carrier == null && unit is Ship)
                 {
                     Airbase shipBase = unit.GetAirbase(); // не-авианосцу вернёт null
@@ -2146,6 +2207,24 @@ step = "arrows";
                 _ctxFactories.Add(siteFactory);
             }
 
+            // Тир контекста (§2.3а): инженер → ЛУЧШИЙ тир выделения (потолок
+            // каталога строек); фабрики → МИНИМАЛЬНЫЙ «пендящий» тир выделения
+            // (с учётом апгрейдов в их очередях — очередь программируется
+            // наперёд: за →T2 сразу видны T2-юниты); контекст аэродрома —
+            // «пендящий» тир базы. Нет контекста — 3.
+            _ctxTier = 3;
+            if (hasEngineer)
+                _ctxTier = engTier;
+            else
+            {
+                foreach (object f in _ctxFactories)
+                    _ctxTier = Mathf.Min(_ctxTier, ProductionTasks.PendingTierOf(f));
+                if (airbase != null)
+                    _ctxTier = Mathf.Min(_ctxTier, ProductionTasks.PendingTierOf(airbase));
+            }
+            if (_prodTier > _ctxTier)
+                _prodTier = 0; // фильтр-просмотр выше нового контекста — в «Все»
+
             // Автопереключение вкладки под выделение; ручной клик игрока уважаем,
             // пока выделение не сменилось (_manualTabForSel).
             if (_manualTabForSel != selHash)
@@ -2166,7 +2245,11 @@ step = "arrows";
                 _tierRoot.gameObject.SetActive(_activeTab == TabProduction);
             for (int i = 0; i < _tierButtons.Length; i++)
                 if (_tierButtons[i].img != null)
-                    _tierButtons[i].img.color = i == _prodTier ? BtnActive : BtnBg;
+                {
+                    bool locked = i >= 1 && i > _ctxTier; // выше тира фабрики/инженера
+                    _tierButtons[i].img.color = i == _prodTier ? BtnActive
+                        : locked ? new Color(0.32f, 0.32f, 0.34f, 0.65f) : BtnBg;
+                }
 
             // Деньги НЕ в ключе пересборки (§12-45а, v0.112): в каталоге «Производства»
             // нет фонд-зависимого контента (цены статичны, потоковая модель льёт что есть),
@@ -2181,6 +2264,8 @@ step = "arrows";
                        (airbase != null ? 2 : 0) + (hasEngineer ? 4 : 0) +
                        (navalDock != null ? 8 : 0) + (carrier != null ? 16 : 0) +
                        (siteFactory != null ? 32 : 0);
+                // Тиры: завершение апгрейда фабрики/смена контекста — пересборка
+                hash = hash * 31 + FactoryTierService.Version * 7 + _ctxTier;
                 if (airbase != null)
                     hash = hash * 31 + AirbaseReserve.Version; // плитки резерва ангара
                 // смена лодаута колесом — перестройка каталога (суффикс «·ЛN» на плитке)
@@ -2220,9 +2305,16 @@ step = "arrows";
             // заказы живут пер-ангарно, KeyFor(airbase) их не видел — строка
             // вышки стояла пустой и не обновлялась. Ключуем каждый ангар базы.
             if (airbase != null && airbase.hangars != null)
+            {
                 foreach (Hangar hangar in airbase.hangars)
                     if (hangar != null)
                         queueKey = queueKey * 31 + ProductionTasks.KeyFor(hangar) + 13;
+                // Позиция апгрейда тира базы (налив — на ключе аэродрома, v0.136)
+                queueKey = queueKey * 31 + ProductionTasks.KeyFor(airbase) + 7;
+            }
+            // Выделенные ангары: их строка показывает и апгрейд тира базы
+            if (hangars.Count > 0 && hangars[0] != null && hangars[0].parentAirbase != null)
+                queueKey = queueKey * 31 + ProductionTasks.KeyFor(hangars[0].parentAirbase) + 7;
             bool queueShown = _activeTab == TabProduction || _activeTab == TabTemplates;
             if (queueShown && queueKey != _queueHash)
             {
@@ -2433,6 +2525,7 @@ step = "arrows";
             public float? Progress;     // полоса готовности головной позиции очереди
             public Color? BarColor;
             public string TypeBadge;    // тип объекта: ТНК/ЗРК/АРТ... или И/У/М авиации
+            public string TierBadge;    // тир ростера каталога: T1/T2/T3 (право-низ, §2.13)
             public System.Action OnLeft;
             public System.Action OnRight;
             public UnitDefinition Def;  // не null — плитка регистрируется для hover-карточки
@@ -2461,6 +2554,15 @@ step = "arrows";
 
             if (!string.IsNullOrEmpty(spec.TypeBadge))
                 AddTileTypeBadge(go.transform, spec.TypeBadge);
+            if (!string.IsNullOrEmpty(spec.TierBadge))
+            {
+                var tb = Label(go.transform, "tier", spec.TierBadge, 10, Accent, TextAnchor.LowerRight);
+                var rtT = (RectTransform)tb.transform;
+                rtT.anchorMin = new Vector2(0.45f, 0f);
+                rtT.anchorMax = new Vector2(0.98f, 0.28f);
+                rtT.offsetMin = rtT.offsetMax = Vector2.zero;
+                tb.raycastTarget = false;
+            }
             if (!string.IsNullOrEmpty(spec.Badge))
             {
                 var b = Label(go.transform, "n", spec.Badge, 11, Accent, TextAnchor.UpperRight);
@@ -2617,6 +2719,8 @@ step = "arrows";
         private void FillHangarsQueue(List<Hangar> hangars, Airbase distributed = null)
         {
             ClearChildren(_strip2Content);
+            // Апгрейд тира базы (если заказан) — головой агрегата: полоса налива базы.
+            EmitUpgradeQueueTile(distributed != null ? (object)distributed : hangars.Count > 0 ? hangars[0] : null);
             var order = new List<UnitDefinition>();
             var totals = new Dictionary<UnitDefinition, int>();
             var activeCounts = new Dictionary<UnitDefinition, int>();
@@ -2727,6 +2831,7 @@ step = "arrows";
                         Icon = IconOf(runDef),
                         Caption = Catalog.ShortLabel(runDef.code, runDef.unitName),
                         TypeBadge = TypeBadgeOf(runDef),
+                        TierBadge = "T" + UnitRoster.TierOf(runDef),
                         Progress = active.Progress01,
                         OnLeft = () => ProductionTasks.InsertAfter(active, RtsInput.Shift ? 5 : 1),
                         OnRight = () => ProductionTasks.Cancel(active),
@@ -2742,6 +2847,7 @@ step = "arrows";
                         Icon = IconOf(def),
                         Caption = Catalog.ShortLabel(def.code, def.unitName),
                         TypeBadge = TypeBadgeOf(def),
+                        TierBadge = "T" + UnitRoster.TierOf(def),
                         Badge = waiting > 1 ? "×" + waiting : null,
                         OnLeft = () => ProductionTasks.InsertAfter(tail, RtsInput.Shift ? 5 : 1),
                         OnRight = () => ProductionTasks.RemoveTail(factory, def, RtsInput.Shift ? 5 : 1),
@@ -2751,7 +2857,25 @@ step = "arrows";
             }
             foreach (ProductionTasks.QueueItem item in ProductionTasks.All)
             {
-                if (item.Factory != factory || item.UnitDef == null)
+                if (item.Factory != factory)
+                    continue;
+                if (item.IsUpgrade)
+                {
+                    // Плитка апгрейда — НА СВОЁМ МЕСТЕ очереди (скрипт SupCom:
+                    // юниты → апгрейд → юниты постарше), не отдельной головой.
+                    EmitRun();
+                    items.Clear();
+                    ProductionTasks.QueueItem up = item;
+                    Tile(_strip2Content, new TileSpec
+                    {
+                        Caption = "T" + (up.ToTier - 1) + "→T" + up.ToTier,
+                        TypeBadge = Loc.Tr("АПГРЕЙД"),
+                        Progress = up.Progress01,
+                        OnRight = () => ProductionTasks.Cancel(up),
+                    });
+                    continue;
+                }
+                if (item.UnitDef == null)
                     continue;
                 if (items.Count > 0 && item.UnitDef != runDef)
                 {
@@ -2789,17 +2913,22 @@ step = "arrows";
                 });
             if (!factorySite)
                 return;
+            UpgradeOrderTile(task); // апгрейд можно заказать и площадке — нальётся по готовности
 
             // Каталог = каталог ГОТОВОЙ фабрики этого рода (каталог верфи — весь
-            // флот, ангара — его собственный список с префаба, депо — PurchaseService).
+            // флот, ангара — его собственный список с префаба, депо — PurchaseService);
+            // потолок — «пендящий» тир ПЛОЩАДКИ (апгрейд в её очереди считается;
+            // по готовности Adopt перенесёт и его, и очередь).
+            int siteTier = ProductionTasks.PendingTierOf(task);
             if (task.IsDock && Encyclopedia.i != null && Encyclopedia.i.ships != null)
             {
                 var defs = new List<ShipDefinition>();
                 foreach (ShipDefinition def in Encyclopedia.i.ships)
                     if (def != null && def.unitPrefab != null &&
-                        def.unitPrefab.GetComponent<Ship>() != null && def.IsAllowed(false))
+                        def.unitPrefab.GetComponent<Ship>() != null && def.IsAllowed(false) &&
+                        !UnitRoster.IsHidden(def))
                         defs.Add(def);
-                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                Catalog.TierFilterByTier(defs, UnitRoster.TierOf, _prodTier, siteTier);
                 foreach (ShipDefinition def in defs)
                 {
                     ShipDefinition d = def;
@@ -2808,6 +2937,7 @@ step = "arrows";
                         Icon = IconOf(def),
                         Caption = Catalog.ShortLabel(def.code, def.unitName),
                         TypeBadge = TypeBadgeOf(def),
+                        TierBadge = "T" + UnitRoster.TierOf(def),
                         Badge = def.value > 0f ? def.value.ToString("F0") : null,
                         OnLeft = () => ProductionTasks.EnqueueSite(task, d),
                         Def = def,
@@ -2819,9 +2949,9 @@ step = "arrows";
             {
                 var defs = new List<AircraftDefinition>();
                 foreach (AircraftDefinition a in ProductionTasks.SiteAirCatalog(task.Definition))
-                    if (a != null)
+                    if (a != null && !UnitRoster.IsHidden(a))
                         defs.Add(a);
-                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                Catalog.TierFilterByTier(defs, UnitRoster.TierOf, _prodTier, siteTier);
                 foreach (AircraftDefinition def in defs)
                 {
                     AircraftDefinition d = def;
@@ -2832,6 +2962,7 @@ step = "arrows";
                         Caption = Catalog.ShortLabel(def.code, def.unitName) +
                                   (li > 0 ? Loc.Tr("·Л") + li : ""),
                         TypeBadge = TypeBadgeOf(def),
+                        TierBadge = "T" + UnitRoster.TierOf(def),
                         Badge = def.value > 0f ? def.value.ToString("F0") : null,
                         OnLeft = () => ProductionTasks.EnqueueSite(task, d),
                         Def = def,
@@ -2846,9 +2977,9 @@ step = "arrows";
             {
                 var defs = new List<VehicleDefinition>();
                 foreach (VehicleDefinition def in PurchaseService.Catalog)
-                    if (def != null)
+                    if (def != null && def.IsAllowed(false) && !UnitRoster.IsHidden(def))
                         defs.Add(def);
-                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                Catalog.TierFilterByTier(defs, UnitRoster.TierOf, _prodTier, siteTier);
                 foreach (VehicleDefinition def in defs)
                 {
                     VehicleDefinition d = def;
@@ -2857,6 +2988,7 @@ step = "arrows";
                         Icon = IconOf(def),
                         Caption = Catalog.ShortLabel(def.code, def.unitName),
                         TypeBadge = TypeBadgeOf(def),
+                        TierBadge = "T" + UnitRoster.TierOf(def),
                         Badge = def.value > 0f ? def.value.ToString("F0") : null,
                         OnLeft = () => ProductionTasks.EnqueueSite(task, d),
                         Def = def,
@@ -2984,7 +3116,9 @@ step = "arrows";
         private void FillProductionTab(FactionHQ hq, VehicleDepot depot, Building navalDock,
             Airbase airbase, bool hasEngineer, List<Hangar> hangars = null)
         {
-            string tierName = _prodTier == 0 ? "" : " · T" + _prodTier;
+            // Суффикс заголовка — ФАКТИЧЕСКИЙ тир контекста: фабрика («T2» после
+            // апгрейда) или лучший инженер выделения (потолок строек).
+            string tierName = " · T" + _ctxTier;
             // АНГАР(Ы) — индивидуальные авиафабрии (v0.88): каталог — юнион списков
             // выделенных; клик по плитке = +1 КАЖДОМУ выделенному, кто умеет строить
             // (паттерн SupCom «выделил пачку фабрик — скормил заказ всем»).
@@ -2993,12 +3127,13 @@ step = "arrows";
                 _contextTitle.text = hangars.Count == 1
                     ? Loc.Tr("Ангар — авиация (клик: в очередь)") + tierName
                     : Loc.F("Ангары ×{0} — клик: +1 каждому умеющему", hangars.Count) + tierName;
+                UpgradeOrderTile(hangars[0]); // «→T2/→T3» — первой плиткой (тир аэродрома)
                 var defs = new List<AircraftDefinition>();
                 foreach (Hangar hangar in hangars)
                     foreach (AircraftDefinition a in hangar.GetAvailableAircraft())
-                        if (a != null && !defs.Contains(a))
+                        if (a != null && !defs.Contains(a) && !UnitRoster.IsHidden(a))
                             defs.Add(a);
-                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                Catalog.TierFilterByTier(defs, UnitRoster.TierOf, _prodTier, _ctxTier);
                 foreach (AircraftDefinition def in defs)
                 {
                     AircraftDefinition d = def;
@@ -3032,12 +3167,14 @@ step = "arrows";
             if (navalDock != null && Encyclopedia.i != null && Encyclopedia.i.ships != null)
             {
                 _contextTitle.text = Loc.Tr("Верфь — флот (клик: в очередь)") + tierName;
+                UpgradeOrderTile(navalDock);
                 var defs = new List<ShipDefinition>();
                 foreach (ShipDefinition def in Encyclopedia.i.ships)
                     if (def != null && def.unitPrefab != null &&
-                        def.unitPrefab.GetComponent<Ship>() != null && def.IsAllowed(false))
+                        def.unitPrefab.GetComponent<Ship>() != null && def.IsAllowed(false) &&
+                        !UnitRoster.IsHidden(def))
                         defs.Add(def);
-                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                Catalog.TierFilterByTier(defs, UnitRoster.TierOf, _prodTier, _ctxTier);
                 foreach (ShipDefinition def in defs)
                 {
                     ShipDefinition d = def;
@@ -3046,6 +3183,7 @@ step = "arrows";
                         Icon = IconOf(def),
                         Caption = Catalog.ShortLabel(def.code, def.unitName),
                         TypeBadge = TypeBadgeOf(def),
+                        TierBadge = "T" + UnitRoster.TierOf(def),
                         Badge = def.value > 0f ? def.value.ToString("F0") : null,
                         OnLeft = () => ProductionTasks.EnqueueShip(navalDock, d),
                         Def = def,
@@ -3086,13 +3224,14 @@ step = "arrows";
                     });
                 var defs = new List<BuildingDefinition>();
                 foreach (BuildingDefinition def in Encyclopedia.i.buildings)
-                    if (def != null && !EconomyService.IsReplacedOriginal(def))
+                    if (def != null && !EconomyService.IsReplacedOriginal(def) &&
+                        !UnitRoster.IsHidden(def))
                         defs.Add(def); // оригиналы-доноры заменены клонами с честными именами
-                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
-                // Эконом-постройки ВНЕ ценового фильтра: терциль Т1 режет по value,
-                // и семь «нулевых» оборонных сооружений вытесняли клоны во Т2
-                // (скрин юзера 2026-10-30: GEN/MES/HYD отсутствовали в Т1).
-                // Базовая экономика доступна в ЛЮБОМ тире — как ВПП/верфь.
+                // Тир-гейт строек — ЯВНЫЕ тиры ростера зданий (§2.13) ≤ тиру ЛУЧШЕГО
+                // инженера выделения (_ctxTier); эко-клоны без записи — тир 1.
+                Catalog.TierFilterByTier(defs, UnitRoster.BuildingTierOf, _prodTier, _ctxTier);
+                // Эконом-постройки ВНЕ общего порядка: базовая экономика доступна
+                // в ЛЮБОМ тире — как ВПП/верфь (канон SupCom: мекс/ген — фундамент).
                 if (EconomyService.GeneratorDefinition != null)
                     defs.Insert(0, EconomyService.GeneratorDefinition);
                 if (EconomyService.HydroDefinition != null)
@@ -3107,6 +3246,7 @@ step = "arrows";
                         Icon = def.friendlyIcon != null ? def.friendlyIcon : def.mapIcon,
                         Caption = Catalog.ShortLabel(def.code, def.unitName),
                         TypeBadge = BuildTasks.IsHangarDefinition(d) ? Loc.Tr("АНГ") : null,
+                        TierBadge = "T" + UnitRoster.BuildingTierOf(def),
                         Badge = def.value > 0f ? def.value.ToString("F0") : null,
                         OnLeft = () => BuildTasks.Pending = d,
                         Def = def,
@@ -3118,11 +3258,17 @@ step = "arrows";
             if (depot != null && PurchaseService.Catalog != null)
             {
                 _contextTitle.text = Loc.Tr("Фабрика — техника (клик: в очередь)") + tierName;
+                UpgradeOrderTile(depot);
                 var defs = new List<VehicleDefinition>();
                 foreach (VehicleDefinition def in PurchaseService.Catalog)
-                    if (def != null)
+                    if (def != null && def.IsAllowed(false) && !UnitRoster.IsHidden(def))
                         defs.Add(def);
-                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                // Инженеры T2/T3 — производятся депо СООТВЕТСТВУЮЩЕГО тира
+                // (клоны грузовика, тир зарегистрирован в ростере — фильтр общий).
+                foreach (VehicleDefinition clone in EngineerService.Clones)
+                    if (clone != null && !defs.Contains(clone))
+                        defs.Add(clone);
+                Catalog.TierFilterByTier(defs, UnitRoster.TierOf, _prodTier, _ctxTier);
                 foreach (VehicleDefinition def in defs)
                 {
                     VehicleDefinition d = def;
@@ -3131,6 +3277,7 @@ step = "arrows";
                         Icon = IconOf(def),
                         Caption = Catalog.ShortLabel(def.code, def.unitName),
                         TypeBadge = TypeBadgeOf(def),
+                        TierBadge = "T" + UnitRoster.TierOf(def),
                         Badge = def.value > 0f ? def.value.ToString("F0") : null,
                         OnLeft = () => ProductionTasks.EnqueueGround(depot, d),
                         Def = def,
@@ -3146,6 +3293,7 @@ step = "arrows";
                 _contextTitle.text = (airbase.AttachedAirbase
                     ? Loc.Tr("Авианосец — авиация (клик: в очередь; РЕЗ — выкат)")
                     : Loc.Tr("Аэродром — авиация (клик: в очередь; РЕЗ — выкат)")) + tierName;
+                UpgradeOrderTile(airbase); // «→T2/→T3» — первой плиткой каталога базы
                 // Резерв ангаров (вернувшиеся «на базу» борта): выкат бесплатный,
                 // плитки ПЕРЕД каталогом, бейдж РЕЗ + счётчик.
                 var reserve = AirbaseReserve.Of(airbase);
@@ -3177,7 +3325,7 @@ step = "arrows";
                     AddItemButton(_strip1Content, null, Loc.Tr("нет работоспособных ангаров"), null);
                     return;
                 }
-                Catalog.ApplyTierFilter(defs, d => d.value, _prodTier);
+                Catalog.TierFilterByTier(defs, UnitRoster.TierOf, _prodTier, _ctxTier);
                 foreach (AircraftDefinition def in defs)
                 {
                     AircraftDefinition d = def;
@@ -3187,6 +3335,7 @@ step = "arrows";
                         Icon = IconOf(def),
                         Caption = Catalog.ShortLabel(def.code, def.unitName) + (li > 0 ? Loc.Tr("·Л") + li : ""),
                         TypeBadge = TypeBadgeOf(def),
+                        TierBadge = "T" + UnitRoster.TierOf(def),
                         Badge = def.value > 0f ? def.value.ToString("F0") : null,
                         OnLeft = () => ProductionTasks.EnqueueAirDistributed(airbase, d),
                         Def = def,

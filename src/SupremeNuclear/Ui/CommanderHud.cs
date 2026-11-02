@@ -400,8 +400,72 @@ namespace SupremeNuclear
             }
 
             DrawAirbaseDiamonds(cam, hq, px);
+            DrawCommanderBoards(cam, hq, px);
             DrawHostileIcons(cam, hq, px);
             DrawMissileWarnings(cam, hq, px);
+        }
+
+        /// <summary>Маркер командирского борта (DESIGN §2.1): свой — зелёная
+        /// «корона» с подписью КОМАНДИР (+EMCON при молчании); чужой — красный,
+        /// только пока есть контакт разведки (как чужой аэродром).</summary>
+        private static void DrawCommanderBoards(Camera cam, FactionHQ hq, float px)
+        {
+            IReadOnlyList<CommanderBoardService.BoardRec> boards = CommanderBoardService.Boards;
+            if (boards == null || boards.Count == 0)
+                return;
+            float d = px * 2.1f;
+            for (int i = 0; i < boards.Count; i++)
+            {
+                CommanderBoardService.BoardRec rec = boards[i];
+                Unit board = rec.Board;
+                if (board == null || board.disabled || rec.DeadHandled)
+                    continue;
+                bool own = rec.Hq == hq;
+                if (!own && !GameApi.TryGetContact(board, hq, out _))
+                    continue; // чужой борт — только по разведке
+                Vector3 pos = board.transform.position;
+                Vector3 sp = cam.WorldToScreenPoint(pos);
+                if (sp.z <= 0f || sp.x < -60f || sp.x > Screen.width + 60f ||
+                    sp.y < -60f || sp.y > Screen.height + 60f)
+                    continue;
+                float gx = sp.x;
+                float gy = Screen.height - sp.y;
+                if (UnderMinimapWindow(new Vector2(gx, gy)))
+                    continue;
+                Color c = own
+                    ? new Color(0.45f, 0.95f, 0.5f, 0.95f)
+                    : new Color(1f, 0.35f, 0.3f, 0.95f);
+                // «Корона»: треугольник вверх над точкой + двойная нижняя перекладина.
+                var tri = new[]
+                {
+                    new Vector2(gx, gy - d * 0.7f),
+                    new Vector2(gx + d * 0.5f, gy + d * 0.25f),
+                    new Vector2(gx - d * 0.5f, gy + d * 0.25f),
+                };
+                for (int e = 0; e < 3; e++)
+                {
+                    Vector2 a1 = tri[e];
+                    Vector2 a2 = tri[(e + 1) % 3];
+                    int dots = Mathf.Clamp((int)(Vector2.Distance(a1, a2) / 7f), 1, 14);
+                    for (int k = 0; k <= dots; k++)
+                    {
+                        Vector2 p = Vector2.Lerp(a1, a2, k / (float)dots);
+                        DrawRect(new Rect(p.x - 1.2f, p.y - 1.2f, 2.4f, 2.4f), c);
+                    }
+                }
+                DrawRect(new Rect(gx - d * 0.5f, gy + d * 0.38f, d, 2.4f), c);
+                DrawRect(new Rect(gx - 2f, gy - 2f, 4f, 4f), c);
+                // Подпись: свой — «КОМАНДИР» (+ «EMCON» приглушённо),
+                // чужой — метка цели.
+                if (own)
+                {
+                    ClosedLabel(gx, gy + d * 0.6f, Loc.Tr("КОМАНДИР"));
+                    if (rec.Emcon)
+                        ClosedLabel(gx, gy + d * 0.6f + 14f, "EMCON"); // аббревиатура, не переводится
+                }
+                else
+                    ClosedLabel(gx, gy + d * 0.6f, Loc.Tr("ГЛАВНАЯ ЦЕЛЬ"));
+            }
         }
 
         /// <summary>Аэродромы — ромбы: свой зелёный; чужой красный ТОЛЬКО под разведкой,

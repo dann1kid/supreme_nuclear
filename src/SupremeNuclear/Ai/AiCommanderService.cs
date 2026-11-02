@@ -24,6 +24,10 @@ namespace SupremeNuclear
         {
             public bool announced;          // Notice о активации показан
             public float snapshotAt;        // последний снапшот состава в лог
+            public float nextEngineerLogAt; // троттл лога восполнения инженеров
+            public bool airSlept;           // авиакрыло спит (нет ангаров/каталога)
+            public int prevAir = -1;        // телеметрия размера авиакрыла
+            public float nextAirStrikeAt;   // таймер авиаудара по экономике
             public int wavesSent;
             public float nextWaveAt;        // Time.time, до которого волна ждёт полного сбора
             public Unit builder;            // первый инженер (зонд диагностики)
@@ -103,7 +107,11 @@ namespace SupremeNuclear
                     continue;
                 if (!States.TryGetValue(hq, out State st))
                 {
-                    st = new State { nextWaveAt = Time.time + _profile.waveIntervalSec };
+                    st = new State
+                    {
+                        nextWaveAt = Time.time + _profile.waveIntervalSec,
+                        nextAirStrikeAt = Time.time + _profile.airStrikeIntervalSec,
+                    };
                     States[hq] = st;
                 }
                 RunFaction(hq, st);
@@ -130,6 +138,7 @@ namespace SupremeNuclear
             Engineers.Clear();
             Combat.Clear();
             Depots.Clear();
+            AirBuf.Clear();
             int powers = 0;
             foreach (Unit unit in UnitRegistry.allUnits)
             {
@@ -139,6 +148,8 @@ namespace SupremeNuclear
                     continue;
                 if (GameApi.IsEngineer(unit))
                     Engineers.Add(unit);
+                else if (unit is Aircraft)
+                    AirBuf.Add(unit);
                 else if (unit is GroundVehicle)
                     Combat.Add(unit);
                 if (unit is VehicleDepot depot && depot != null)
@@ -204,6 +215,171 @@ namespace SupremeNuclear
             RunEconomy(hq, st, bp, Engineers, powers, Depots.Count > 0);
             RunProduction(hq, st, bp, Depots);
             RunWaves(hq, st, bp, Combat);
+            RunAir(hq, st, bp, AirBuf);
+        }
+
+        /// <summary>Свободный буфер авиакрыла (переиспользуется тиком).</summary>
+        private static readonly List<Unit> AirBuf = new List<Unit>();
+
+        /// <summary>Авиакрыло v1 (2026-10-31): CAP-кольцо над своей базой, перехват
+        /// воздушных угроз, периодические авиаудары по экономике противника.
+        /// Производство — ProductionTasks.EnqueueAirDistributed (оплата потоково
+        /// у владельца ангара, т.е. из кошелька фракции); обслуживание бортов —
+        /// нативный путь SortieService (RTB/перевооружение/повтор вылета сами).</summary>
+        private static void RunAir(FactionHQ hq, State st, Vector3 basePos, List<Unit> aircraft)
+        {
+            if (!_profile.airEnabled)
+                return;
+            Airbase airbase = OwnAirbaseOf(hq);
+            AircraftDefinition fighter = airbase != null ? FighterDefinition(airbase) : null;
+            if (fighter == null)
+            {
+                if (!st.airSlept)
+                {
+                    st.airSlept = true;
+                    Log.Warn("AI: авиакрыло спит — " + (airbase == null
+                        ? "нет своей базы с ангарями"
+                        : "в каталоге ангаров нет допустимых бортов (fighterJsonKey?)"));
+                }
+                return;
+            }
+            if (st.airSlept)
+            {
+                st.airSlept = false;
+                Log.Info("AI: авиакрыло — " + fighter.jsonKey);
+            }
+
+            // Заказ: держим численность (гейт по массе — как у наземки).
+            float cost = fighter.value > 0f ? fighter.value : Settings.BuildDefaultCost;
+            if (aircraft.Count < _profile.airCap &&
+                hq.factionFunds >= cost * _profile.airReserveFactor)
+                ProductionTasks.EnqueueAirDistributed(airbase, fighter);
+
+            // Телеметрия размера крыла.
+            if (st.prevAir >= 0 && st.prevAir != aircraft.Count)
+                Log.Info("AI-событие: авиакрыло " + st.prevAir + " → " + aircraft.Count);
+            st.prevAir = aircraft.Count;
+
+            // CAP: борт без плана — на кольцо над базой (высота — профиль приказов).
+            float capAlt = AircraftOrders.EffectiveProfile.AltitudeAgl;
+            List<Vector3> ring = Util.CommanderOrbitPoints(
+                new Vector2(basePos.x, basePos.z), _profile.capRadiusM, capAlt, _profile.capPoints);
+            for (int i = 0; i < aircraft.Count; i++)
+            {
+                Unit u = aircraft[i];
+                if (u == null || u.disabled || AircraftOrders.PlanOf(u) != null)
+                    continue;
+                AircraftOrders.SetPatrol(u, ring[0]);
+                for (int k = 1; k < ring.Count; k++)
+                    AircraftOrders.Enqueue(u, AirOrderMode.Patrol, ring[k]);
+                Log.Info("AI: борт '" + u.NetworkUniqueName + "' → CAP над базой");
+            }
+
+            // Перехват: воздушная угроза у базы — Attack в ГОЛОВУ (Patrol-хвост
+            // уцелеет, цель погибла — сегмент снимется и крыло вернётся на кольцо).
+            Unit threat = NearestEnemyAircraft(hq, basePos, _profile.interceptRadiusM);
+            if (threat != null && SendAttack(aircraft, threat, basePos, 2) > 0)
+                Log.Info("AI-событие: перехват '" + threat.NetworkUniqueName + "' у базы");
+
+            // Авиаудар по экономике: не голым крылом (строгий > strikeSize).
+            if (Time.time >= st.nextAirStrikeAt && aircraft.Count > _profile.airStrikeSize)
+            {
+                st.nextAirStrikeAt = Time.time + _profile.airStrikeIntervalSec;
+                GlobalPosition? enemyBase = EnemyBasePosOf(hq);
+                Unit target = NearestEnemyExtractor(hq, basePos) ??
+                    NearestEnemyUnit(hq, enemyBase?.ToLocalPosition() ?? basePos, 3000f);
+                if (target != null && SendAttack(aircraft, target,
+                        enemyBase?.ToLocalPosition() ?? basePos, _profile.airStrikeSize) > 0)
+                    Log.Info("AI-событие: авиаудар — " + _profile.airStrikeSize +
+                             " борт(а) по '" + target.NetworkUniqueName + "'");
+            }
+        }
+
+        /// <summary>Выдать Attack-сегмент в голову планов свободных бортов
+        /// (уже атакующие пропускаются); возвращает число отправленных.</summary>
+        private static int SendAttack(List<Unit> aircraft, Unit target, Vector3 anchor, int maxCount)
+        {
+            int sent = 0;
+            for (int i = 0; i < aircraft.Count && sent < maxCount; i++)
+            {
+                Unit u = aircraft[i];
+                if (u == null || u.disabled)
+                    continue;
+                List<AircraftOrders.OrderSegment> plan = AircraftOrders.PlanOf(u);
+                if (plan != null && plan.Count > 0 && plan[0].Mode == AirOrderMode.Attack)
+                    continue; // уже бьёт
+                AircraftOrders.InsertHeadSegment(u, AircraftOrders.MakeAttackSegment(target, anchor));
+                sent++;
+            }
+            return sent;
+        }
+
+        /// <summary>Ближайший ЧУЖОЙ самолёт у точки (перехват угроз у базы).</summary>
+        private static Unit NearestEnemyAircraft(FactionHQ of, Vector3 pos, float radius)
+        {
+            Unit best = null;
+            float bestSq = radius * radius;
+            foreach (Unit unit in UnitRegistry.allUnits)
+            {
+                if (unit == null || unit.disabled || unit is Building || !(unit is Aircraft))
+                    continue;
+                if (unit.NetworkHQ == null || unit.NetworkHQ == of)
+                    continue;
+                float sq = (unit.transform.position - pos).sqrMagnitude;
+                if (sq >= bestSq)
+                    continue;
+                bestSq = sq;
+                best = unit;
+            }
+            return best;
+        }
+
+        /// <summary>Свой аэродром фракции (объект — для заказа в ангар).</summary>
+        private static Airbase OwnAirbaseOf(FactionHQ hq)
+        {
+            foreach (Airbase ab in FactionRegistry.airbaseLookup.Values)
+                if (ab != null && ab.CurrentHQ == hq)
+                    return ab;
+            return null;
+        }
+
+        private static AircraftDefinition _fighterDef;
+
+        /// <summary>Борт авиакрыла: jsonKey профиля либо САМЫЙ ДЕШЁВЫЙ допустимый
+        /// (IsAllowed(false) — ивентовый UFO Spawner молча режет) из каталога
+        /// ангаров своей базы. Ролей у самолётов нет — один универсал.</summary>
+        private static AircraftDefinition FighterDefinition(Airbase airbase)
+        {
+            if (_fighterDef != null)
+                return _fighterDef;
+            if (!string.IsNullOrEmpty(_profile.fighterJsonKey) && Encyclopedia.i?.aircraft != null)
+                foreach (AircraftDefinition a in Encyclopedia.i.aircraft)
+                    if (a != null && a.jsonKey == _profile.fighterJsonKey)
+                        return _fighterDef = a;
+            if (airbase?.hangars != null)
+                foreach (Hangar hangar in airbase.hangars)
+                {
+                    if (hangar == null)
+                        continue;
+                    AircraftDefinition[] catalog;
+                    try
+                    {
+                        catalog = hangar.GetAvailableAircraft(); // натив падает на отцепленных префабах
+                    }
+                    catch (System.Exception)
+                    {
+                        continue;
+                    }
+                    if (catalog == null)
+                        continue;
+                    AircraftDefinition best = null;
+                    foreach (AircraftDefinition a in catalog)
+                        if (a != null && a.IsAllowed(false) && (best == null || a.value < best.value))
+                            best = a;
+                    if (best != null)
+                        return _fighterDef = best;
+                }
+            return null;
         }
 
         /// <summary>Экономика v3: СВОБОДНЫЕ инженеры (пачкой — канон стройки) ведут
@@ -319,8 +495,11 @@ namespace SupremeNuclear
             if (depots.Count == 0)
                 return;
             VehicleDepot depot = depots[0];
-            VehicleDefinition tank = TankDefinition();
-            if (depot == null || tank == null)
+            if (depot == null)
+                return;
+            int depotTier = FactoryTierService.TierOf(depot);
+            VehicleDefinition tank = TankDefinition(depotTier);
+            if (tank == null)
                 return;
 
             GlobalPosition? enemyBase = EnemyBasePosOf(hq);
@@ -338,10 +517,53 @@ namespace SupremeNuclear
             }
 
             int queue = ProductionTasks.CountFor(depot);
+            // Восполнение инженеров — ПРИОРИТЕТ над танками: погибли все — строить
+            // больше некому, экономика замирает до конца матча (§12-49ж закрыт).
+            // Заказываем ЛУЧШИЙ тир, который депо производит (T2/T3 с апнутого).
+            VehicleDefinition engineer = EngineerDefinition(depotTier);
+            if (engineer != null && Engineers.Count < _profile.engineersMin)
+            {
+                float ecost = engineer.value > 0f ? engineer.value : Settings.BuildDefaultCost;
+                if (queue < _profile.maxQueue && hq.factionFunds >= ecost)
+                {
+                    ProductionTasks.EnqueueGround(depot, engineer);
+                    if (Time.time >= st.nextEngineerLogAt)
+                    {
+                        st.nextEngineerLogAt = Time.time + 30f; // не спамим
+                        Log.Info("AI: инженеров " + Engineers.Count + " < " + _profile.engineersMin +
+                                 " — заказан новый с депо (T" + depotTier + ")");
+                    }
+                    return;
+                }
+            }
             float cost = tank.value > 0f ? tank.value : Settings.BuildDefaultCost;
             if (queue < _profile.maxQueue && hq.factionFunds >= cost * _profile.massReserveFactor)
                 ProductionTasks.EnqueueGround(depot, tank);
+
+            // Фаза развития (§2.3а): экономика налажена — апгрейд депо В ОЧЕРЕДЬ
+            // (голова, занимает производство — как у игрока, v0.136); следующий
+            // тир открывает технику/инженеров повыше (канон SupCom).
+            if (FactoryUpgradeWanted(depotTier, ProductionTasks.UpgradeItemOf(depot) != null,
+                    hq.factionFunds, NextTierMassOf(depot),
+                    Engineers.Count, _profile.engineersMin))
+            {
+                ProductionTasks.EnqueueUpgrade(depot);
+                Log.Info("AI-событие: фабрика — апгрейд до T" + (depotTier + 1) + " в очереди");
+            }
         }
+
+        /// <summary>Цена массы следующего тира фабрики (0 — максимум).</summary>
+        private static float NextTierMassOf(object factory) =>
+            FactoryTierService.NextCost(FactoryTierService.TierOf(factory),
+                out float mass, out _, out _) ? mass : 0f;
+
+        /// <summary>Решение «развитие»: тир фабрики не максимальный, налива нет,
+        /// инженеры полным составом, масса ≥ 2× цены тира (запас на стройку).
+        /// Чистая — тестируется.</summary>
+        internal static bool FactoryUpgradeWanted(int tier, bool upgrading, float funds,
+            float nextTierMass, int engineers, int engineersMin) =>
+            tier < 3 && !upgrading && engineers >= engineersMin &&
+            nextTierMass > 0f && funds >= nextTierMass * 2f;
 
         /// <summary>Волны: стоящие у сбора боевые сверх гарнизона идут на базу
         /// противника (по достижении нативный CheckObstacles сам ведёт в бой).</summary>
@@ -515,8 +737,9 @@ namespace SupremeNuclear
         }
 
         /// <summary>Аэродром СВОЕЙ фракции из миссии (GlobalPosition — не протухает
-        /// при плавающих сдвигах). null — фракция без базы (не играем).</summary>
-        private static GlobalPosition? BasePosOf(FactionHQ hq)
+        /// при плавающих сдвигах). null — фракция без базы (не играем). Публично —
+        /// орбиту командирского борта строим вокруг той же базы.</summary>
+        public static GlobalPosition? BasePosOf(FactionHQ hq)
         {
             string fname = hq.faction != null ? hq.faction.factionName : null;
             Mission mission = MissionManager.CurrentMission;
@@ -579,33 +802,68 @@ namespace SupremeNuclear
             return _depotDef = best;
         }
 
-        private static VehicleDefinition _tankDef;
+        private static VehicleDefinition _engineerDef;
 
-        /// <summary>Танк производства: jsonKey профиля либо самый дешёвый MBT
-        /// (фолбэк AFV — зеркально StarterRoster роли "tank"). Публичен: им же
-        /// BuildTasks конфигурирует нативные Factory (плейтест 2026-10-30).</summary>
-        public static VehicleDefinition TankDefinition()
+        /// <summary>Инженер производства: ЛУЧШИЙ тир, который строит фабрика
+        /// (клоны T2/T3 — с апнутого депо, §2.3-1), иначе профильный jsonKey или
+        /// первый TRUCK. Восполнение: без инженеров экономика AI мертва навсегда
+        /// (плейтест 2026-10-31: оба погибли в начале — «мало строил»).</summary>
+        public static VehicleDefinition EngineerDefinition(int factoryTier = 3)
         {
-            if (_tankDef != null)
-                return _tankDef;
+            VehicleDefinition clone = EngineerService.BestFor(factoryTier);
+            if (clone != null)
+                return clone;
+            if (_engineerDef != null)
+                return _engineerDef;
             Encyclopedia encyclopedia = Encyclopedia.i;
             if (encyclopedia == null || encyclopedia.vehicles == null)
                 return null;
-            if (!string.IsNullOrEmpty(_profile.tankJsonKey))
+            if (!string.IsNullOrEmpty(_profile.engineerJsonKey))
                 foreach (VehicleDefinition v in encyclopedia.vehicles)
-                    if (v != null && v.jsonKey == _profile.tankJsonKey)
-                        return _tankDef = v;
-            VehicleDefinition best = null;
+                    if (v != null && v.jsonKey == _profile.engineerJsonKey)
+                        return _engineerDef = v;
+            foreach (VehicleDefinition v in encyclopedia.vehicles)
+                if (v != null && v.vehicleType == VehicleType.TRUCK)
+                    return _engineerDef = v;
+            return null;
+        }
+
+        /// <summary>Танк производства: ЛУЧШИЙ тир ≤ тира фабрики (после апгрейда
+        /// депо AI переводит спам на старшую технику), внутри тира — jsonKey
+        /// профиля либо самый дешёвый MBT (фолбэк AFV — зеркально StarterRoster
+        /// роли "tank"). Публичен: им же BuildTasks конфигурирует нативные
+        /// Factory (плейтест 2026-10-30; там тир не ограничен — maxTier 3).</summary>
+        public static VehicleDefinition TankDefinition(int factoryTier = 3)
+        {
+            Encyclopedia encyclopedia = Encyclopedia.i;
+            if (encyclopedia == null || encyclopedia.vehicles == null)
+                return null;
+            int top = 0; // высший доступный тир кандидатов
             foreach (VehicleDefinition v in encyclopedia.vehicles)
             {
                 if (v == null || (v.vehicleType != VehicleType.MBT && v.vehicleType != VehicleType.AFV))
+                    continue;
+                int tier = UnitRoster.TierOf(v);
+                if (tier <= factoryTier && tier > top)
+                    top = tier;
+            }
+            if (!string.IsNullOrEmpty(_profile.tankJsonKey))
+                foreach (VehicleDefinition v in encyclopedia.vehicles)
+                    if (v != null && v.jsonKey == _profile.tankJsonKey &&
+                        UnitRoster.TierOf(v) <= top)
+                        return v;
+            VehicleDefinition best = null;
+            foreach (VehicleDefinition v in encyclopedia.vehicles)
+            {
+                if (v == null || (v.vehicleType != VehicleType.MBT && v.vehicleType != VehicleType.AFV) ||
+                    UnitRoster.TierOf(v) != top)
                     continue;
                 if (v.vehicleType == VehicleType.AFV && best != null && best.vehicleType == VehicleType.MBT)
                     continue; // MBT приоритетен, AFV — только если MBT нет
                 if (best == null || v.value < best.value)
                     best = v;
             }
-            return _tankDef = best;
+            return best;
         }
 
         // ---------- чистые решения (тестируются раннером) ----------
@@ -622,7 +880,7 @@ namespace SupremeNuclear
             float fallbackSq = float.MaxValue;
             foreach (EconomyService.DepositSite s in EconomyService.SiteList)
             {
-                if (s.Kind != kind || !EconomyService.SiteIsFree(s))
+                if (s.Kind != kind || !EconomyService.SiteBuildable(s)) // суша-only (§3-9)
                     continue;
                 float sq = (s.Pos.ToLocalPosition() - from).sqrMagnitude;
                 if (sq > radius * radius)
@@ -641,7 +899,7 @@ namespace SupremeNuclear
             float bestSq = float.MaxValue;
             foreach (EconomyService.DepositSite s in EconomyService.SiteList)
             {
-                if (s.Kind != kind || !EconomyService.SiteIsFree(s))
+                if (s.Kind != kind || !EconomyService.SiteBuildable(s)) // суша-only (§3-9)
                     continue;
                 Vector3 p = s.Pos.ToLocalPosition();
                 float sq = (p - from).sqrMagnitude;
@@ -740,12 +998,13 @@ namespace SupremeNuclear
             return candidates >= waveSize || now >= nextWaveAt;
         }
 
-        /// <summary>Число свободных точек месторождений (для снапшота диагностики).</summary>
+        /// <summary>Число свободных ЗАСТРОИВАЕМЫХ точек месторождений — суша-only
+        /// (для снапшота диагностики; подводные точки не считаются целью).</summary>
         private static int FreeSitesCount()
         {
             int n = 0;
             foreach (EconomyService.DepositSite s in EconomyService.SiteList)
-                if (EconomyService.SiteIsFree(s))
+                if (EconomyService.SiteBuildable(s))
                     n++;
             return n;
         }

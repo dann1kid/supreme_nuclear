@@ -292,9 +292,11 @@ namespace SupremeNuclear
                         Unit t = targets[q];
                         if (t == null || t.disabled)
                             continue;
-                        Vector3 tp = t.transform.position;
-                        Vector3 tg = new Vector3(tp.x, GameApi.RouteY(tp.x, tp.z), tp.z);
-                        if (Near(cam, tg, mouse, px))
+                        // Крест рисуется на UnitAnchorWorld (центр корпуса, НЕ земля):
+                        // для высоких юнитов проекция diverged на сотни px — пик
+                        // обязан совпадать с местом отрисовки (правило «управляется
+                        // там, где рисуется», как у авиаточек v0.91.3).
+                        if (Near(cam, GameApi.UnitAnchorWorld(t), mouse, px))
                             return new WaypointHit(WaypointKind.AttackTarget, unit, null, 0, q);
                     }
             }

@@ -659,5 +659,34 @@ namespace SupremeNuclear
             }
             return false;
         }
+
+        /// <summary>Точки орбиты командирского борта: правильный n-угольник вокруг
+        /// базы (xz-плоскость, y = высота AGL сегмента). Чистая — тестируется.</summary>
+        public static List<Vector3> CommanderOrbitPoints(Vector2 center, float radiusM, float altM, int count)
+        {
+            int n = Mathf.Max(3, count);
+            var pts = new List<Vector3>(n);
+            for (int i = 0; i < n; i++)
+            {
+                double a = 2.0 * System.Math.PI * i / n;
+                pts.Add(new Vector3(
+                    center.x + radiusM * (float)System.Math.Cos(a),
+                    altM,
+                    center.y + radiusM * (float)System.Math.Sin(a)));
+            }
+            return pts;
+        }
+
+        /// <summary>Шаг ремонта детали: HP детали растёт на perSec·dt, потолок max
+        /// (деталь полная = 100; у командирского борта — усиленный масштаб). Чистая —
+        /// тестируется.</summary>
+        public static float RepairedHitPoints(float hitPoints, float perSec, float dt, float max = 100f) =>
+            Mathf.Min(max, hitPoints + perSec * dt);
+
+        /// <summary>Борт «стоит на своей базе»: скорость почти нулевая и дистанция
+        /// до центра аэродрома в допуске (ремонтное «окно уязвимости»). Чистая.</summary>
+        public static bool BoardParked(Vector2 boardXz, Vector2 baseXz, float radiusM,
+            float speedSqr, float maxSpeedSqr = 1f) =>
+            speedSqr < maxSpeedSqr && (boardXz - baseXz).sqrMagnitude <= radiusM * radiusM;
     }
 }

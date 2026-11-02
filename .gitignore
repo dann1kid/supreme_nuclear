@@ -3,6 +3,7 @@ src/SupremeNuclear/bin/
 src/SupremeNuclear/obj/
 tests/bin/
 tests/obj/
+tools/__pycache__/
 
 # Патч-скрипты одноразовые
 src/SupremeNuclear/_patch*.py

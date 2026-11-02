@@ -38,24 +38,52 @@ namespace SupremeNuclear
                 seed = UnityEngine.Random.Range(int.MinValue, int.MaxValue);
             var rng = new System.Random(seed);
 
+            // Адаптивность под игроков (юзер-канон 2026-10-31, уточнён тут же):
+            // размер карты — ЯВНЫЙ terrain.sizeM; players масштабирует только
+            // раскладку — базы/точки (масштаб применяет ScenarioWorld — детерминизм
+            // от «сырого» шаблона в обеих сторонах пайплайна).
             // Режим спец-карты: шаблон с секцией terrain строит собственный рельеф
-            // (ключ SN-Terrain-…, высоты/маски из heightmap), иначе — стоковая карта редактора.
+            // (ключ SN-Terrain-…), иначе — стоковая карта редактора.
             bool terrainMode = template.terrain != null;
             Heightmap hm = null;
             string terrainKey = null;
             Vector2 min, max;
+            List<ScenarioLayout.BaseSlot> bases;
+            List<ScenarioLayout.Deposit> deposits;
+            List<ScenarioLayout.Deposit> coalSites;
             if (terrainMode)
             {
-                terrainKey = RuntimeMap.MakeKey(templateName, seed);
-                hm = HeightmapGen.Generate(template.terrain, seed); // тот же сид — тот же мир
+                // Размер в ключе карты: смена players между генерациями меняет мир —
+                // одинаковый ключ с разными мешами давал бы коллизию.
+                terrainKey = RuntimeMap.MakeKey(templateName, seed) + "-" + (int)(template.terrain.sizeM * 0.001f) + "k";
+                // ЕДИНЫЙ детерминированный пайплайн (выбор по маскам → ШТАМПЫ ровных
+                // площадок → пересчёт масок): та же функция строит мир при загрузке
+                // (RuntimeMap.EnsureRegistered) — раскладка и меш не разойдутся.
+                WorldGen world = ScenarioWorld.Generate(template, seed);
+                hm = world.Hm;
+                bases = world.Bases;
+                deposits = world.Mass;
+                coalSites = world.Coal;
                 float half = template.terrain.sizeM * 0.5f;
                 min = new Vector2(-half, -half);
                 max = new Vector2(half, half);
             }
-            else if (!GameApi.TryGetMapBounds(out min, out max))
+            else
             {
-                result = Loc.Tr("Карта ещё не готова — подожди загрузки");
-                return false;
+                if (!GameApi.TryGetMapBounds(out min, out max))
+                {
+                    result = Loc.Tr("Карта ещё не готова — подожди загрузки");
+                    return false;
+                }
+                // Масштаб точек (стоковая карта — здесь; спец-карта — в ScenarioWorld).
+                int pairs = ScenarioTemplate.PairsOf(template.players);
+                float extent = Mathf.Max(max.x - min.x, max.y - min.y);
+                template.depositSpacing *= Mathf.Max(0.5f, extent / 40000f);
+                template.depositCount *= pairs;
+                template.coalPerSide *= pairs;
+                bases = null;
+                deposits = null;
+                coalSites = null;
             }
 
             // Фракции: первые две текущей миссии; если редактор дал одну — добираем из ростра.
@@ -82,12 +110,14 @@ namespace SupremeNuclear
                 return false;
             }
 
-            // Спец-карта знает высоты и пригодность из масок (Neroxis-паттерн);
-            // стоковая — рейкасты по текущей карте.
+            // Спец-карта знает высоты из штампованного hm (совпадает с мешом);
+            // стоковая — рейкасты по текущей карте. Раскладка спец-карты приходит
+            // из ScenarioWorld (гарантия ровных площадок), стоковая — местный
+            // подбор по ровности (рельеф чужой, штампать нечем).
             float GroundY(Vector2 p) =>
                 hm != null ? hm.SampleHeight(p.x, p.y) : GameApi.GroundY(p.x, p.y);
-            bool siteOk(Vector2 p) =>
-                hm != null ? hm.FlatOk(p.x, p.y) : SiteAcceptable(p);
+            bool siteOk(Vector2 p) => SiteAcceptable(p);
+            bool siteLoose(Vector2 p) => SiteAcceptable(p);
             // Сейв хранит GlobalPosition = координату ОТ КАРТЫ (мир − Datum.origin,
             // см. GlobalPositionExtensions): спец-карта сама строит карто-локальные
             // точки (меш в координатах root карты), повторный вычет origin редактора
@@ -97,13 +127,17 @@ namespace SupremeNuclear
                 ? new GlobalPosition(worldPoint.x, worldPoint.y, worldPoint.z)
                 : worldPoint.ToGlobalPosition();
 
-            var bases = ScenarioLayout.Bases(min, max, template, rng, siteOk);
-            if (bases.Count == 0)
+            if (!terrainMode)
             {
-                result = Loc.Tr("Не нашлось ровной площадки под базы — попробуй другую карту");
-                return false;
+                bases = ScenarioLayout.Bases(min, max, template, rng, siteOk);
+                if (bases.Count == 0)
+                {
+                    result = Loc.Tr("Не нашлось ровной площадки под базы — попробуй другую карту");
+                    return false;
+                }
+                deposits = ScenarioLayout.Deposits(min, max, template, rng, siteOk, bases, siteLoose);
+                coalSites = ScenarioLayout.CoalSites(min, max, template, rng, siteOk, deposits, bases, siteLoose);
             }
-            var deposits = ScenarioLayout.Deposits(min, max, template, rng, siteOk, bases);
 
             // Спец-карту строим ПОСЛЕ layout: HQ идут в состав карты scene-объектами
             // (позиции у баз уже известны).
@@ -145,22 +179,30 @@ namespace SupremeNuclear
                 regularIncome = 0f,
             });
 
-            // Базы: сторона A из layout, сторона B — зеркало относительно центра.
+            // Базы: сторона A из layout (K слотов), сторона B — зеркало каждого.
             Vector2 c = ScenarioLayout.Center(min, max);
             var starter = StarterRoster(template);
-            // Уголь — до цикла баз: старт-инженеры стороны B получают зеркальные списки.
-            var coalSites = ScenarioLayout.CoalSites(min, max, template, rng, siteOk, deposits, bases);
+            var baseNames = new[] { new List<string>(), new List<string>() }; // A- и B-базы
             int mes = 0;
+            int perSide = bases.Count;
             for (int side = 0; side < 2; side++)
             {
-                Vector2 pos = side == 0 ? bases[0].Pos : ScenarioLayout.Mirror(bases[0].Pos, c);
                 string faction = factions[side];
-                string baseName = $"{BaseMarker}-{(side == 0 ? "A" : "B")}";
-                BuildAirbase(mission, baseName, faction, pos, bases[0].YawDeg,
-                    template.runwayLength, template.runwayWidth, GroundY, SavePos);
-                BuildStarter(mission, baseName, faction, pos, bases[0].YawDeg, starter,
-                    GroundY, SavePos, side == 0 ? deposits : MirrorDeposits(deposits, c),
-                    side == 0 ? coalSites : MirrorDeposits(coalSites, c));
+                for (int k = 0; k < perSide; k++)
+                {
+                    Vector2 pos = side == 0 ? bases[k].Pos : ScenarioLayout.Mirror(bases[k].Pos, c);
+                    string baseName = $"{BaseMarker}-{(side == 0 ? "A" : "B")}{(perSide > 1 ? (k + 1).ToString() : "")}";
+                    baseNames[side].Add(baseName);
+                    BuildAirbase(mission, baseName, faction, pos, bases[k].YawDeg,
+                        template.runwayLength, template.runwayWidth, GroundY, SavePos);
+                    BuildStarter(mission, baseName, faction, pos, bases[k].YawDeg, starter,
+                        GroundY, SavePos, template.engineerAirdropAltM);
+                    // Командирский борт (DESIGN §2.1): спавн в воздухе над ПЕРВИЧНОЙ
+                    // базой стороны, орбиту/EMCON/ремонт ведёт CommanderBoardService.
+                    if (template.commander && k == 0)
+                        SpawnCommanderBoard(mission, faction, side == 0 ? "A" : "B",
+                            pos, bases[k].YawDeg, template, GroundY, SavePos);
+                }
             }
 
             // Месторождения v3: нейтральные МАРКЕРЫ-«недра» (не захватываются —
@@ -189,21 +231,27 @@ namespace SupremeNuclear
                 });
             }
 
-            // Победа: захват базы противника → конец игры (нативные objectives/outcomes).
-            BuildVictory(mission, factions[0], $"{BaseMarker}-B", "A");
-            BuildVictory(mission, factions[1], $"{BaseMarker}-A", "B");
+            // Победа: захват ВСЕХ баз противника (один objective, CompleteAll —
+            // дефолт CaptureAirbaseSavedObjective) → конец игры; второй путь —
+            // убийство командирского борта (CommanderBoardService, гибрид §2.7).
+            BuildVictory(mission, factions[0], baseNames[1], "A");
+            BuildVictory(mission, factions[1], baseNames[0], "B");
 
             // Сейв напрямую в User-группу, БЕЗ MissionSaveLoad.SaveMission: тот дёргает
             // событие AfterSave, на которое редактор повесил обновление панели ошибок
             // СВОЕЙ миссии — на чужом сейве панель падала NRE (плейтест 2026-10-29).
-            string saveName = $"{(terrainMode ? "SN-Terrain-" + templateName : "SN-Duel")}-{seed & 0xFFFF:X}";
+            // Полный сид в имени (X8): короткие имена срезали его до 16 бит —
+            // разные миры перезаписывали друг друга, а ключ карты расходился с
+            // сидом генерации (см. RuntimeMap.MakeKey).
+            string saveName = $"{(terrainMode ? "SN-Terrain-" + templateName : "SN-Duel")}-{seed & 0xFFFFFFFF:X8}";
             MissionSaveLoad.ValidateName(ref saveName, allowEmpty: false);
             mission.BeforeSave();
             MissionGroup.UserGroup.SaveMission(saveName, mission);
             if (mission.SaveErrors != null && mission.SaveErrors.ErrorAndExceptionsCount > 0)
                 Log.Warn($"MapGen: сохранено с ошибками ({mission.SaveErrors.ErrorAndExceptionsCount}) — см. лог игры");
             Log.Info($"MapGen: сценарий сохранён — '{saveName}' на карте " +
-                     $"{(terrainKey ?? current.MapKey.Path)}, базы {factions[0]}({bases[0].Pos.x:F0},{bases[0].Pos.y:F0})/" +
+                     $"{(terrainKey ?? current.MapKey.Path)}, игроков {template.players} (баз/сторону {perSide}), " +
+                     $"базы {factions[0]}({bases[0].Pos.x:F0},{bases[0].Pos.y:F0})/" +
                      $"{factions[1]}({mirrorA.x:F0},{mirrorA.y:F0}), bounds " +
                      $"{(terrainMode ? "спец-карта ±" + (template.terrain.sizeM * 0.5f).ToString("F0") : "стоковая")}, " +
                      $"масса {mes}, уголь {coal}, сид {seed}");
@@ -283,11 +331,15 @@ namespace SupremeNuclear
             mission.airbases.Add(airbase);
         }
 
-        /// <summary>Стартовый комплект слота: все юниты одинаковые (роли — от географии).</summary>
+        /// <summary>Стартовый комплект слота. Юзер-канон (2026-10-31, отменяет
+        /// «у месторождений» от 2026-10-30): стартовая техника — ОДНИМ аирдропом
+        /// на точку спавна у своей ВПП; по месторождениям инженеров разводит игрок
+        /// вручную. Нативные парашюты включаются сами: под точкой спавна пусто
+        /// в 10 м → CargoDeploymentSystem (мягкая посадка, у наземки нет урона от
+        /// падения) — юниты не проваливаются сквозь карту.</summary>
         private static void BuildStarter(Mission mission, string baseName, string faction,
             Vector2 center, float yawDeg, List<ScenarioTemplate.StarterItem> starter,
-            Func<Vector2, float> groundY, Func<Vector3, GlobalPosition> toSave,
-            List<ScenarioLayout.Deposit> mass = null, List<ScenarioLayout.Deposit> coal = null)
+            Func<Vector2, float> groundY, Func<Vector3, GlobalPosition> toSave, float airdropAltM)
         {
             Quaternion rot = Quaternion.Euler(0f, yawDeg, 0f);
             Vector3 dir = rot * Vector3.forward;
@@ -296,39 +348,7 @@ namespace SupremeNuclear
             // Линия юнитов сбоку от полосы (за «на полосе»-габаритом), депо — позади торца.
             Vector3 line = c3 + right * 170f;
             Quaternion face = Quaternion.LookRotation(dir, Vector3.up);
-
-            // Юзер-канон (2026-10-30): стартовые инженеры стоят У МЕСТОРОЖДЕНИЙ —
-            // первые двое у ближайшего угля, остальные — по ближайшим точкам массы
-            // (SupCom: ACU стартует среди мексов). Высота каждой позиции — из
-            // рельефа (groundY), никаких «линий на весу».
-            var engineerSpots = new List<Vector2>();
-            if (mass != null || coal != null)
-            {
-                Vector2 c2 = center;
-                System.Func<List<ScenarioLayout.Deposit>, Vector2> nearest = list =>
-                {
-                    Vector2 best = c2;
-                    float bestSq = float.MaxValue;
-                    if (list != null)
-                        foreach (ScenarioLayout.Deposit d in list)
-                        {
-                            if (d == null) continue;
-                            float sq = (d.Pos - c2).sqrMagnitude;
-                            if (sq < bestSq) { bestSq = sq; best = d.Pos; }
-                        }
-                    return best;
-                };
-                Vector2 coalPos = nearest(coal);
-                engineerSpots.Add(coalPos + new Vector2(60f, 0f));
-                engineerSpots.Add(coalPos + new Vector2(-60f, 60f));
-                var massSorted = new List<ScenarioLayout.Deposit>(mass ?? new List<ScenarioLayout.Deposit>());
-                massSorted.Sort((a, b) => (a.Pos - c2).sqrMagnitude.CompareTo((b.Pos - c2).sqrMagnitude));
-                foreach (ScenarioLayout.Deposit d in massSorted)
-                {
-                    if (engineerSpots.Count >= 10) break;
-                    engineerSpots.Add(d.Pos + new Vector2(60f, 0f));
-                }
-            }
+            float alt = Mathf.Max(50f, airdropAltM);
 
             int n = 0;
             foreach (ScenarioTemplate.StarterItem item in starter)
@@ -342,17 +362,11 @@ namespace SupremeNuclear
                     if (jsonKey == null)
                         continue;
                     Vector3 p = line + dir * (n * 70f - 70f);
-                    if (item.role == "engineer" && engineerSpots.Count > 0)
-                    {
-                        Vector2 sp = engineerSpots[0];
-                        engineerSpots.RemoveAt(0);
-                        p = new Vector3(sp.x, 0f, sp.y);
-                    }
-                    if (item.role == "depot")
-                        p = c3 - dir * 260f + right * 170f;
                     p.y = groundY(new Vector2(p.x, p.z));
                     if (item.role == "depot")
                     {
+                        p = c3 - dir * 260f + right * 170f;
+                        p.y = groundY(new Vector2(p.x, p.z));
                         mission.buildings.Add(new SavedBuilding($"{baseName}-DEPOT")
                         {
                             type = jsonKey,
@@ -364,6 +378,8 @@ namespace SupremeNuclear
                     }
                     else
                     {
+                        // Аирдроп: высота над точкой — парашюты нативно раскроются.
+                        p.y += alt;
                         mission.vehicles.Add(new SavedVehicle($"{baseName}-U{n}")
                         {
                             type = jsonKey,
@@ -378,15 +394,17 @@ namespace SupremeNuclear
             }
         }
 
-        /// <summary>Победа стороны: захват базы противника → EndGame(Victory).</summary>
-        private static void BuildVictory(Mission mission, string faction, string targetBase, string tag)
+        /// <summary>Победа стороны: захват ВСЕХ баз противника (один objective,
+        /// completeOrder=CompleteAll по умолчанию) → EndGame(Victory).</summary>
+        private static void BuildVictory(Mission mission, string faction, List<string> targetBases, string tag)
         {
             string outcomeName = $"SN-END-{tag}";
             var objective = (CaptureAirbaseSavedObjective)SavedObjective.CreateSavedObjective(
                 ObjectiveType.CaptureAirbase, $"SN-WIN-{tag}");
             objective.Faction = faction;
-            objective.DisplayName = Loc.Tr("Захват базы противника");
-            objective.targetAirbases.Add(targetBase);
+            objective.DisplayName = Loc.Tr("Захват баз противника");
+            foreach (string b in targetBases)
+                objective.targetAirbases.Add(b);
             objective.Outcomes.Add(outcomeName);
             mission.objectives.Add(objective);
             mission.outcomes.Add(new EndGameSavedOutcome
@@ -407,22 +425,55 @@ namespace SupremeNuclear
             return def != null ? def.jsonKey : "";
         }
 
-        /// <summary>Зеркальный список точек для стороны B (раскладка генерится
-        /// для стороны A; сторона B получает отражённые позиции).</summary>
-        private static List<ScenarioLayout.Deposit> MirrorDeposits(
-            List<ScenarioLayout.Deposit> list, Vector2 c)
+        /// <summary>Командирский борт стороны: SavedAircraft в воздухе над своей базой
+        /// (нативный спавн-путь, AI-пилот со скиллом 1). Высота/скорость — из профиля
+        /// борта (единый источник баланса), модель — шаблон или самый дорогой самолёт.</summary>
+        private static void SpawnCommanderBoard(Mission mission, string faction, string sideTag,
+            Vector2 pos, float yawDeg, ScenarioTemplate template,
+            Func<Vector2, float> groundY, Func<Vector3, GlobalPosition> savePos)
         {
-            var result = new List<ScenarioLayout.Deposit>();
-            if (list == null)
-                return result;
-            foreach (ScenarioLayout.Deposit d in list)
-                if (d != null)
-                    result.Add(new ScenarioLayout.Deposit
-                    {
-                        Pos = ScenarioLayout.Mirror(d.Pos, c),
-                        Tier = d.Tier,
-                    });
-            return result;
+            string type = CommanderBoardType(template);
+            if (string.IsNullOrEmpty(type))
+            {
+                Log.Warn("MapGen: в энциклопедии нет самолётов — командирский борт пропущен");
+                return;
+            }
+            var profile = CommanderBoardProfile.Load();
+            mission.aircraft.Add(new SavedAircraft($"{CommanderBoardService.BoardMarker}-{sideTag}")
+            {
+                type = type,
+                faction = faction,
+                PlacementType = PlacementType.Custom,
+                globalPosition = savePos(new Vector3(pos.x, groundY(pos) + profile.orbitAltM, pos.y)),
+                rotation = Quaternion.Euler(0f, yawDeg, 0f),
+                playerControlled = false,
+                fuel = template.commanderFuel,
+                skill = 1f,
+                bravery = 1f,
+                startingSpeed = profile.spawnSpeed,
+            });
+            Log.Info($"MapGen: командирский борт стороны {sideTag} — {type}, " +
+                     $"высота {profile.orbitAltM:F0} м над базой");
+        }
+
+        /// <summary>Модель борта: явный jsonKey шаблона, иначе самый дорогой ДОПУСТИМЫЙ
+        /// самолёт энциклопедии (обычно стратегический — «летающий ACU» из тяжёлых
+        /// машин). Фильтр IsAllowed(false) — тот же, что у Spawner: наш сценарий не
+        /// включает ивентовый контент (allowEventContent не ставим), а «самый дорогой»
+        /// без фильтра — UFO, его Spawner молча отказался спавнить (плейтест 2026-10-31
+        /// «командирский борт не найден»).</summary>
+        private static string CommanderBoardType(ScenarioTemplate template)
+        {
+            if (!string.IsNullOrEmpty(template.commanderJsonKey))
+                return template.commanderJsonKey;
+            Encyclopedia encyclopedia = Encyclopedia.i;
+            if (encyclopedia?.aircraft == null || encyclopedia.aircraft.Count == 0)
+                return null;
+            AircraftDefinition best = null;
+            foreach (AircraftDefinition a in encyclopedia.aircraft)
+                if (a != null && a.IsAllowed(false) && (best == null || a.value > best.value))
+                    best = a;
+            return best != null ? best.jsonKey : null;
         }
 
         /// <summary>Ростр старта: роль → jsonKey ( depot = корпус верфи/депо, engineer = TRUCK,
