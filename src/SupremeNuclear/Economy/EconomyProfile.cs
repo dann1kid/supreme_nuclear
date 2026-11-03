@@ -75,6 +75,18 @@ namespace SupremeNuclear
         public float salvoMassPerLaunch = 25f;
         public float salvoEnergyPerLaunch = 20f;
 
+        // Слой 3 — ЯО (v0.139, «каждый накопитель — шахта»): склад при аэродроме
+        // и юниты-носители наливают БЧ; корабли пускают ядерную ракету приказом.
+        public bool warheadsEnabled = true;
+        public float warheadMass = 2500f;        // цена одной БЧ (масса)
+        public float warheadEnergy = 1500f;      // энергия
+        public float warheadSeconds = 90f;       // темп налива одной БЧ
+        public int warheadStoreCap = 10;         // кап склада при аэродроме
+        public int warheadUnitCap = 3;           // кап юнита-носителя
+        public string nuclearCarrierShipTypes = "DDG,LHA,CV"; // типы-носители (ShipType)
+        public string nuclearMissileJsonKey = ""; // деф ракеты (пусто = max blastYield)
+        public float nuclearLaunchCooldownSec = 120f; // кулдаун пуска корабля
+
         public static EconomyProfile Load(string name)
         {
             string dir = Path.Combine(Paths.PluginPath, "SupremeNuclear", "Economy");

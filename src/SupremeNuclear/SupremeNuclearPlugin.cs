@@ -56,6 +56,7 @@ namespace SupremeNuclear
                 SortieService.Reset(); // слоты выката привязаны к базам сцены
                 CommanderBoardService.Reset(); // борта-командиры умерли вместе со сценой
                 SupplyService.Reset(); // кэш станций снабжения умер вместе со сценой
+                WarheadService.Reset(); // заряды БЧ/точки пуска умерли вместе со сценой
                 SelectionService.ResetGroups();
                 RangeRings.Reset(); // кольца дальности: круги/буферы сцены
                 TaxiSurface.Reset(); // плиты дорисованных рулёжек умершей сцены
@@ -68,6 +69,7 @@ namespace SupremeNuclear
             gameObject.AddComponent<CommanderHud>();
             gameObject.AddComponent<SupcomUi>();
             gameObject.AddComponent<MinimapPanel>();
+            gameObject.AddComponent<SkirmishPanel>(); // «Скримиш» в главном меню (лобби v1)
 
             Log.Info($"{PluginInfo.Name} {PluginInfo.Version} загружен — {Settings.ToggleCommanderKey} в миссии включает режим командира");
         }

@@ -22,18 +22,32 @@ namespace SupremeNuclear
         public const string BaseMarker = "SN-BASE";
         public const string DepositMarker = "SN-MES";
 
-        /// <summary>Генерация и сохранение миссии; false + причина — отказ.</summary>
-        public static bool Generate(string templateName, int seed, out string result)
+        /// <summary>Генерация и сохранение миссии; false + причина — отказ.
+        /// Инженерный вход редактора (Ctrl+MapGenKey): после сейва — LoadEditor.</summary>
+        public static bool Generate(string templateName, int seed, out string result) =>
+            Generate(templateName, seed, out result, loadEditor: true, playersOverride: null, out _);
+
+        /// <summary>Полный вход (Скримиш): loadEditor=false — сейв без редактора
+        /// (старт напрямую из меню), playersOverride — игроки из панели (уходят в
+        /// ключ карты: мир обязан совпадать при пересборке из ключа).</summary>
+        public static bool Generate(string templateName, int seed, out string result,
+            bool loadEditor, int? playersOverride, out string saveName)
         {
             result = null;
+            saveName = null;
+            ScenarioTemplate template = ScenarioTemplate.Load(templateName);
+            if (playersOverride != null && playersOverride.Value != template.players)
+                template.players = playersOverride.Value;
             Mission current = MissionManager.CurrentMission;
-            if (current == null)
+            bool terrainMode = template.terrain != null;
+            // Спец-карта самодостаточна (фракции доберём из энциклопедии) — её
+            // можно собирать из главного меню, без открытой карты в редакторе;
+            // стоковой ветке нужны границы и MapKey текущей карты редактора.
+            if (current == null && !terrainMode)
             {
                 result = Loc.Tr("Нет загруженной миссии — открой карту в редакторе миссий");
                 return false;
             }
-
-            ScenarioTemplate template = ScenarioTemplate.Load(templateName);
             if (seed == 0)
                 seed = UnityEngine.Random.Range(int.MinValue, int.MaxValue);
             var rng = new System.Random(seed);
@@ -42,9 +56,6 @@ namespace SupremeNuclear
             // размер карты — ЯВНЫЙ terrain.sizeM; players масштабирует только
             // раскладку — базы/точки (масштаб применяет ScenarioWorld — детерминизм
             // от «сырого» шаблона в обеих сторонах пайплайна).
-            // Режим спец-карты: шаблон с секцией terrain строит собственный рельеф
-            // (ключ SN-Terrain-…), иначе — стоковая карта редактора.
-            bool terrainMode = template.terrain != null;
             Heightmap hm = null;
             string terrainKey = null;
             Vector2 min, max;
@@ -53,9 +64,12 @@ namespace SupremeNuclear
             List<ScenarioLayout.Deposit> coalSites;
             if (terrainMode)
             {
-                // Размер в ключе карты: смена players между генерациями меняет мир —
-                // одинаковый ключ с разными мешами давал бы коллизию.
-                terrainKey = RuntimeMap.MakeKey(templateName, seed) + "-" + (int)(template.terrain.sizeM * 0.001f) + "k";
+                // Размер и игроки — в ключе карты: смена players/sizeM между
+                // генерациями меняет мир — одинаковый ключ с разными мешами давал
+                // бы коллизию. Хеш морфологии (style/waterAmount/stepM/…) разводит
+                // правки шаблона, «-pN» — переключатель 1×1/2×2 (MapGenKey).
+                terrainKey = RuntimeMap.MakeKey(templateName, seed, template.terrain,
+                    template.players, (int)(template.terrain.sizeM * 0.001f));
                 // ЕДИНЫЙ детерминированный пайплайн (выбор по маскам → ШТАМПЫ ровных
                 // площадок → пересчёт масок): та же функция строит мир при загрузке
                 // (RuntimeMap.EnsureRegistered) — раскладка и меш не разойдутся.
@@ -86,15 +100,17 @@ namespace SupremeNuclear
                 coalSites = null;
             }
 
-            // Фракции: первые две текущей миссии; если редактор дал одну — добираем из ростра.
+            // Фракции: первые две текущей миссии (в меню её нет — сразу ростр);
+            // если редактор дал одну — добираем из ростра.
             List<string> factions = new List<string>();
-            foreach (MissionFaction f in current.factions)
-            {
-                if (f != null && !string.IsNullOrEmpty(f.factionName) && !factions.Contains(f.factionName))
-                    factions.Add(f.factionName);
-                if (factions.Count >= 2)
-                    break;
-            }
+            if (current != null)
+                foreach (MissionFaction f in current.factions)
+                {
+                    if (f != null && !string.IsNullOrEmpty(f.factionName) && !factions.Contains(f.factionName))
+                        factions.Add(f.factionName);
+                    if (factions.Count >= 2)
+                        break;
+                }
             if (factions.Count < 2 && Encyclopedia.i != null && Encyclopedia.i.factions != null)
                 foreach (Faction f in Encyclopedia.i.factions)
                 {
@@ -165,9 +181,19 @@ namespace SupremeNuclear
                         ? Loc.Tr("Сгенерировано Supreme Nuclear (спец-карта)")
                         : Loc.Tr("Сгенерировано Supreme Nuclear (дуэль)")) + $" [{seed}]",
                 playerMode = PlayerMode.SingleAndMultiplayer,
+                // ЯО (§2.14-3): нативная эскалация НЕ используется — гейт
+                // ядерного оружия = запас БЧ (производство за экономику).
+                nuclearEscalationThreshold = 0f,
+                strategicEscalationThreshold = 0f,
+                minRankTacticalWarhead = 0,
+                minRankStrategicWarhead = 0,
             };
             mission.missionSettings.Tags.Add(MissionTag.SinglePlayer);
             mission.missionSettings.Tags.Add(MissionTag.PVP);
+            // MP v1 (Скримиш): нативный пикер создания лобби фильтрует по этому
+            // тегу (CreateLobbyModal) — сгенерированные миссии хостятся как есть;
+            // карта у клиентов строится тем же модом по ключу (детерминизм §12-48б).
+            mission.missionSettings.Tags.Add(MissionTag.Multiplayer);
             mission.factions.Add(new MissionFaction(factions[0])
             {
                 startingBalance = template.startFunds,
@@ -243,24 +269,73 @@ namespace SupremeNuclear
             // Полный сид в имени (X8): короткие имена срезали его до 16 бит —
             // разные миры перезаписывали друг друга, а ключ карты расходился с
             // сидом генерации (см. RuntimeMap.MakeKey).
-            string saveName = $"{(terrainMode ? "SN-Terrain-" + templateName : "SN-Duel")}-{seed & 0xFFFFFFFF:X8}";
+            saveName = $"{(terrainMode ? "SN-Terrain-" + templateName : "SN-Duel")}-{seed & 0xFFFFFFFF:X8}";
             MissionSaveLoad.ValidateName(ref saveName, allowEmpty: false);
             mission.BeforeSave();
             MissionGroup.UserGroup.SaveMission(saveName, mission);
             if (mission.SaveErrors != null && mission.SaveErrors.ErrorAndExceptionsCount > 0)
                 Log.Warn($"MapGen: сохранено с ошибками ({mission.SaveErrors.ErrorAndExceptionsCount}) — см. лог игры");
             Log.Info($"MapGen: сценарий сохранён — '{saveName}' на карте " +
-                     $"{(terrainKey ?? current.MapKey.Path)}, игроков {template.players} (баз/сторону {perSide}), " +
+                     $"{(terrainKey ?? (current != null ? current.MapKey.Path : "меню"))}, игроков {template.players} (баз/сторону {perSide}), " +
                      $"базы {factions[0]}({bases[0].Pos.x:F0},{bases[0].Pos.y:F0})/" +
                      $"{factions[1]}({mirrorA.x:F0},{mirrorA.y:F0}), bounds " +
                      $"{(terrainMode ? "спец-карта ±" + (template.terrain.sizeM * 0.5f).ToString("F0") : "стоковая")}, " +
                      $"масса {mes}, уголь {coal}, сид {seed}");
 
-            // Редактор перезагружается с готовой миссией (нативный LoadEditor): юниты
-            // спавнятся в сцену — раскладку видно, её можно править и Play.
-            _ = MissionEditor.LoadEditor(mission);
-            result = Loc.F("Сценарий {0}: раскладка загружается в редактор", saveName);
+            if (loadEditor)
+            {
+                // Редактор перезагружается с готовой миссией (нативный LoadEditor): юниты
+                // спавнятся в сцену — раскладку видно, её можно править и Play.
+                _ = MissionEditor.LoadEditor(mission);
+                result = Loc.F("Сценарий {0}: раскладка загружается в редактор", saveName);
+            }
+            else
+            {
+                // Скримиш: сейв есть, редактор не нужен — старт зовёт SkirmishService
+                // (TryLoad из User-группы → SetMission → StartHost, как MissionsPicker).
+                result = Loc.F("Сценарий {0} готов", saveName);
+            }
             return true;
+        }
+
+        /// <summary>Цикл СТИЛЯ карты (land → coast → seas → islands → …) в JSON
+        /// текущего шаблона + СРАЗУ генерация (Ctrl+Shift+MapGenKey). Селектор
+        /// шаблонов-файлов запутал юзера — «работает только один стиль»
+        /// (плейтест 2026-11-02); стиль пишется В ФАЙЛ: обе стороны пайплайна
+        /// (генерация и загрузка из ключа) читают один источник, MorphHash в
+        /// ключе разводит миры. Чужие поля JSON сохраняются (JObject).</summary>
+        public static string CycleStyleAndGenerate(string templateName, int seed, out bool ok)
+        {
+            string[] order = { "land", "coast", "seas", "islands" };
+            try
+            {
+                // Load создаёт образец, если файла ещё нет.
+                ScenarioTemplate.Load(templateName);
+                string path = System.IO.Path.Combine(
+                    BepInEx.Paths.PluginPath, "SupremeNuclear", "MapGen", templateName + ".json");
+                var doc = Newtonsoft.Json.Linq.JObject.Parse(
+                    System.IO.File.ReadAllText(path));
+                var terrain = (Newtonsoft.Json.Linq.JObject)doc["terrain"];
+                if (terrain == null)
+                {
+                    ok = false;
+                    return Loc.Tr("В шаблоне нет секции terrain — стиль переключать нечего");
+                }
+                string current = HeightmapGen.StyleOf((string)terrain["style"] ?? "land");
+                string next = order[(System.Array.IndexOf(order, current) + 1) % order.Length];
+                terrain["style"] = next;
+                System.IO.File.WriteAllText(path,
+                    doc.ToString(Newtonsoft.Json.Formatting.Indented));
+                Log.Info("MapGen: стиль карты → " + next + " (шаблон " + templateName + ")");
+                ok = Generate(templateName, seed, out string gen);
+                return Loc.F("Стиль карты: {0} — генерирую", next) + "\n" + gen;
+            }
+            catch (System.Exception e)
+            {
+                ok = false;
+                Log.Error("MapGen: смена стиля не удалась — " + e.Message);
+                return Loc.Tr("Не удалось переключить стиль карты — см. лог");
+            }
         }
 
         /// <summary>Пригодность точки: суша + не склон (пробы ±70 м, как экономика).</summary>

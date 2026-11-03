@@ -148,6 +148,7 @@ python tools/build.py --fast # без чистки obj
 | Новая локаль (язык) | один файл `locales/<язык>.json` по образцу `en.json` |
 | Мировой маркер | `CommanderHud` |
 | Экранная панель | `SupcomUi` |
+| Кнопка/панель в главном меню (лобби, старт мимо редактора) | `SkirmishPanel` + `SkirmishService` (прямой старт — рецепт ARCHITECTURE §10) |
 
 ## Перед завершением работы
 

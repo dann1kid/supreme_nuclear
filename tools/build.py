@@ -20,6 +20,8 @@ BIN_DLL = os.path.join(SRC, "bin", "Release", "SupremeNuclear.dll")
 GAME_DLL = r"C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\BepInEx\plugins\SupremeNuclear\SupremeNuclear.dll"
 GAME_LOCALES = r"C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\BepInEx\plugins\SupremeNuclear\Locales"
 REPO_LOCALES = os.path.join(ROOT, "locales")
+GAME_MAPGEN = r"C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\BepInEx\plugins\SupremeNuclear\MapGen"
+REPO_MAPGEN = os.path.join(ROOT, "mapgen")
 
 failures = []
 
@@ -114,6 +116,16 @@ def main():
                         locales_ok = False
                         break
         step("Деплой: локали в игре идентичны репозиторию", locales_ok)
+        presets_ok = os.path.isdir(GAME_MAPGEN)
+        if presets_ok:
+            for name in os.listdir(REPO_MAPGEN):
+                if name.endswith(".json"):
+                    game_json = os.path.join(GAME_MAPGEN, name)
+                    repo_json = os.path.join(REPO_MAPGEN, name)
+                    if not os.path.exists(game_json) or open(game_json, "rb").read() != open(repo_json, "rb").read():
+                        presets_ok = False
+                        break
+        step("Деплой: пресеты MapGen в игре идентичны репозиторию", presets_ok)
     else:
         step("Игровой DLL существует", False, GAME_DLL)
 

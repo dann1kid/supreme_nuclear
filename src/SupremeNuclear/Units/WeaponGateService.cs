@@ -39,6 +39,57 @@ namespace SupremeNuclear
         /// но класс-гейты и правила типов остаются законом и для ручного пуска.</summary>
         internal static bool ManualOrder;
 
+        // ---------- ЯО-предохранитель (§2.14-3, v0.139) ----------
+        // Автоприменение ядерного оружия ЗАПРЕЩЕНО по умолчанию (юзер-канон:
+        // «вылетевший борт не должен бахнуть ядеркой по танку у своей базы»).
+        // Разрешения: чип «ЯД авто» по выделению, одноразовый приказ удара
+        // (OrderNuclearStrike) или ручной путь (ас-человек / ManualOrder — как
+        // всегда не гейтится). Носители (не авиация) платят заряд при выстреле.
+        private static readonly HashSet<Unit> _nuclearAuto = new HashSet<Unit>();
+        private static readonly HashSet<Unit> _nuclearStrike = new HashSet<Unit>();
+
+        public static bool NuclearAuto(Unit unit) => _nuclearAuto.Contains(unit);
+
+        /// <summary>Тумблер «автоприменение ЯО» на юнит (группой — из SupcomUi).</summary>
+        public static void SetNuclearAuto(Unit unit, bool on)
+        {
+            if (unit == null)
+                return;
+            if (on)
+                _nuclearAuto.Add(unit);
+            else
+                _nuclearAuto.Remove(unit);
+        }
+
+        /// <summary>Одноразовое разрешение ЯО (приказ удара): живёт до первого
+        /// разрешённого применения — снимается решением ниже.</summary>
+        public static void OrderNuclearStrike(Unit unit)
+        {
+            if (unit != null)
+                _nuclearStrike.Add(unit);
+        }
+
+        /// <summary>Решение по ядерной станции (уже не ас-человек и не ManualOrder):
+        /// предохранитель → заряд носителя; списание заряда — здесь (выстрел идёт).</summary>
+        internal static bool NuclearDecision(Unit owner)
+        {
+            if (ManualOrder)
+                return true; // ручной путь (залпы) оплатил сам — врезка TryConsumeLaunch
+            bool allowed = _nuclearAuto.Contains(owner) || _nuclearStrike.Remove(owner);
+            if (!allowed)
+                return false; // предохранитель: авто-ЯО запрещено
+            if (owner is Aircraft)
+                return true; // авиация платит нативно со склада (при подвеске)
+            return WarheadService.TryConsumeLaunch(owner); // носителю нужен заряд
+        }
+
+        /// <summary>Чистка юнит-разрешений ЯО (смерть; полный сброс — Reset).</summary>
+        public static void PruneNuclear()
+        {
+            _nuclearAuto.RemoveWhere(u => u == null);
+            _nuclearStrike.RemoveWhere(u => u == null);
+        }
+
         private static bool IsHost
         {
             get
@@ -343,6 +394,8 @@ namespace SupremeNuclear
         {
             Blocked.Clear();
             TypeRules.Clear();
+            _nuclearAuto.Clear();
+            _nuclearStrike.Clear();
         }
     }
 }

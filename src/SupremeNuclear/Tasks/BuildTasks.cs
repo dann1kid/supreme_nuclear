@@ -196,6 +196,22 @@ namespace SupremeNuclear
                                           def.unitPrefab.GetComponent<VehicleDepot>() != null);
         }
 
+        private static readonly Dictionary<BuildingDefinition, bool> StorageDefs =
+            new Dictionary<BuildingDefinition, bool>();
+
+        /// <summary>Здание-ХРАНИЛИЩЕ БЧ (на префабе нативный WarheadStorage,
+        /// §2.14-3): пристраивается к своему аэродрому (как ангар) и само наливает
+        /// боеголовки (WarheadService). Строит T3-инженер (тир здания 3 в ростере).</summary>
+        public static bool IsStorageDefinition(BuildingDefinition def)
+        {
+            if (def == null)
+                return false;
+            if (StorageDefs.TryGetValue(def, out bool isStorage))
+                return isStorage;
+            return StorageDefs[def] = def.unitPrefab != null &&
+                def.unitPrefab.GetComponentInChildren<WarheadStorage>(true) != null;
+        }
+
         /// <summary>Площадка — ФАБРИКА (депо/верфь/ангар): принимает очередь
         /// производства как готовая, выпуск — по завершении стройки (v0.107,
         /// ProductionTasks.EnqueueSite/AdoptSite). ВПП — НЕ фабрика: её
@@ -814,6 +830,15 @@ namespace SupremeNuclear
                             Settings.HangarAttachRadiusM.ToString("F0")));
                 return false;
             }
+            // Хранилище БЧ — та же пристройка к аэродрому (наполнение — WarheadService).
+            if (IsStorageDefinition(def) &&
+                NearestOwnAirbase(placed, hq, Settings.HangarAttachRadiusM) == null)
+            {
+                if (notice)
+                    CommanderHud.Notice(Loc.F("Хранилище БЧ: своего аэродрома нет в радиусе {0} м",
+                            Settings.HangarAttachRadiusM.ToString("F0")));
+                return false;
+            }
 
             // Наклон под рельеф — только сухопутное депо: ангар встаёт на плоский
             // апрон (TaxiSurface.Pad), верфь — на платформу у уровня моря (TryPlaceDock).
@@ -1083,20 +1108,23 @@ namespace SupremeNuclear
         public static IReadOnlyList<SeqEntry> SequenceOf(Unit builder) =>
             Sequences.TryGetValue(builder, out List<SeqEntry> seq) ? seq : null;
 
-        /// <summary>Все инженеры с непустыми очередями (для Shift-режима видимости).</summary>
-        public static List<Unit> UnitsWithSequences()
+        /// <summary>Все инженеры с непустыми очередями (для Shift-режима видимости).
+        /// only ≠ null — только своей фракции: AI-инженеры делят тот же реестр,
+        /// чужие очереди не рисуются и не пикаются (v0.143.9).</summary>
+        public static List<Unit> UnitsWithSequences(FactionHQ only = null)
         {
             var list = new List<Unit>();
-            UnitsWithSequences(list);
+            UnitsWithSequences(list, only);
             return list;
         }
 
         /// <summary>Буфер-версия (событийные сканы без аллокаций): список очищается.</summary>
-        public static void UnitsWithSequences(List<Unit> list)
+        public static void UnitsWithSequences(List<Unit> list, FactionHQ only = null)
         {
             list.Clear();
             foreach (KeyValuePair<Unit, List<SeqEntry>> kv in Sequences)
-                if (kv.Key != null && !kv.Key.disabled && kv.Value.Count > 0)
+                if (kv.Key != null && !kv.Key.disabled && kv.Value.Count > 0 &&
+                    (only == null || GameApi.IsFriendlyUnit(kv.Key, only)))
                     list.Add(kv.Key);
         }
 
@@ -2106,6 +2134,36 @@ namespace SupremeNuclear
                          $"на ({local.x:F0},{local.z:F0}), поворот {t.YawDeg:F0}°, " +
                          $"полотно y={padY:F1}");
                 return hangar.GetComponent<Hangar>(); // фабрика для AdoptSite
+            }
+            // Хранилище БЧ — нативная привязка к аэродрому тем же вызовом:
+            // SpawnBuilding(..., airbase, ...) делает SetAirbase + AddBuilding,
+            // а AddBuilding детектит WarheadStorage и регистрирует склад нативно.
+            if (IsStorageDefinition(t.Definition))
+            {
+                Airbase airbase = NearestOwnAirbase(local, t.Faction, Settings.HangarAttachRadiusM);
+                if (airbase != null)
+                {
+                    Vector3 posS = new Vector3(local.x, GameApi.GroundY(local.x, local.z), local.z) +
+                                   (Vector3)t.Definition.spawnOffset;
+                    Building storage = spawner.SpawnBuilding(
+                        t.Definition.unitPrefab, posS.ToGlobalPosition(), rot,
+                        t.Faction, airbase, t.Definition.unitName, false, null);
+                    if (storage != null)
+                    {
+                        CommanderHud.Notice(Loc.F("Построено: {0} → {1}",
+                            t.Definition.unitName, airbase.name));
+                        Log.Info("Build: хранилище БЧ пристыковано к " + airbase.name);
+                        return null; // не фабрика: очереди AdoptSite не нужно
+                    }
+                    Log.Error("Build: хранилище БЧ не создано — возврат денег");
+                    t.Faction.AddFunds(t.PaidMass);
+                    EconomyService.Refund(t.Faction, t.PaidEnergy);
+                    return null;
+                }
+                Log.Warn("Build: аэродром потерян за время стройки хранилища — возврат");
+                t.Faction.AddFunds(t.PaidMass);
+                EconomyService.Refund(t.Faction, t.PaidEnergy);
+                return null;
             }
             Vector3 pos2 = new Vector3(local.x, GameApi.GroundY(local.x, local.z), local.z) +
                            (Vector3)t.Definition.spawnOffset;

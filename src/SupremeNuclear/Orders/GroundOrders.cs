@@ -420,8 +420,9 @@ namespace SupremeNuclear
         }
 
         /// <summary>Живые связи сопровождения: пары «эскорт → цель» (отрисовка,
-        /// скан вейпоинта-связи, отмена по цели).</summary>
-        public static void CollectEscorts(List<Unit> units, List<Unit> targets)
+        /// скан вейпоинта-связи, отмена по цели). only — фильтр своей фракции
+        /// (как CollectAll: AI делит реестр, чужие связи не рисуются/не пикаются).</summary>
+        public static void CollectEscorts(List<Unit> units, List<Unit> targets, FactionHQ only = null)
         {
             units.Clear();
             targets.Clear();
@@ -429,6 +430,8 @@ namespace SupremeNuclear
             {
                 if (kv.Key == null || kv.Key.disabled ||
                     kv.Value.Kind != GroundOrderKind.Escort || kv.Value.EscortTarget == null)
+                    continue;
+                if (only != null && !GameApi.IsFriendlyUnit(kv.Key, only))
                     continue;
                 units.Add(kv.Key);
                 targets.Add(kv.Value.EscortTarget);
@@ -1191,7 +1194,11 @@ namespace SupremeNuclear
                 unit.GetComponent<UnitCommand>()?.SetDestination(ch.Points[index], playerCommand: true);
         }
 
-        public static void CollectAll(List<Unit> units, List<IReadOnlyList<GlobalPosition>> queues, List<int> indices)
+        /// <summary>Сбор цепочек для отрисовки/сканера. only ≠ null — только своей
+        /// фракции: AI-командир кладёт цепочки в тот же реестр, чужие ленты/точки
+        /// игроку не показываются и не пикаются (хост-сервисы зовут без фильтра).</summary>
+        public static void CollectAll(List<Unit> units, List<IReadOnlyList<GlobalPosition>> queues,
+            List<int> indices, FactionHQ only = null)
         {
             units.Clear();
             queues.Clear();
@@ -1202,6 +1209,8 @@ namespace SupremeNuclear
                 // отрисовка атакующих ведёт кресты по gUnits этого списка.
                 if (kv.Key == null || kv.Key.disabled ||
                     (kv.Value.Points.Count == 0 && kv.Value.TargetQueue.Count == 0))
+                    continue;
+                if (only != null && !GameApi.IsFriendlyUnit(kv.Key, only))
                     continue;
                 units.Add(kv.Key);
                 queues.Add(kv.Value.Points);

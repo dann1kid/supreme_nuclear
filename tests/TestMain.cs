@@ -679,19 +679,26 @@ namespace SupremeNuclear.Tests
                     nodeOk = false;
             Check("Heightmap: выборка совпадает с узлами решётки", nodeOk);
             // Террасы SupCom (2026-10-30): плоских клеток (|dh| к соседу ≈ 0) стало
-            // заметно больше — «плоскости и плато» вместо сплошных склонов.
+            // заметно больше — «плоскости и плато» вместо сплошных склонов. Считаем
+            // только сушу ЗА кромкой: край карты утоплен в океан полосой ~5% стороны
+            // (реалии NO, 2026-11-02) — переходный спад и подводные склоны не обязаны
+            // быть плато.
             {
+                int rim = (int)Math.Max(2f, Math.Min(hm.W * 0.05f,
+                    terrainParams.edgeM * 2f / hm.Step)) + 2;
                 int flat = 0, total = 0;
-                for (int j = 2; j < hm.H - 2; j += 3)
-                    for (int i = 2; i < hm.W - 2; i += 3)
+                for (int j = rim; j < hm.H - rim; j += 3)
+                    for (int i = rim; i < hm.W - rim; i += 3)
                     {
+                        if (hm.Water[i, j])
+                            continue;
                         total++;
                         float dh = Math.Abs(hm.Height[i, j] - hm.Height[i + 1, j]) +
                                    Math.Abs(hm.Height[i, j] - hm.Height[i, j + 1]);
                         if (dh < 0.5f)
                             flat++;
                     }
-                Check("Heightmap: террасы — плоских клеток ≥ 30%",
+                Check("Heightmap: террасы — плоских клеток (суша) ≥ 30%",
                     total > 0 && flat / (float)total >= 0.30f,
                     "flat " + (total > 0 ? (flat / (float)total).ToString("F2") : "?"));
             }
@@ -1633,6 +1640,149 @@ namespace SupremeNuclear.Tests
                             found ? "пруд → ровная суша" : "воды в середине не нашлось");
                     }
 
+                    // ---------- MapGen v3: стили карт (Neroxis land/coast/seas/islands) ----------
+                    {
+                        // Доля воды по стилям (вода = Height < SeaLevel): пороги
+                        // морфологии держат долю в диапазоне — регресс при правке.
+                        foreach (string style in new[] { "land", "coast", "seas", "islands" })
+                        {
+                            var tS = new ScenarioTemplate.TerrainSettings
+                            {
+                                sizeM = 24000f,
+                                stepM = 200f,
+                                edgeM = 2000f,
+                                style = style,
+                                waterAmount = style == "coast" ? 0.30f :
+                                    style == "seas" ? 0.55f : style == "islands" ? 0.50f : 0f,
+                            };
+                            var hS = HeightmapGen.Generate(tS, 4242);
+                            int waterCnt = 0;
+                            for (int j = 0; j < hS.H; j++)
+                                for (int i = 0; i < hS.W; i++)
+                                    if (hS.Water[i, j]) waterCnt++;
+                            float frac = waterCnt / (float)(hS.W * hS.H);
+                            float lo = style == "land" ? 0f : style == "coast" ? 0.30f :
+                                style == "seas" ? 0.20f : 0.50f;
+                            float hi = style == "land" ? 0.30f : style == "coast" ? 0.68f :
+                                style == "seas" ? 0.60f : 0.90f;
+                            Console.WriteLine("  [диаг] стиль " + style + ": вода " +
+                                frac.ToString("F2") + " (диапазон " + lo.ToString("F2") + ".." + hi.ToString("F2") + ")");
+                            Check("MapGen: доля воды в диапазоне стиля " + style,
+                                frac >= lo && frac <= hi, "вода " + frac.ToString("F2"));
+
+                            // Точная симметрия X держится и на водных стилях
+                            // (бампы баз пишутся четверкой ±x±z — обе симметрии).
+                            bool symS = true;
+                            for (int j = 0; j < hS.H && symS; j++)
+                                for (int i = 0; i < hS.W; i++)
+                                    if (hS.Height[i, j] != hS.Height[hS.W - 1 - i, j]) { symS = false; break; }
+                            Check("MapGen: симметрия X у стиля " + style, symS);
+
+                            // РЕАЛИИ NO (юзер 2026-11-02 «карта бесконечная — края
+                            // без висящих краёв»): кромка меша УТОПЛЕНА в океан у
+                            // ВСЕХ стилей (вода-плоскость игры бесконечна).
+                            bool rimWater = hS.Water[0, hS.H / 2] && hS.Water[hS.W - 1, hS.H / 2] &&
+                                            hS.Water[hS.W / 2, 0] && hS.Water[hS.W / 2, hS.H - 1];
+                            Check("MapGen: кромка карты под водой у стиля " + style, rimWater);
+                        }
+
+                        // НЕСКОЛЬКО ОСЕЙ СИММЕТРИИ (юзер 2026-11-03): mirror — ось X,
+                        // quadrant — оси X и Z, rotational — поворот 180°. Высоты строго.
+                        foreach (string sym in new[] { "mirror", "quadrant", "rotational" })
+                        {
+                            var tSym = new ScenarioTemplate.TerrainSettings
+                            {
+                                sizeM = 24000f, stepM = 200f, edgeM = 2000f,
+                                symmetry = sym, style = "land", waterAmount = 0f,
+                            };
+                            var hSym = HeightmapGen.Generate(tSym, 2024);
+                            bool sx = true;
+                            for (int j = 0; j < hSym.H && sx; j++)
+                                for (int i = 0; i < hSym.W; i++)
+                                    if (hSym.Height[i, j] != hSym.Height[hSym.W - 1 - i, j]) { sx = false; break; }
+                            bool sz = true;
+                            for (int j = 0; j < hSym.H && sz; j++)
+                                for (int i = 0; i < hSym.W; i++)
+                                    if (hSym.Height[i, j] != hSym.Height[i, hSym.H - 1 - j]) { sz = false; break; }
+                            bool srot = true;
+                            for (int j = 0; j < hSym.H && srot; j++)
+                                for (int i = 0; i < hSym.W; i++)
+                                    if (hSym.Height[i, j] != hSym.Height[hSym.W - 1 - i, hSym.H - 1 - j]) { srot = false; break; }
+                            bool expectX = sym == "mirror" || sym == "quadrant";
+                            bool expectZ = sym == "quadrant";
+                            bool expectRot = sym == "rotational" || sym == "quadrant";
+                            Console.WriteLine("  [диаг] симметрия " + sym + ": X " + sx + ", Z " + sz + ", поворот " + srot);
+                            Check("MapGen: оси симметрии '" + sym + "'",
+                                sx == expectX && sz == expectZ && srot == expectRot);
+                        }
+
+                        // Водные стили: базы — геометрически (до SiteOk), суша под
+                        // ними — остров/мыс IslandBump; после пайплайна все точки
+                        // сухие. Связность баз наземкой — кроме islands (океан).
+                        foreach (string style in new[] { "coast", "seas", "islands" })
+                        {
+                            var tmplW = new ScenarioTemplate
+                            {
+                                terrain = new ScenarioTemplate.TerrainSettings
+                                {
+                                    sizeM = 24000f,
+                                    stepM = 200f,
+                                    edgeM = 2000f,
+                                    style = style,
+                                    waterAmount = style == "coast" ? 0.30f :
+                                        style == "seas" ? 0.55f : 0.50f,
+                                    baseIslandRadiusM = 5500f,
+                                },
+                            };
+                            var wW = ScenarioWorld.Generate(tmplW, 777);
+                            bool dryW = wW.Bases.Count >= 1 && wW.Mass.Count > 0 && wW.Coal.Count > 0;
+                            foreach (ScenarioLayout.BaseSlot b in wW.Bases)
+                                if (!wW.Hm.SiteOk(b.Pos.x, b.Pos.y)) dryW = false;
+                            foreach (ScenarioLayout.Deposit d in wW.Mass)
+                                if (!wW.Hm.SiteOk(d.Pos.x, d.Pos.y)) dryW = false;
+                            foreach (ScenarioLayout.Deposit d in wW.Coal)
+                                if (!wW.Hm.SiteOk(d.Pos.x, d.Pos.y)) dryW = false;
+                            Console.WriteLine("  [диаг] " + style + ": баз " + wW.Bases.Count +
+                                ", мексов " + wW.Mass.Count + ", угля " + wW.Coal.Count +
+                                ", все сухие: " + dryW);
+                            Check("MapGen: " + style + " — базы/точки на суше", dryW,
+                                "баз " + wW.Bases.Count + ", мексов " + wW.Mass.Count);
+
+                            if (style != "islands" && wW.Bases.Count >= 2)
+                            {
+                                PassGraph gW = PassGraph.Build(wW.Hm.Height, wW.Hm.W, wW.Hm.H,
+                                    wW.Hm.Step, wW.Hm.SeaLevel, wW.Hm.Step * 0.75f);
+                                int cA = gW.ClusterAt(wW.Bases[0].Pos.x, wW.Bases[0].Pos.y, wW.Hm.Step);
+                                int cB = gW.ClusterAt(wW.Bases[wW.Bases.Count - 1].Pos.x,
+                                    wW.Bases[wW.Bases.Count - 1].Pos.y, wW.Hm.Step);
+                                bool linked = cA > 0 && cB > 0 && gW.Reachable(cA, 100000).Contains(cB);
+                                Check("MapGen: " + style + " — базы связаны наземно (PassGraph)", linked,
+                                    "кластеры " + cA + "→" + cB + ", всего " + gW.Count);
+                            }
+                        }
+
+                        // Хеш морфологии в ключе карты: правка стиля/шага/воды/
+                        // палитры меняет мир — ключ обязан различаться (урок
+                        // X8-сида: один ключ не накрывает два мира); одинаковые
+                        // настройки дают одинаковый хеш.
+                        {
+                            var tA = new ScenarioTemplate.TerrainSettings();
+                            var tB = new ScenarioTemplate.TerrainSettings();
+                            Check("MapGen: MorphHash стабилен",
+                                tA.MorphHash() == tB.MorphHash(), tA.MorphHash());
+                            bool styleDiff = tA.MorphHash() !=
+                                new ScenarioTemplate.TerrainSettings { style = "islands" }.MorphHash();
+                            bool stepDiff = tA.MorphHash() !=
+                                new ScenarioTemplate.TerrainSettings { stepM = 50f }.MorphHash();
+                            bool waterDiff = tA.MorphHash() !=
+                                new ScenarioTemplate.TerrainSettings { waterAmount = 0.5f }.MorphHash();
+                            bool palDiff = tA.MorphHash() !=
+                                new ScenarioTemplate.TerrainSettings { palette = new[] { "#000000", "#ffffff" } }.MorphHash();
+                            Check("MapGen: MorphHash различает стиль/шаг/воду/палитру",
+                                styleDiff && stepDiff && waterDiff && palDiff);
+                        }
+                    }
+
                 // Тиры фабрик (§2.3а): решение AI на апгрейд + границы терцилей
                 // посева ростера (UnitRoster.TercileCuts).
                 {
@@ -1687,6 +1837,48 @@ namespace SupremeNuclear.Tests
                         !SupplyService.SalvoAllowed(0f, 0f, 25f, 20f, false) && // масса гейтится и без энергослоя
                         SupplyService.SalvoAllowed(25f, 0f, 25f, 20f, false) && // энергослой не активен — энергия не гейтится
                         SupplyService.SalvoAllowed(10f, 10f, 0f, 0f, true));   // нулевая цена — всегда да
+                }
+
+                // Ключ спец-карты (Скримиш v0.143): формат MapGenKey — игроки в
+                // ключе (анти-коллизия миров 1×1/2×2), шаблоны с дефисами, старые ключи v1.
+                {
+                    string key = MapGenKey.Build("Duel-Land", -1, "AB12CD34", 82, 4);
+                    Check("MapGenKey: сборка — дефис в шаблоне, сид X8, суффиксы размер/игроки",
+                        key == "SN-Terrain-Duel-Land-FFFFFFFF-AB12CD34-82k-p4");
+                    Check("MapGenKey: полный разбор (round-trip)",
+                        MapGenKey.TryParse(key, out MapGenKey.Parsed p) &&
+                        p.Template == "Duel-Land" && p.Seed == -1 && p.Morph == "AB12CD34" &&
+                        p.SizeK == 82 && p.Players == 4);
+                    string v3 = MapGenKey.Build("duel", 305419896, "00000000");
+                    Check("MapGenKey: без суффиксов — null-поля, формат v3",
+                        v3 == "SN-Terrain-duel-12345678-00000000" &&
+                        MapGenKey.TryParse(v3, out MapGenKey.Parsed p2) &&
+                        p2.Template == "duel" && p2.Seed == 305419896 &&
+                        p2.SizeK == null && p2.Players == null);
+                    Check("MapGenKey: старый ключ v1 (4-симв. сид последним токеном)",
+                        MapGenKey.TryParse("SN-Terrain-duel-ABCD", out MapGenKey.Parsed p3) &&
+                        p3.Template == "duel" && p3.Seed == 0xABCD && p3.Morph == null);
+                    Check("MapGenKey: чужой префикс/без сида/пустой шаблон — мусор",
+                        !MapGenKey.TryParse("Kola", out _) &&
+                        !MapGenKey.TryParse("SN-Terrain-duel", out _) &&
+                        !MapGenKey.TryParse("SN-Terrain--ABCD", out _));
+                    Check("MapGenKey: игроки разводят ключи одной карты",
+                        MapGenKey.Build("t", 5, "M", null, 2) != MapGenKey.Build("t", 5, "M", null, 4));
+                }
+
+                // Сид панели Скримиша и пары игроков.
+                {
+                    Check("Скримиш: сид — пусто/пробел/мусор = 0 (случайный)",
+                        SkirmishService.ParseSeed("") == 0 &&
+                        SkirmishService.ParseSeed("  ") == 0 &&
+                        SkirmishService.ParseSeed("abc") == 0);
+                    Check("Скримиш: сид — число и отрицательное (с пробелами)",
+                        SkirmishService.ParseSeed("12345") == 12345 &&
+                        SkirmishService.ParseSeed(" -42 ") == -42);
+                    Check("Скримиш: PairsOf — чёт/нечёт/минимум",
+                        ScenarioTemplate.PairsOf(2) == 1 && ScenarioTemplate.PairsOf(4) == 2 &&
+                        ScenarioTemplate.PairsOf(3) == 1 && ScenarioTemplate.PairsOf(1) == 1 &&
+                        ScenarioTemplate.PairsOf(0) == 1);
                 }
                 }
             }

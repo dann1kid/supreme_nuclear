@@ -1177,13 +1177,20 @@ namespace SupremeNuclear
             return Plans.TryGetValue(aircraft, out List<OrderSegment> p) && p.Count > 0 && (plan = p) != null;
         }
 
-        public static void CollectAll(List<Unit> units, List<IReadOnlyList<OrderSegment>> plans)
+        /// <summary>Сбор планов для отрисовки/сканера. only ≠ null — только своей
+        /// фракции: AI-крылья летают по тому же реестру (CAP/удары), чужие ленты
+        /// и точки игроку не показываются и не пикаются (SortieService/SalvoService
+        /// обслуживают все фракции и зовут без фильтра).</summary>
+        public static void CollectAll(List<Unit> units, List<IReadOnlyList<OrderSegment>> plans,
+            FactionHQ only = null)
         {
             units.Clear();
             plans.Clear();
             foreach (KeyValuePair<Unit, List<OrderSegment>> kv in Plans)
             {
                 if (kv.Key == null || kv.Key.disabled || kv.Value.Count == 0)
+                    continue;
+                if (only != null && !GameApi.IsFriendlyUnit(kv.Key, only))
                     continue;
                 units.Add(kv.Key);
                 plans.Add(kv.Value);

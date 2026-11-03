@@ -1047,13 +1047,34 @@ namespace SupremeNuclear
         public static RallyRoute RallyOf(object factory) =>
             Rally.TryGetValue(factory, out RallyRoute route) ? route : null;
 
+        /// <summary>Ралли своей фракции? AI-фабрики ставят ралли в тот же реестр —
+        /// чужие точки сбора не рисуются и не пикаются (зеркально CollectRallies).</summary>
+        public static bool IsOwnRally(object factory, FactionHQ hq)
+        {
+            switch (factory)
+            {
+                case BuildTasks.Task site: // недострой-фабрика
+                    return site.Faction == hq;
+                case Hangar hangar: // ангар ключуется сам, юнит — attachedUnit
+                    Unit hu = hangar != null ? hangar.attachedUnit : null;
+                    return hu != null && GameApi.IsFriendlyUnit(hu, hq);
+                case Airbase airbase:
+                    return airbase != null && airbase.CurrentHQ == hq;
+                case Building building: // VehicleDepot и док-корпус верфи
+                    return building != null && GameApi.IsFriendlyUnit(building, hq);
+                default:
+                    return false;
+            }
+        }
+
         /// <summary>Все фабрики с живыми ралли-маршрутами (отрисовка Shift-режима
-        /// видимости: невыделенные фабрики — приглушённо, как цепочки юнитов).</summary>
-        public static void CollectRallies(List<object> factories)
+        /// видимости: невыделенные фабрики — приглушённо, как цепочки юнитов).
+        /// only ≠ null — только своей фракции (AI делит реестр ралли).</summary>
+        public static void CollectRallies(List<object> factories, FactionHQ only = null)
         {
             factories.Clear();
             foreach (KeyValuePair<object, RallyRoute> kv in Rally)
-                if (kv.Value.Count > 0)
+                if (kv.Value.Count > 0 && (only == null || IsOwnRally(kv.Key, only)))
                     factories.Add(kv.Key);
         }
 

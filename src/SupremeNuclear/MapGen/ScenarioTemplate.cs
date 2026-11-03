@@ -30,8 +30,38 @@ namespace SupremeNuclear
         /// </summary>
         public sealed class TerrainSettings
         {
-            public float sizeM = 48000f;         // сторона карты, м (явная ручка; нативный эталон 81.9 км)
-            public float stepM = 200f;           // клетка высот/меша, м
+            public float sizeM = 81920f;        // сторона карты, м: РОДНОЙ размер NO (81.9 км;
+                                                 // плейтест 2026-11-02: 40 км мелко для авиации NO)
+            public float stepM = 80f;           // клетка высот/меша, м: 81.9 км / 80 = сетка 1024²
+                                                // (было 200 — рельеф «размазывало», плейтест 2026-11-02)
+
+            // ---- Стиль карты (Neroxis-канон v3): морфология воды/суши ----
+            /// <summary>land — суша с редкими озёрами (краевые горы); coast —
+            /// континент в океане («окружающая вода»); seas — полуморская (крупные
+            /// внутренние моря, суша доминирует); islands — архипелаг в океане
+            /// (острова баз + мелкие острова под мексовку).</summary>
+            public string style = "land";
+            /// <summary>Доля воды 0..1 внутри стиля: сдвигает порог маски воды
+            /// (у coast — радиус континента, у seas/islands — порог пятен).</summary>
+            public float waterAmount = 0f;
+            /// <summary>Симметрия рельефа (Neroxis-канон: усреднение с отражением —
+            /// строгая симметрия и ГЛАДКИЕ оси без изломов-швов; юзер 2026-11-03):
+            /// mirror — 1 ось X (канон дуэлей); quadrant — 2 оси (X+Z, четверть
+            /// отражается 4 раза); rotational — поворот 180°; none — без симметрии.</summary>
+            public string symmetry = "mirror";
+            public float oceanFloorM = -350f;    // высота океанского дна (до террас)
+            public float coastRadius = 0.92f;    // coast: радиус континента, доля половины карты
+            public float coastBand = 0.10f;      // coast: полуширина кромки континента (пляж/шельф)
+            public float seaScaleM = 12000f;     // seas: характерный размер моря, м
+            public float islandScaleM = 8000f;   // islands: характерный размер острова, м
+            public float baseIslandRadiusM = 4500f; // водные стили: остров/мыс под каждую базу, м
+            public int albedoRes = 0;             // «ползунок текстур» рельефа (фолбэк-материал):
+                                                 // 1024..8192 (10 м/тексель на 82 км при 8192);
+                                                 // слабые машины — вниз; 0 = дефолт 8192
+            public float corridorWidthM = 180f;  // ровные трассы проезда техники: ширина коридора
+                                                 // база↔центр/месторождения, м (0 = выкл;
+                                                 // юзер-канон 2026-11-02 «участки под проезд —
+                                                 // плоские и ровные»)
             public float plainHeight = 40f;      // базовая высота равнин над морем
             public float gentleAmp = 70f;        // амплитуда холмов равнин
             public float plainFreq = 0.03f;      // частота холмов (1/клетку; 0.03 ≈ волна 6.5 км)
@@ -54,6 +84,68 @@ namespace SupremeNuclear
             public string[] palette =
                 { "#3f5b2e", "#6b7a3a", "#9b8f5c", "#8a8a8a", "#d9dde0" };
             public string waterColor = "#1d4e6e";
+            // Зонная окраска v3 (пляж/скалы/мелководье/снег): hex-цвета шаблона.
+            public string shallowColor = "#3f7d94";  // подводная кромка (мель)
+            public string beachColor = "#c2b280";    // пляж у кромки воды
+            public string cliffColor = "#6f6a5e";    // скалы (круче steepDeg)
+            public float snowHeightM = 750f;         // вершины выше — к снежному
+            public float beachWidthM = 350f;         // полоса пляжа от кромки воды, м
+
+            /// <summary>Хеш морфологии (все поля стиля/рельефа, FNV-1a): входит в
+            /// ключ карты — правка JSON-шаблона не коллизирует миры в реестре Built
+            /// (урок X8-сида: один ключ = один мир). Чистая — тестируется.</summary>
+            public string MorphHash()
+            {
+                unchecked
+                {
+                    uint h = 2166136261u;
+                    Mix(ref h, sizeM); Mix(ref h, stepM); Mix(ref h, waterAmount);
+                    Mix(ref h, plainHeight); Mix(ref h, gentleAmp); Mix(ref h, plainFreq);
+                    Mix(ref h, hillsAmp); Mix(ref h, hillsFreq); Mix(ref h, terraceStepM);
+                    Mix(ref h, coastWobble); Mix(ref h, mountainHeight); Mix(ref h, mountainStart);
+                    Mix(ref h, ridgeHeight); Mix(ref h, ridgeMaskStart); Mix(ref h, ridgeMaskEnd);
+                    Mix(ref h, seaLevelM); Mix(ref h, steepDeg); Mix(ref h, edgeM);
+                    Mix(ref h, oceanFloorM); Mix(ref h, coastRadius); Mix(ref h, coastBand);
+                    Mix(ref h, seaScaleM); Mix(ref h, islandScaleM); Mix(ref h, baseIslandRadiusM);
+                    Mix(ref h, snowHeightM); Mix(ref h, beachWidthM); Mix(ref h, albedoRes); Mix(ref h, corridorWidthM);
+                    Mix(ref h, style); Mix(ref h, symmetry); Mix(ref h, waterColor); Mix(ref h, shallowColor);
+                    Mix(ref h, beachColor); Mix(ref h, cliffColor);
+                    if (palette != null)
+                        foreach (string p in palette)
+                            Mix(ref h, p);
+                    return h.ToString("X8");
+                }
+            }
+
+            [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]
+            private struct FloatIntUnion
+            {
+                [System.Runtime.InteropServices.FieldOffset(0)] public float F;
+                [System.Runtime.InteropServices.FieldOffset(0)] public int I;
+            }
+
+            private static void Mix(ref uint h, float v)
+            {
+                var u = default(FloatIntUnion);
+                u.F = v;
+                Mix(ref h, u.I);
+            }
+
+            private static void Mix(ref uint h, int v)
+            {
+                h = (h ^ (uint)v) * 16777619u;
+            }
+
+            private static void Mix(ref uint h, string s)
+            {
+                if (string.IsNullOrEmpty(s))
+                {
+                    Mix(ref h, 0);
+                    return;
+                }
+                foreach (char c in s)
+                    h = (h ^ c) * 16777619u;
+            }
         }
 
         /// <summary>Секция спец-карты: не null — сценарий строится на собственном

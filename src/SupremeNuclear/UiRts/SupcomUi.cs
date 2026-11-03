@@ -15,15 +15,16 @@ namespace SupremeNuclear
     {
         public static SupcomUi Instance { get; private set; }
 
-        private static readonly Color PanelBg = new Color(0.07f, 0.09f, 0.11f, 0.92f);
-        private static readonly Color PanelBg2 = new Color(0.10f, 0.13f, 0.16f, 0.92f);
-        private static readonly Color Accent = new Color(0.35f, 1f, 0.5f, 1f);
-        private static readonly Color BtnBg = new Color(0.16f, 0.20f, 0.24f, 1f);
-        private static readonly Color BtnActive = new Color(0.20f, 0.45f, 0.26f, 1f);
-        private static readonly Color TextMain = new Color(0.92f, 0.95f, 0.92f, 1f);
-        private static readonly Color TextDim = new Color(0.62f, 0.66f, 0.62f, 1f);
-        private static readonly Color WarnRed = new Color(1f, 0.42f, 0.36f, 1f);
-        private static readonly Color WarnYellow = new Color(0.85f, 0.75f, 0.25f, 1f);
+        // internal: палитрой пользуется SkirmishPanel (меню) — единой темой на весь мод.
+        internal static readonly Color PanelBg = new Color(0.07f, 0.09f, 0.11f, 0.92f);
+        internal static readonly Color PanelBg2 = new Color(0.10f, 0.13f, 0.16f, 0.92f);
+        internal static readonly Color Accent = new Color(0.35f, 1f, 0.5f, 1f);
+        internal static readonly Color BtnBg = new Color(0.16f, 0.20f, 0.24f, 1f);
+        internal static readonly Color BtnActive = new Color(0.20f, 0.45f, 0.26f, 1f);
+        internal static readonly Color TextMain = new Color(0.92f, 0.95f, 0.92f, 1f);
+        internal static readonly Color TextDim = new Color(0.62f, 0.66f, 0.62f, 1f);
+        internal static readonly Color WarnRed = new Color(1f, 0.42f, 0.36f, 1f);
+        internal static readonly Color WarnYellow = new Color(0.85f, 0.75f, 0.25f, 1f);
 
         private Canvas _canvas;
         private Font _font;
@@ -805,9 +806,11 @@ step = "arrows";
                 else if (controller != null)
                 {
                     // Очередь площадок инженера — с относительными позициями площадок.
+                    // Только своей фракции: AI строит тем же BuildTasks (v0.143.8).
+                    GameApi.TryGetLocalHQ(out FactionHQ tplHq);
                     var set = new List<(string key, float value, Vector3 pos)>();
                     foreach (BuildTasks.Task t in BuildTasks.All)
-                        if (t.Definition != null)
+                        if (t.Definition != null && t.Faction == tplHq)
                         {
                             Vector3 lp = t.Site.ToLocalPosition();
                             set.Add((t.Definition.jsonKey, t.Definition.value, lp));
@@ -998,6 +1001,10 @@ step = "arrows";
             }
             else
                 _extractorsText.text = string.Empty;
+            // ЯО (v0.139): запас БЧ фракции — когда есть что показывать.
+            int warheads = hq.GetWarheadStockpile();
+            if (warheads > 0)
+                _extractorsText.text += Loc.F(" · БЧ {0}", warheads);
         }
 
         /// <summary>Вкладка «Список»: плитки выделения по типам (15 в ряд, 3 ряда),
@@ -1853,6 +1860,18 @@ step = "arrows";
                 defs.Add(("cmd_attack", Loc.Tr("Атака (T)"), () => OrderModes.Pending = OrderMode.Attack));
                 if ((showAir && hasMissileAir) || hasMissileFleet)
                     defs.Add(("cmd_salvo", Loc.Tr("Залп (V)"), () => controller.MoveOrders.ChargeSalvo()));
+                // ЯО (v0.139): носители БЧ (корабли/ПУ) и я-авиация — прицел с кольцом
+                // поражения; Alt+N — авто-ЯО/автозарядка выделения.
+                bool nukeCapable = false;
+                foreach (Unit unit in controller.Selection.Selected)
+                    if (WarheadService.IsCarrier(unit) ||
+                        unit is Aircraft && WarheadService.HasNuclearWeapon(unit))
+                    {
+                        nukeCapable = true;
+                        break;
+                    }
+                if (nukeCapable)
+                    defs.Add(("cmd_nuke", Loc.Tr("ЯО (N)"), () => controller.MoveOrders.ChargeNuke()));
                 defs.Add(("cmd_fan", Loc.Tr("Распределение (R)"), () => controller.MoveOrders.ChargeFanAttack()));
                 defs.Add(("cmd_stop", Loc.Tr("Стоп (S)"), () => controller.MoveOrders.CancelAll(controller.Selection.Selected)));
                 defs.Add(("cmd_disperse", Loc.Tr("Рассредоточить (Alt+Shift+R)"), () =>
@@ -2296,7 +2315,11 @@ step = "arrows";
                           AircraftOrders.Version;
             if (hasEngineer)
                 foreach (BuildTasks.Task t in BuildTasks.All)
+                {
+                    if (t.Faction != hq)
+                        continue; // чужие стройки не в ключе: прогресс AI не дёргает строку
                     queueKey = queueKey * 31 + (int)(t.Progress01 * 20f) + (t.ZoneBlocked ? 3 : 0);
+                }
             // Очереди ВСЕХ фабрик выделения: мультивыделение обновляет строку при
             // изменении очереди любой из них (раньше хэшировалась одна — последняя).
             foreach (object factory in _ctxFactories)

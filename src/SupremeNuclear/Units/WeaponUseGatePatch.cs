@@ -43,10 +43,15 @@ namespace SupremeNuclear
             var net = NetworkManagerNuclearOption.i;
             if (net == null || net.Server == null || !net.Server.Active)
                 return true; // не хост — не наше решение
-            if (!WeaponGateService.AnyRestrictions)
-                return true; // в мире нет ни стойки, ни гейтов, ни правил
+            // ЯО-предохранитель (§2.14-3): ДО быстрого выхода — флаг оружия O(1);
+            // ас-человек (ручной пуск) не гейтится, как всегда.
+            if (station.WeaponInfo.nuclear && !IsHumanAce(owner) &&
+                !WeaponGateService.NuclearDecision(owner))
+                return false;
             if (IsHumanAce(owner))
                 return true; // ручное применение живого пилота не трогаем
+            if (!WeaponGateService.AnyRestrictions)
+                return true; // в мире нет ни стойки, ни гейтов, ни правил
             return !WeaponGateService.BlocksUse(owner, station, target);
         }
 

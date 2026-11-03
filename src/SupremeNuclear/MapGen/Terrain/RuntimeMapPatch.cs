@@ -37,6 +37,14 @@ namespace SupremeNuclear
             // карты — под наш (юнитов в этот момент ещё нет, пересоздание безопасно).
             // HQ уже заспавнены нативно: EnableMap → Instantiate → NetworkMap.ServerSpawn.
             BattlefieldGrid.GenerateGrid(mapSettings.MapSize.x, 2000f);
+            // Материал рельефа: карта СТРОИТСЯ в сцене редактора (TerrainHeightMap там
+            // нет — префаб получает URP-фолбэк, плейтест 2026-11-02 «сток-материал не
+            // найден»). Здесь мы уже в GameWorld — меняем фолбэк клона на нативный
+            // материал террейна (по ссылке → IsTerrain-матч травы/воронок).
+            TerrainMaterial.UpgradeClone(mapSettings);
+            // Нативная GPU-трава: наш рельеф — в реестр высот СЦЕНОВОГО
+            // TerrainHeightMap (чей реестр DetailRenderer и запекает).
+            TerrainGrass.Register(mapSettings);
             // Диагностика «юниты проваливаются» (плейтест 2026-10-29): физика должна
             // видеть Statics-коллайдеры клона; рейкаст — в точке базовой зоны.
             var colliders = mapSettings.GetComponentsInChildren<UnityEngine.MeshCollider>();

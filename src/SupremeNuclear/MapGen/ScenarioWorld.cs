@@ -19,9 +19,12 @@ namespace SupremeNuclear
     /// <summary>
     /// Единый детерминированный пайплайн спец-карты (гарантия спавна,
     /// юзер-канон 2026-10-31 «ровная площадка, нет воды»):
-    /// 1) рельеф HeightmapGen (шум → террасы → рампы → маски);
+    /// 1) рельеф HeightmapGen (шум → СТИЛЕВАЯ МОРФОЛОГИЯ v3 land/coast/seas/
+    ///    islands → острова баз → террасы → рампы → маски);
     /// 2) выбор точек ПО МАСКАМ (паттерн Neroxis: суша/не-крутость/не-край,
     ///    без окна ровности — SiteOk; финальный фолбэк StampableOk = «не край»);
+    ///    водные стили: базы — ГЕОМЕТРИЧЕСКИ до рельефа, сушу под ними поднимает
+    ///    IslandBump (мыс/остров), мексовка/уголь — по SiteOk как обычно;
     /// 3) ШТАМПЫ ровных площадок под каждую точку (Neroxis рельеф не трогает —
     ///    у него нет террас; нашу плоскость гарантирует только штамп) и
     ///    пересчёт масок: FlatOk/SiteOk внутри площадок — по построению.
@@ -32,22 +35,41 @@ namespace SupremeNuclear
         {
             // Масштаб точек ВНУТРИ пайплайна: RuntimeMap строит мир из «сырого»
             // шаблона — детерминизм требует одинаковых параметров на обеих сторонах.
+            // Число мексов растём ЛИНЕЙНО с размером карты (плотность на площадь
+            // — как spacing; реалии NO: родной размер 81.9 км, плейтест 2026-11-02).
             int pairs = ScenarioTemplate.PairsOf(t.players);
+            float sizeScale = Mathf.Max(1f, t.terrain.sizeM / 40000f);
             t.depositSpacing *= Mathf.Max(0.5f, t.terrain.sizeM / 40000f);
-            t.depositCount *= pairs;
+            t.depositCount = Mathf.RoundToInt(t.depositCount * pairs * sizeScale);
             t.coalPerSide *= pairs;
 
-            Heightmap hm = HeightmapGen.Generate(t.terrain, seed);
             var rng = new System.Random(seed);
             Vector2 min = new Vector2(-t.terrain.sizeM * 0.5f, -t.terrain.sizeM * 0.5f);
             Vector2 max = -min;
 
-            // Выбор точек: сначала честные маски, при глухом рельефе — фолбэк
-            // «не край» (штамп всё равно осушит и выровняет).
-            List<ScenarioLayout.BaseSlot> bases =
-                ScenarioLayout.Bases(min, max, t, rng, p => hm.SiteOk(p.x, p.y));
-            if (bases.Count == 0)
-                bases = ScenarioLayout.Bases(min, max, t, rng, p => hm.StampableOk(p.x, p.y));
+            // Водные стили (coast/seas/islands): базы выбираются ГЕОМЕТРИЧЕСКИ
+            // (siteOk => true — детерминированная осевая точка/дуга), рельеф
+            // получает их позиции и поднимает острова/мысы (IslandBump) — суша
+            // под базой гарантирована ещё ДО SiteOk. Land: прежний порядок —
+            // сначала рельеф, потом выбор пригодных точек по маскам.
+            bool watery = HeightmapGen.IsWatery(t.terrain);
+            List<ScenarioLayout.BaseSlot> bases;
+            Heightmap hm;
+            if (watery)
+            {
+                bases = ScenarioLayout.Bases(min, max, t, rng, p => true);
+                var basePoints = new List<Vector2>(bases.Count);
+                foreach (ScenarioLayout.BaseSlot b in bases)
+                    basePoints.Add(b.Pos);
+                hm = HeightmapGen.Generate(t.terrain, seed, basePoints);
+            }
+            else
+            {
+                hm = HeightmapGen.Generate(t.terrain, seed);
+                bases = ScenarioLayout.Bases(min, max, t, rng, p => hm.SiteOk(p.x, p.y));
+                if (bases.Count == 0)
+                    bases = ScenarioLayout.Bases(min, max, t, rng, p => hm.StampableOk(p.x, p.y));
+            }
 
             List<ScenarioLayout.Deposit> mass = ScenarioLayout.Deposits(
                 min, max, t, rng, p => hm.SiteOk(p.x, p.y), bases, p => hm.StampableOk(p.x, p.y));
@@ -72,6 +94,31 @@ namespace SupremeNuclear
             float halfAlong = Mathf.Max(t.runwayLength * 0.5f + 360f, minPad);
             float halfAcross = Mathf.Max(270f, minPad);
             float padR = Mathf.Max(t.depositPadRadiusM, minPad);
+
+            // Ровные трассы проезда (юзер-канон 2026-11-02): каждая база —
+            // магистраль к центру + к ближайшим точкам (масса/уголь). Коридоры
+            // ДО штампов площадок: штамп перезапишет высоты своей точки —
+            // площадки остаются идеально ровными, коридоры выходят ИЗ них.
+            // Каждый коридор дублируется X-зеркальным отрезком — точная
+            // симметрия карты сохраняется (как у штампов/бампов).
+            if (t.terrain.corridorWidthM > 1f)
+            {
+                foreach (ScenarioLayout.BaseSlot b in bases)
+                {
+                    CorridorPair(hm, b.Pos, c, t.terrain.corridorWidthM);
+                    var targets = new List<ScenarioLayout.Deposit>(mass);
+                    targets.AddRange(coal);
+                    targets.Sort((x, y) => (x.Pos - b.Pos).sqrMagnitude.CompareTo((y.Pos - b.Pos).sqrMagnitude));
+                    int link = 0;
+                    foreach (ScenarioLayout.Deposit d in targets)
+                    {
+                        if (link >= 8)
+                            break;
+                        CorridorPair(hm, b.Pos, d.Pos, t.terrain.corridorWidthM);
+                        link++;
+                    }
+                }
+            }
             foreach (ScenarioLayout.BaseSlot b in bases)
             {
                 hm.StampPadRect(b.Pos.x, b.Pos.y, halfAlong, halfAcross, alongX);
@@ -85,6 +132,13 @@ namespace SupremeNuclear
             hm.RebuildMasks(t.terrain);
 
             return new WorldGen { Hm = hm, Bases = bases, Mass = mass, Coal = coal };
+        }
+
+        /// <summary>Коридор + его X-зеркальная копия (симметрия рельефа по X).</summary>
+        private static void CorridorPair(Heightmap hm, Vector2 a, Vector2 b, float widthM)
+        {
+            hm.SmoothCorridor(a, b, widthM);
+            hm.SmoothCorridor(new Vector2(-a.x, a.y), new Vector2(-b.x, b.y), widthM);
         }
     }
 }

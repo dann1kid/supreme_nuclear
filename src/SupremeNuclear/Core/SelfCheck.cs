@@ -159,10 +159,33 @@ namespace SupremeNuclear
                     throw new System.Exception("VehicleDepot.TrySpawnVehicle не найден — клоны инженеров не спавнятся");
                 if (HarmonyLib.AccessTools.Field(typeof(Hangar), nameof(Hangar.parentAirbase)) == null)
                     throw new System.Exception("Hangar.parentAirbase не найден — тир авиации не найдёт аэродром");
-                if (HarmonyLib.AccessTools.Field(typeof(Airbase), "hangars") == null)
+                // Апдейт игры 30.10: hangars стал СВОЙСТВОМ (поле → property) —
+                // проба смотрит оба; прямой код компилируется против живой сборки.
+                if (HarmonyLib.AccessTools.Field(typeof(Airbase), "hangars") == null &&
+                    HarmonyLib.AccessTools.Property(typeof(Airbase), "hangars") == null)
                     throw new System.Exception("Airbase.hangars не найден — живость/владелец тира аэродрома мертвы");
                 if (HarmonyLib.AccessTools.Field(typeof(Encyclopedia), "buildings") == null)
                     throw new System.Exception("Encyclopedia.buildings не найден — ростер зданий пуст");
+            });
+            Check("ЯО (WarheadStorage.AddWarhead, Spawner.SpawnMissile, MissionSettings)", () =>
+            {
+                if (HarmonyLib.AccessTools.Method(typeof(WarheadStorage), nameof(WarheadStorage.AddWarhead)) == null)
+                    throw new System.Exception("WarheadStorage.AddWarhead не найден — склад не наполняется");
+                if (HarmonyLib.AccessTools.Method(typeof(WarheadStorage), nameof(WarheadStorage.GetNumber)) == null)
+                    throw new System.Exception("WarheadStorage.GetNumber не найден — кап склада мёртв");
+                // Апдейт игры 30.10: у SpawnMissile ДВЕ перегрузки (MissileDefinition/
+                // GameObject) — поиск по одному имени кидает AmbiguousMatch; мод
+                // вызывает MissileDefinition-вариант (WarheadService).
+                if (HarmonyLib.AccessTools.Method(typeof(Spawner), nameof(Spawner.SpawnMissile),
+                        new[] { typeof(MissileDefinition), typeof(Vector3), typeof(Quaternion),
+                                typeof(Vector3), typeof(Unit), typeof(Unit) }) == null)
+                    throw new System.Exception("Spawner.SpawnMissile не найден — ядерный пуск с корабля мёртв");
+                if (HarmonyLib.AccessTools.Method(typeof(FactionHQ), nameof(FactionHQ.GetWarheadStockpile)) == null)
+                    throw new System.Exception("FactionHQ.GetWarheadStockpile не найден — топбар БЧ мёртв");
+                foreach (string f in new[] { "nuclearEscalationThreshold", "strategicEscalationThreshold",
+                                             "minRankTacticalWarhead", "minRankStrategicWarhead" })
+                    if (HarmonyLib.AccessTools.Field(typeof(NuclearOption.SavedMission.MissionSettings), f) == null)
+                        throw new System.Exception("MissionSettings." + f + " не найден — обнуление эскалации SN-карт мертво");
             });
             Check("SpawnCustomAirbase (постройка ВПП-аэродрома)", () =>
             {
@@ -319,6 +342,42 @@ namespace SupremeNuclear
                 if (HarmonyLib.AccessTools.Field(typeof(Unit), "NetworkHQ") == null &&
                     HarmonyLib.AccessTools.Property(typeof(Unit), "NetworkHQ") == null)
                     throw new System.Exception("Unit.NetworkHQ не найден (инженерный захват)");
+                // Текстуры v3: сток-материал террейна (нативный вид рельефа спец-карты,
+                // матч IsTerrain по ссылке — трава/воронки).
+                if (HarmonyLib.AccessTools.Field(typeof(NuclearOption.Effects.TerrainHeightMap),
+                        "terrainMaterials") == null)
+                    throw new System.Exception("TerrainHeightMap.terrainMaterials не найден (нативный материал рельефа)");
+            });
+            Check("Скримиш (кнопка меню + прямой старт миссии)", () =>
+            {
+                // Кнопка «Скримиш» — клон нативной missionsButton (рефлексия).
+                if (HarmonyLib.AccessTools.Field(typeof(MainMenu), "missionsButton") == null)
+                    throw new System.Exception("MainMenu.missionsButton не найден (кнопка Скримиша)");
+                // Загрузка сейва и запуск: MissionKey(name, группа) + TryLoad —
+                // нативный путь MissionsPicker; группа — СВОЙСТВО MissionGroup.User.
+                if (HarmonyLib.AccessTools.Property(typeof(NuclearOption.SavedMission.MissionGroup), "User") == null)
+                    throw new System.Exception("MissionGroup.User не найден (загрузка сейва Скримиша)");
+                var keyCtor = HarmonyLib.AccessTools.Constructor(
+                    typeof(NuclearOption.SavedMission.MissionKey),
+                    new[] { typeof(string), typeof(NuclearOption.SavedMission.MissionGroup) });
+                if (keyCtor == null)
+                    throw new System.Exception("MissionKey(name, group) не найден");
+                if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.SavedMission.MissionKey), "TryLoad") == null)
+                    throw new System.Exception("MissionKey.TryLoad не найден");
+                if (HarmonyLib.AccessTools.Method(typeof(MissionManager), "SetMission") == null)
+                    throw new System.Exception("MissionManager.SetMission не найден (нативный старт)");
+                var host = new NuclearOption.Networking.HostOptions(
+                    NuclearOption.Networking.SocketType.Offline, GameState.SinglePlayer,
+                    new NuclearOption.SceneLoading.MapKey());
+                if (host.GameState != GameState.SinglePlayer)
+                    throw new System.Exception("HostOptions(Offline, SinglePlayer, map) не собрался");
+                if (NuclearOption.SavedMission.MissionTag.Multiplayer == null)
+                    throw new System.Exception("MissionTag.Multiplayer пуст (MP-пикер нативного лобби)");
+                // Персистентный слушатель сцены на клоне кнопки гасится ПОДМЕНОЙ
+                // события целиком (поле m_OnClick новым ButtonClickedEvent) —
+                // рефлексивный Clear() PersistentCallGroup на этой сборке НЕ работает.
+                if (HarmonyLib.AccessTools.Field(typeof(UnityEngine.UI.Button), "m_OnClick") == null)
+                    throw new System.Exception("Button.m_OnClick не найден (кнопка Скримиша)");
             });
             Log.Info("SelfCheck(startup): " + (Failures.Count == 0 ? "все проверки пройдены" : "ПРОВАЛОВ: " + Failures.Count));
         }

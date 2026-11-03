@@ -145,6 +145,7 @@ namespace SupremeNuclear
 
                     RangeRings.Draw(); // кольца дальности — самый нижний слой
                     DrawFleetSalvoMarks();
+                    DrawNukeAim();
                     DrawDepositMarkers();
                     DrawSalvageMarkers();
                     DrawCaptureMarkers();
@@ -253,13 +254,17 @@ namespace SupremeNuclear
         private static void DrawBuildMarkers()
         {
             Camera cam = GameApi.MainCam;
-            if (cam == null)
+            if (cam == null || !GameApi.TryGetLocalHQ(out FactionHQ hq))
                 return;
             float k = Screen.height / 1440f;
             Color c = new Color(0.4f, 0.9f, 1f, 0.95f);
 
+            // Маркеры очередей только СВОИХ площадок: AI строит через тот же
+            // BuildTasks, чужие рамки/прогресс игроку не видны (v0.143.8).
             foreach (BuildTasks.Task t in BuildTasks.All)
             {
+                if (t.Faction != hq)
+                    continue;
                 Vector3 site = t.Site.ToLocalPosition();
                 site.y = GameApi.GroundY(site.x, site.z);
                 Vector3 sp = cam.WorldToScreenPoint(site + Vector3.up * 6f);
@@ -1753,7 +1758,8 @@ namespace SupremeNuclear
         private static void DrawEscortLinks(Camera cam, CommanderModeController controller,
             bool shiftHeld)
         {
-            GroundOrders.CollectEscorts(EscortUnits, EscortTargetsBuf);
+            GameApi.TryGetLocalHQ(out FactionHQ hq);
+            GroundOrders.CollectEscorts(EscortUnits, EscortTargetsBuf, hq);
             if (EscortUnits.Count == 0)
                 return;
             Color c = ModeColor(AirOrderMode.Escort);
@@ -1786,15 +1792,16 @@ namespace SupremeNuclear
         private void DrawAircraftRoutes(CommanderModeController controller)
         {
             Camera cam = GameApi.MainCam;
-            if (cam == null)
+            if (cam == null || !GameApi.TryGetLocalHQ(out FactionHQ hq))
                 return;
             bool shiftHeld = RtsInput.Shift;
 
-            // Наземка/флот: ноги якорь→wp[qi] и wp[i]→wp[i+1].
+            // Наземка/флот: ноги якорь→wp[qi] и wp[i]→wp[i+1]. Свои только:
+            // AI-цепочки/планы делят те же реестры, чужие ленты не рисуем.
             List<Unit> gUnits = RouteUnits;
             List<IReadOnlyList<GlobalPosition>> gQueues = RouteQueues;
             List<int> gIdx = RouteIdx;
-            GroundOrders.CollectAll(gUnits, gQueues, gIdx);
+            GroundOrders.CollectAll(gUnits, gQueues, gIdx, hq);
             Color routeC = ModeColor(AirOrderMode.Transit);
 
             // Групповые вейпоинты (SupCom): групповая точка — свойство ТОЧКИ (groupId
@@ -1883,7 +1890,7 @@ namespace SupremeNuclear
             // личные ветки схождения/расхождения.
             EngSeqUnits.Clear();
             EngSeqs.Clear();
-            foreach (Unit unit in BuildTasks.UnitsWithSequences())
+            foreach (Unit unit in BuildTasks.UnitsWithSequences(hq))
             {
                 var seq = BuildTasks.SequenceOf(unit);
                 if (seq != null && seq.Count > 0)
@@ -2020,7 +2027,7 @@ namespace SupremeNuclear
             }
             if (shiftHeld)
             {
-                ProductionTasks.CollectRallies(RallyAll);
+                ProductionTasks.CollectRallies(RallyAll, hq);
                 for (int ri = 0; ri < RallyAll.Count; ri++)
                 {
                     Vector3? anchor = RallyAnchor(RallyAll[ri]);
@@ -2033,7 +2040,7 @@ namespace SupremeNuclear
             // на приказ в центроиде группы бортов (формационная решётка слипается).
             List<Unit> airUnits = RouteAirUnits;
             List<IReadOnlyList<AircraftOrders.OrderSegment>> airPlans = RouteAirPlans;
-            AircraftOrders.CollectAll(airUnits, airPlans);
+            AircraftOrders.CollectAll(airUnits, airPlans, hq);
             AirGidCentroids.Clear();
             AirGidAnchors.Clear();
             for (int ai = 0; ai < airUnits.Count; ai++)
@@ -2400,6 +2407,55 @@ namespace SupremeNuclear
 
         /// <summary>Номера накопленных целей «Распределения» (заполняются один раз).</summary>
         private static readonly string[] FanNumbers = new string[32];
+
+        /// <summary>ЯО (v0.139): заряженный режим «Ядерный удар» — у курсора КОЛЬЦО
+        /// зоны поражения (нативная формула шоквейва от yield ракеты) + очередь
+        /// точек пуска носителей пульсирующими крестами (ушедшие снимает сервис).</summary>
+        private static void DrawNukeAim()
+        {
+            Camera cam = GameApi.MainCam;
+            if (cam == null)
+                return;
+            Color c = new Color(1f, 0.75f, 0.2f, 0.9f);
+            // Точки пуска в очереди: живут до пуска/гибели носителя.
+            for (int i = 0; i < WarheadService.Strikes.Count; i++)
+            {
+                WarheadService.StrikePoint s = WarheadService.Strikes[i];
+                Vector3 sp = cam.WorldToScreenPoint(s.Pos.ToLocalPosition());
+                if (sp.z <= 0f)
+                    continue;
+                Vector2 scr = new Vector2(sp.x, Screen.height - sp.y);
+                if (UnderMinimapWindow(scr))
+                    continue;
+                DrawCross(scr, 22f, c);
+                ClosedLabel(scr.x - 10f, scr.y + 12f, Loc.Tr("ЯО"));
+            }
+            if (OrderModes.Pending != OrderMode.Nuke)
+                return;
+            // Прицел: кольцо поражения в точке земли под курсором.
+            Ray ray = GameApi.ScreenRay(Input.mousePosition);
+            if (!GameApi.TryGetGroundPoint(ray, out Vector3 ground))
+                return;
+            float radiusM = WarheadService.BlastRadiusM();
+            Vector3 center = new Vector3(ground.x, GameApi.GroundYNoUnits(ground.x, ground.z), ground.z);
+            Vector3 centerSp = cam.WorldToScreenPoint(center);
+            if (centerSp.z <= 0f)
+                return;
+            Vector3 edge = cam.WorldToScreenPoint(center + cam.transform.right * radiusM);
+            float rPx = Mathf.Abs(edge.x - centerSp.x);
+            if (rPx < 4f)
+                return;
+            Vector2 ctr = new Vector2(centerSp.x, Screen.height - centerSp.y);
+            int dots = Mathf.Clamp((int)(2f * Mathf.PI * rPx / 9f), 12, 64);
+            for (int i = 0; i < dots; i++)
+            {
+                float a = i / (float)dots * 2f * Mathf.PI;
+                Vector2 p = ctr + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * rPx;
+                DrawRect(new Rect(p.x - 1.3f, p.y - 1.3f, 2.6f, 2.6f), c);
+            }
+            ClosedLabel(ctr.x - 16f, ctr.y - rPx - 16f,
+                Loc.F("ЯО · R {0} м", radiusM.ToString("F0")));
+        }
 
         /// <summary>Накопленные цели «Распределения» (режим R): пульсирующий фиолетовый
         /// крест + порядковый номер (порядок кликов — приоритет ёмкости при раздаче).

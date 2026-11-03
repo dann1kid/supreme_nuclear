@@ -113,6 +113,11 @@ namespace SupremeNuclear
         private static readonly Dictionary<System.Type, System.Reflection.FieldInfo> KnownVelFields =
             new Dictionary<System.Type, System.Reflection.FieldInfo>();
 
+        /// <summary>Внедрение точки удара в ГСН ракеты (shared: ЯО-пуски
+        /// WarheadService ведут ракету в точку тем же приёмом).</summary>
+        internal static void AimMissileAt(Missile m, GlobalPosition aim) =>
+            AimMissileAtPoint(m, aim);
+
         private static void AimMissileAtPoint(Missile m, GlobalPosition aim)
         {
             m.SetAimpoint(aim, Vector3.zero);
@@ -307,10 +312,16 @@ namespace SupremeNuclear
             WeaponStation st = PickStation(ship, target);
             if (st == null)
                 return false;
-            // Слой 2 (§2.14): ракетный пуск стоит массу+энергию — нет ресурсов,
-            // ракета не уходит (кулдаун не ставится, попытка повторится).
-            if (!SupplyService.TryPaySalvo(ship))
+            // Слой 2 (§2.14): ракетный пуск стоит массу+энергию; ЯО-станция
+            // платит ЗАРЯДОМ с носителя (§2.14-3) — нет оплаты, ракета не уходит.
+            bool nuclear = st.WeaponInfo != null && st.WeaponInfo.nuclear;
+            if (nuclear ? !WarheadService.TryConsumeLaunch(ship)
+                        : !SupplyService.TryPaySalvo(ship))
+            {
+                if (nuclear)
+                    CommanderHud.Notice(Loc.Tr("Нет заряда БЧ — пуск невозможен"));
                 return false;
+            }
             if (target == null)
             {
                 // снимок живых ракет владельца ДО пуска — новорождённую опознаем

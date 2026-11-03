@@ -162,7 +162,10 @@ namespace SupremeNuclear
             var units = new List<Unit>();
             var queues = new List<IReadOnlyList<GlobalPosition>>();
             var indices = new List<int>();
-            GroundOrders.CollectAll(units, queues, indices);
+            // Только СВОИ цепочки: AI-командир делит реестр приказов, чужие
+            // мировые ленты игроку не видны (v0.143.8).
+            GameApi.TryGetLocalHQ(out FactionHQ hq);
+            GroundOrders.CollectAll(units, queues, indices, hq);
             for (int i = 0; i < units.Count; i++)
             {
                 Unit unit = units[i];
@@ -282,7 +285,8 @@ namespace SupremeNuclear
 
             // Инженерные очереди (записи движений/площадок): движение — циан,
             // площадка — жёлтый (инженерное семейство FA); от юнита по записям.
-            foreach (Unit unit in BuildTasks.UnitsWithSequences())
+            // Только свои: очереди AI-инженеров в том же реестре (v0.143.9).
+            foreach (Unit unit in BuildTasks.UnitsWithSequences(hq))
             {
                 var seq = BuildTasks.SequenceOf(unit);
                 if (seq == null || seq.Count == 0)
@@ -314,7 +318,7 @@ namespace SupremeNuclear
             }
 
             // Связи сопровождения наземки/флота (v0.97): лента «эскорт → цель».
-            GroundOrders.CollectEscorts(MeshEscortUnits, MeshEscortTargets);
+            GroundOrders.CollectEscorts(MeshEscortUnits, MeshEscortTargets, hq);
             for (int i = 0; i < MeshEscortUnits.Count; i++)
             {
                 Unit t = MeshEscortTargets[i];
@@ -334,7 +338,9 @@ namespace SupremeNuclear
         {
             var units = new List<Unit>();
             var plans = new List<IReadOnlyList<AircraftOrders.OrderSegment>>();
-            AircraftOrders.CollectAll(units, plans);
+            // Только СВОИ планы: AI-крылья (CAP/удары) летают по тому же реестру.
+            GameApi.TryGetLocalHQ(out FactionHQ hq);
+            AircraftOrders.CollectAll(units, plans, hq);
             for (int i = 0; i < units.Count; i++)
             {
                 Unit unit = units[i];

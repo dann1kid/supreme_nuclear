@@ -107,6 +107,7 @@ namespace SupremeNuclear
         public static float BuildSiteSpacingM = 60f;     // мин. дистанция между площадками (анти-стены)
         public static float HangarAttachRadiusM = 600f;  // дальность пристраивания ангара к своему аэродрому, м
         public static float RunwayCost = 1500f;          // цена постройки ВПП (новый аэродром)
+        public static float RunwayLengthM = 2400f;        // ФИКС-длина ВПП (v0.139): протяжка задаёт только направление
         public static float RunwayWidthM = 45f;          // ширина построенной ВПП, м
         public static float RunwayMinM = 900f;           // мин. длина ВПП, м
         public static float RunwayMaxM = 4000f;          // макс. длина ВПП, м
@@ -156,6 +157,19 @@ namespace SupremeNuclear
         private static ConfigEntry<bool> _rangeVision;
         private static ConfigEntry<bool> _rangeBuild;
         private static ConfigEntry<bool> _rangeWeapons;
+        private static ConfigEntry<string> _mapGenTemplate;
+        private static ConfigEntry<int> _mapGenSeed;
+
+        /// <summary>Выбор панели Скримиша (шаблон-пресет + сид): пишем и статические
+        /// поля, и записи конфига — общий источник с входом Ctrl+G (один сид = одна
+        /// раскладка). Сохранение конфига — SaveConfig при выходе/BepInEx.</summary>
+        public static void SetMapGen(string template, int seed)
+        {
+            MapGenTemplate = template;
+            MapGenSeed = seed;
+            _mapGenTemplate.Value = template;
+            _mapGenSeed.Value = seed;
+        }
 
         /// <summary>Тоггл колец дальности из UI (0 атака-АС / 1 атака-АА / 2 разведка /
         /// 3 стройка): пишем и статическое поле, и запись конфига (персистентность).</summary>
@@ -250,10 +264,12 @@ namespace SupremeNuclear
 
             MapGenKey = config.Bind("MapGen", "Key", KeyCode.G,
                 Loc.Tr("Клавиша генерации сценария в редакторе миссий (Ctrl + клавиша)")).Value;
-            MapGenTemplate = config.Bind("MapGen", "Template", "duel",
-                Loc.Tr("Шаблон сценария (JSON в BepInEx/plugins/SupremeNuclear/MapGen/)")).Value;
-            MapGenSeed = config.Bind("MapGen", "Seed", 0,
-                Loc.Tr("Сид генерации (0 — случайный каждый запуск; один сид = одна и та же раскладка)")).Value;
+            _mapGenTemplate = config.Bind("MapGen", "Template", "Duel-Land",
+                Loc.Tr("Шаблон сценария (JSON в BepInEx/plugins/SupremeNuclear/MapGen/)"));
+            MapGenTemplate = _mapGenTemplate.Value;
+            _mapGenSeed = config.Bind("MapGen", "Seed", 0,
+                Loc.Tr("Сид генерации (0 — случайный каждый запуск; один сид = одна и та же раскладка)"));
+            MapGenSeed = _mapGenSeed.Value;
 
             BoxDragThresholdPx = config.Bind("Selection", "BoxDragThresholdPx", 8f).Value;
             DoubleClickSec = config.Bind("Selection", "DoubleClickSec", 0.35f).Value;
@@ -329,6 +345,8 @@ namespace SupremeNuclear
                 Loc.Tr("Ангар пристраивается к своему аэродрому не дальше этого радиуса, м")).Value;
             RunwayCost = config.Bind("Build", "RunwayCost", 1500f,
                 Loc.Tr("Цена постройки ВПП (создаёт новый аэродром-мультифабрику)")).Value;
+            RunwayLengthM = config.Bind("Build", "RunwayLengthM", 2400f,
+                Loc.Tr("Длина ВПП (фиксированная): протяжка при установке задаёт только направление")).Value;
             RunwayWidthM = config.Bind("Build", "RunwayWidthM", 45f,
                 Loc.Tr("Ширина построенной ВПП, м")).Value;
             RunwayMinM = config.Bind("Build", "RunwayMinM", 900f,

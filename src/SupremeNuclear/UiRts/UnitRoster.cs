@@ -148,7 +148,8 @@ namespace SupremeNuclear
                 DumpInto(fresh.units, e.vehicles.Cast<UnitDefinition>().ToList(), null);
                 DumpInto(fresh.units, e.aircraft.Cast<UnitDefinition>().ToList(), null);
                 DumpInto(fresh.units, e.ships.Cast<UnitDefinition>().ToList(), null);
-                DumpInto(fresh.buildings, e.buildings.Cast<UnitDefinition>().ToList(), ForceTier1);
+                DumpInto(fresh.buildings, e.buildings.Cast<UnitDefinition>().ToList(),
+                    d => ForceTier1(d) ? 1 : ForceTier3(d) ? 3 : 0);
                 Directory.CreateDirectory(dir);
                 File.WriteAllText(path, JsonConvert.SerializeObject(fresh,
                     Formatting.Indented,
@@ -165,7 +166,8 @@ namespace SupremeNuclear
                 DumpInto(fresh.units, e.vehicles.Cast<UnitDefinition>().ToList(), null);
                 DumpInto(fresh.units, e.aircraft.Cast<UnitDefinition>().ToList(), null);
                 DumpInto(fresh.units, e.ships.Cast<UnitDefinition>().ToList(), null);
-                DumpInto(fresh.buildings, e.buildings.Cast<UnitDefinition>().ToList(), ForceTier1);
+                DumpInto(fresh.buildings, e.buildings.Cast<UnitDefinition>().ToList(),
+                    d => ForceTier1(d) ? 1 : ForceTier3(d) ? 3 : 0);
                 buildings = fresh.buildings;
                 return fresh.units;
             }
@@ -188,11 +190,15 @@ namespace SupremeNuclear
             def is BuildingDefinition b &&
             (BuildTasks.IsHangarDefinition(b) || BuildTasks.IsProducingDefinition(b));
 
+        /// <summary>Хранилище БЧ — тир 3 (§2.14-3): ЯО открывается T3-инженером.</summary>
+        private static bool ForceTier3(UnitDefinition def) =>
+            def is BuildingDefinition b && BuildTasks.IsStorageDefinition(b);
+
         /// <summary>Дамп каталога: авто-тир = терциль по value (чистая логика
-        /// тестируется — Catalog тем же правилом); forceT1 принудительно сеет
-        /// тиром 1 (фабричные здания).</summary>
+        /// тестируется — Catalog тем же правилом); forceTier > 0 сеет принудительно
+        /// (фабричные = 1, хранилище БЧ = 3).</summary>
         private static void DumpInto(List<UnitRosterEntry> into, List<UnitDefinition> defs,
-            Func<UnitDefinition, bool> forceT1)
+            Func<UnitDefinition, int> forceTier)
         {
             var sorted = new List<UnitDefinition>(defs);
             sorted.RemoveAll(d => d == null);
@@ -202,14 +208,16 @@ namespace SupremeNuclear
                 return;
             TercileCuts(n, out int i1, out int i2);
             for (int i = 0; i < n; i++)
+            {
+                int forced = forceTier != null ? forceTier(sorted[i]) : 0;
                 into.Add(new UnitRosterEntry
                 {
                     jsonKey = sorted[i].jsonKey,
-                    tier = forceT1 != null && forceT1(sorted[i])
-                        ? 1
+                    tier = forced > 0 ? forced
                         : i < i1 ? 1 : i < i2 ? 2 : 3,
                     price = sorted[i].value,
                 });
+            }
         }
 
         /// <summary>Границы терцилей с защитой от крошечных каталогов:
@@ -246,7 +254,8 @@ namespace SupremeNuclear
                     return;
                 if (tercile)
                 {
-                    DumpInto(into, freshDefs, ForceTier1);
+                    DumpInto(into, freshDefs,
+                        d => ForceTier1(d) ? 1 : ForceTier3(d) ? 3 : 0);
                     foreach (UnitDefinition def in freshDefs)
                         known.Add(def.jsonKey);
                     added += freshDefs.Count;

@@ -35,17 +35,22 @@
     <Reference Include="UnityEngine.TextRenderingModule"><HintPath>$(ManagedDir)\UnityEngine.TextRenderingModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.UIModule"><HintPath>$(ManagedDir)\UnityEngine.UIModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.UI"><HintPath>$(ManagedDir)\UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Unity.TextMeshPro"><HintPath>$(ManagedDir)\Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
   <ItemGroup>
     <!-- Локали мода: репозиторий locales/ -> игра BepInEx/plugins/SupremeNuclear/Locales/ -->
     <LocaleJsons Include="..\..\locales\*.json" />
+    <!-- Пресеты генератора карт (стили land/coast/seas/islands):
+         репозиторий mapgen/ -> игра BepInEx/plugins/SupremeNuclear/MapGen/ -->
+    <MapGenTemplates Include="..\..\mapgen\*.json" />
   </ItemGroup>
 
   <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(Deploy)' != 'false'">
     <Message Importance="high" Text="Deploy: $(TargetPath) -> $(GameDir)\BepInEx\plugins\SupremeNuclear\" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\" />
     <Copy SourceFiles="@(LocaleJsons)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\Locales\" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(MapGenTemplates)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\MapGen\" SkipUnchangedFiles="true" />
   </Target>
 
 </Project>

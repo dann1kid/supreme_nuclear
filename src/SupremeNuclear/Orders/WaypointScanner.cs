@@ -123,10 +123,10 @@ namespace SupremeNuclear
                 : own;
         }
 
-        private static void AccumulateGroupCentroids()
+        private static void AccumulateGroupCentroids(FactionHQ hq)
         {
             GroupCentroids.Clear();
-            GroundOrders.CollectAll(CUnits, CQueues, CIdx);
+            GroundOrders.CollectAll(CUnits, CQueues, CIdx, hq);
             for (int i = 0; i < CUnits.Count; i++)
             {
                 int from = CIdx[i];
@@ -143,7 +143,7 @@ namespace SupremeNuclear
                     Accumulate(gid, l.x, l.z);
                 }
             }
-            AircraftOrders.CollectAll(CUnits, CPlans);
+            AircraftOrders.CollectAll(CUnits, CPlans, hq);
             for (int i = 0; i < CUnits.Count; i++)
                 for (int s = 0; s < CPlans[i].Count; s++)
                 {
@@ -164,18 +164,19 @@ namespace SupremeNuclear
         public static WaypointHit Scan(CommanderModeController controller, Camera cam,
             Vector2 mouse, float px, bool allUnits)
         {
-            AccumulateGroupCentroids();
+            GameApi.TryGetLocalHQ(out FactionHQ localHq);
+            AccumulateGroupCentroids(localHq);
             // 1. Площадки стройки: СВОЕЙ фракции — всегда (клик по недострою
             // выделяет его карточку независимо от того, кто строит; плейтест
             // v0.96: верфь строила катер — без него в выделении недострой не
-            // пиковался и его нельзя было снести), плюс при allUnits — любые.
+            // пиковался и его нельзя было снести). Чужие площадки (AI строит
+            // тем же BuildTasks) не пикаются и в allUnits-режиме.
             // Площадка — и маркер, и ТЕЛО 3D-призрака (тянуть/сносить удобно
             // за всю модель); фильтр один на оба способа попадания.
-            GameApi.TryGetLocalHQ(out FactionHQ localHq);
             int ti = 0;
             foreach (BuildTasks.Task t in BuildTasks.All)
             {
-                bool mine = allUnits || t.Faction == localHq;
+                bool mine = t.Faction == localHq;
                 if (!mine)
                     foreach (Unit u in controller.Selection.Selected)
                         if (t.Builders.Contains(u))
@@ -193,7 +194,7 @@ namespace SupremeNuclear
             OwnersFromSelection(controller);
             if (allUnits)
             {
-                BuildTasks.UnitsWithSequences(EngBuf);
+                BuildTasks.UnitsWithSequences(EngBuf, localHq);
                 foreach (Unit eng in EngBuf)
                     if (OwnerSeen.Add(eng))
                         Owners.Add(eng);
@@ -220,7 +221,7 @@ namespace SupremeNuclear
             // (ралли недостроенной фабрики) не отдаются: их маркер не рисуется —
             // вейпоинт управляется там, где рисуется.
             RallyKeys.Clear();
-            ProductionTasks.CollectRallies(RallyKeys);
+            ProductionTasks.CollectRallies(RallyKeys, localHq);
             for (int ri = 0; ri < RallyKeys.Count; ri++)
             {
                 object f = RallyKeys[ri];
@@ -256,7 +257,7 @@ namespace SupremeNuclear
             OwnersFromSelection(controller);
             if (allUnits)
             {
-                GroundOrders.CollectAll(GUnits, GQueues, GIdx);
+                GroundOrders.CollectAll(GUnits, GQueues, GIdx, localHq);
                 for (int i = 0; i < GUnits.Count; i++)
                     if (GIdx[i] < GQueues[i].Count && OwnerSeen.Add(GUnits[i]))
                         Owners.Add(GUnits[i]);
@@ -356,7 +357,7 @@ namespace SupremeNuclear
                         return new WaypointHit(WaypointKind.EscortLink, seg.Target, null, 0, 0);
                 }
             }
-            GroundOrders.CollectEscorts(CUnits, CTargets);
+            GroundOrders.CollectEscorts(CUnits, CTargets, localHq);
             SeenEscortTargets.Clear();
             for (int i = 0; i < CTargets.Count; i++)
             {

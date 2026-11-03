@@ -21,7 +21,7 @@ namespace SupremeNuclear
     /// </summary>
     internal static class RuntimeMap
     {
-        public const string KeyPrefix = "SN-Terrain-";
+        public const string KeyPrefix = MapGenKey.Prefix;
 
         private static readonly Dictionary<string, MapSettings> Built = new Dictionary<string, MapSettings>();
         private static readonly Dictionary<string, MapDetails> Details = new Dictionary<string, MapDetails>();
@@ -38,12 +38,18 @@ namespace SupremeNuclear
         public static bool IsOurKey(string mapName) =>
             !string.IsNullOrEmpty(mapName) && mapName.StartsWith(KeyPrefix);
 
-        /// <summary>Ключ карты по шаблону и сиду (стабильный формат: hex-сид).
-        /// Сид — ПОЛНЫЕ 32 бита (X8): усечение до 16 бит строило при загрузке мир
-        /// от другого сида — раскладка миссии (базы/точки) висела «в небе» и тонула
-        /// (плейтест 2026-11-01). Старые 4-символьные ключи парсятся как раньше.</summary>
-        public static string MakeKey(string templateName, int seed) =>
-            $"{KeyPrefix}{templateName}-{seed & 0xFFFFFFFF:X8}";
+        /// <summary>Ключ карты по шаблону и сиду (формат и разбор — MapGenKey,
+        /// чистая логика с тестами). Сид — ПОЛНЫЕ 32 бита (X8): усечение до 16 бит
+        /// строило при загрузке мир от другого сида — раскладка миссии (базы/точки)
+        /// висела «в небе» и тонула (плейтест 2026-11-01). Хеш морфологии (v3):
+        /// правка JSON-шаблона меняет мир — один и тот же ключ не должен накрывать
+        /// два разных мира (коллизия в реестре Built, тот же урок). Игроки (v0.143,
+        /// Скримиш): players масштабирует базы, но НЕ входит в MorphHash — суффикс
+        /// «-pN» в ключе разводит миры 1×1/2×2 и даёт загрузчику точное значение.
+        /// Старые ключи (4-симв. сид, без хеша) парсятся как раньше.</summary>
+        public static string MakeKey(string templateName, int seed,
+            ScenarioTemplate.TerrainSettings terrain = null, int? players = null, int? sizeK = null) =>
+            MapGenKey.Build(templateName, seed, terrain?.MorphHash(), sizeK, players);
 
         /// <summary>Построить карту по ключу (если ещё не построена) и зарегистрировать
         /// в MapLoader. Идемпотентно; вызывается генератором и префиксом EnableMap.</summary>
@@ -58,20 +64,24 @@ namespace SupremeNuclear
                 return true;
             }
 
-            // Ключ: SN-Terrain-<шаблон>-<seed hex>
-            string[] parts = mapName.Split('-');
-            if (parts.Length < 4 ||
-                !int.TryParse(parts[3], System.Globalization.NumberStyles.HexNumber, null, out int seed))
+            // Ключ разбирает MapGenKey: имя шаблона может содержать дефисы
+            // (Duel-Land) — фиксированные индексы Split не годились.
+            if (!MapGenKey.TryParse(mapName, out MapGenKey.Parsed parsed))
             {
                 Log.Error("MapGen: не разобрать ключ спец-карты — " + mapName);
                 return false;
             }
-            ScenarioTemplate template = ScenarioTemplate.Load(parts[2]);
+            ScenarioTemplate template = ScenarioTemplate.Load(parsed.Template);
             if (template?.terrain == null)
             {
-                Log.Error("MapGen: шаблон '" + parts[2] + "' без секции terrain — спец-карта невозможна");
+                Log.Error("MapGen: шаблон '" + parsed.Template + "' без секции terrain — спец-карта невозможна");
                 return false;
             }
+            // Игроки из ключа (Скримиш): файл шаблона мог уйти вперёд/назад,
+            // мир обязан совпасть с раскладкой миссии — источник истины ключ.
+            if (parsed.Players != null && parsed.Players.Value != template.players)
+                template.players = parsed.Players.Value;
+            int seed = parsed.Seed;
 
             // ЕДИНЫЙ детерминированный пайплайн (как и при генерации в ScenarioBuild):
             // выбор точек по маскам → ШТАМПЫ ровных площадок → пересчёт масок —
@@ -82,6 +92,7 @@ namespace SupremeNuclear
             LastWorld = world;
             LastPass = PassGraph.Build(hm.Height, hm.W, hm.H, hm.Step, hm.SeaLevel, hm.Step * 0.75f);
             Texture2D colorTex = MapTextures.TerrainColor(hm, template.terrain);
+            Texture2D albedo = MapTextures.Albedo(hm, template.terrain);
             Sprite mapImage = MapTextures.MapSprite(hm, template.terrain);
 
             var root = new GameObject(mapName); // 3d-go
@@ -107,7 +118,8 @@ namespace SupremeNuclear
             settings.RoadNetwork = ScriptableObject.CreateInstance<RoadNetworkSO>(); // пустая сеть — юниты напрямую
             settings.SeaLanes = ScriptableObject.CreateInstance<RoadNetworkSO>();
             settings.OceanBasecolor = MapTextures.OceanBase(template.terrain);
-            settings.OceanDepthmap = MapTextures.OceanDepth(hm, template.terrain.mountainHeight);
+            settings.OceanDepthmap = MapTextures.OceanDepth(hm,
+                Mathf.Max(300f, -template.terrain.oceanFloorM)); // шкала глубины по факту дна стиля
             settings.TerrainColorMap = colorTex;
             settings.MapImage = mapImage;
             settings.CameraPositionRotation = new PositionRotation
@@ -117,17 +129,25 @@ namespace SupremeNuclear
                 Position = new GlobalPosition(0f, 2500f, -template.terrain.sizeM * 0.3f),
                 Rotation = Quaternion.Euler(55f, 0f, 0f),
             };
-            // TerrainHeightMap (трава/эффекты) в стоковых картах — компонент префаба;
-            // без него NRE в TerrainHeightMapBlocker.Start на каждом юните миссии
-            // (плейтест 2026-10-29). Наш рельеф без игровых PhysicMaterial — список пуст.
+            // TerrainHeightMap-заглушка (NRE-фикс TerrainHeightMapBlocker в
+            // редакторе) + ДЕТАЙЛ-СТЕК СТОКА: DetailRenderer/GrassRenderer/THM
+            // приезжают с ПРЕФАБОМ карты (диагностика 2026-11-03: в сценах их 0
+            // при живой ванильной траве) — клонируем живой стек, трава получает
+            // конвейер; деревья стока срезаны (чужие позиции).
             TerrainHeightMap heightMap = root.AddComponent<TerrainHeightMap>();
             heightMap.terrainPhysicMaterials = new PhysicMaterial[0];
+            TerrainGrass.AttachStockStack(root);
 
-            TerrainMesh.Build(root.transform, hm, TerrainMesh.MakeMaterial(colorTex));
+            // Гибрид v4.20: albedo (зоны+пятна) + нормал-деталь field_n 1 м.
+            TerrainMaterial.RememberAlbedo(albedo);
+            TerrainMaterial.Plan plan = TerrainMaterial.ResolvePlan(albedo, albedo,
+                template.terrain.sizeM, 1f);
+            TerrainMesh.Build(root.transform, hm, plan.Mat, plan.UvTileM,
+                h => MapTextures.VertexColor(hm, template.terrain, h));
 
             var details = ScriptableObject.CreateInstance<MapDetails>();
             details.PrefabName = mapName;
-            details.MapName = "SN " + parts[2] + " " + parts[3];
+            details.MapName = "SN " + parsed.Template + " " + parsed.Seed.ToString("X8");
             details.MapImage = mapImage;
 
             Built[mapName] = settings;

@@ -404,6 +404,14 @@ namespace SupremeNuclear
                     }
                     break;
 
+                case OrderMode.Nuke:
+                    if (hasTarget)
+                    {
+                        IssueNukeStrike(selected, target, queue);
+                        Markers.Add(new Marker(target, Time.unscaledTime));
+                    }
+                    break;
+
                 case OrderMode.DisperseAttack:
                     // сюда доходит только клик по земле (цели съедены веткой заряда
                     // в Tick выше): копили ЛКМ по врагам — раздаём, не копили —
@@ -438,6 +446,12 @@ namespace SupremeNuclear
                 // Залп по площади в точку миникарты: авиация пускает по разведанным
                 // у якоря, наземка — attack-move (stop-and-fire).
                 IssueSalvoArea(selected, target, RtsInput.Shift);
+                Markers.Add(new Marker(target, Time.unscaledTime));
+                return;
+            }
+            if (mode == OrderMode.Nuke)
+            {
+                IssueNukeStrike(selected, target, RtsInput.Shift);
                 Markers.Add(new Marker(target, Time.unscaledTime));
                 return;
             }
@@ -945,6 +959,68 @@ namespace SupremeNuclear
             FleetSalvo.Scope = scope;
             OrderModes.Pending = OrderMode.Salvo;
         }
+
+        /// <summary>Заряд «Ядерного удара» (N / кнопка ЯО): носители получают точки
+        /// пуска по кликам (Shift — серия), я-авиация — одноразовое разрешение
+        /// и атаку-движение в точку. Alt+N — тумблер авто-ЯО на выделение.</summary>
+        public void ChargeNuke()
+        {
+            OrderModes.Pending = OrderMode.Nuke;
+            CommanderHud.Notice(Loc.Tr("ЯО: клик — точка удара (Shift — серия)"));
+        }
+
+        /// <summary>Alt+N: автозарядка носителей / автоприменение ЯО авиации.</summary>
+        public void ToggleNukeAuto(List<Unit> selected)
+        {
+            int ships = 0, air = 0;
+            foreach (Unit unit in selected)
+            {
+                if (WarheadService.IsCarrier(unit))
+                {
+                    WarheadService.Charge c = WarheadService.ChargeOf(unit);
+                    if (c == null)
+                        continue; // заряд появится тиком
+                    c.AutoCharge = !c.AutoCharge;
+                    ships++;
+                }
+                else if (unit is Aircraft && WarheadService.HasNuclearWeapon(unit))
+                {
+                    WeaponGateService.SetNuclearAuto(unit, !WeaponGateService.NuclearAuto(unit));
+                    air++;
+                }
+            }
+            if (ships + air > 0)
+                CommanderHud.Notice(Loc.F("ЯО: авто переключено (носителей {0}, бортов {1})", ships, air));
+        }
+
+        /// <summary>Выдача «ЯО» в точку: корабли — очередь точек пуска, я-авиация —
+        /// разрешение + атака-движение (применит по врагам у точки нативным AI).</summary>
+        private void IssueNukeStrike(List<Unit> selected, Vector3 point, bool queue)
+        {
+            GlobalPosition gp = point.ToGlobalPosition();
+            _nukeAir.Clear();
+            int ships = 0;
+            foreach (Unit unit in selected)
+            {
+                if (WarheadService.IsCarrier(unit))
+                {
+                    WarheadService.AddStrike(unit, gp);
+                    ships++;
+                }
+                else if (unit is Aircraft && WarheadService.HasNuclearWeapon(unit))
+                    _nukeAir.Add(unit);
+            }
+            if (_nukeAir.Count > 0)
+            {
+                WarheadService.OrderAircraftStrike(_nukeAir, point);
+                IssueForTarget(_nukeAir, OrderMode.AttackMove, point, queue);
+            }
+            if (ships + _nukeAir.Count > 0)
+                CommanderHud.Notice(Loc.F("ЯО: точка удара принята (носителей {0}, бортов {1})",
+                    ships, _nukeAir.Count));
+        }
+
+        private readonly List<Unit> _nukeAir = new List<Unit>();
 
         /// <summary>Заряд «Распределения» (R / кнопка): список целей копится с нуля.</summary>
         public void ChargeFanAttack()

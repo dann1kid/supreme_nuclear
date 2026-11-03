@@ -255,11 +255,15 @@ namespace SupremeNuclear
             Camera cam = GameApi.MainCam;
             bool drewRunwayGhost = false; // превью из цикла задач — НЕ стирать в конце
             DrawSiteDiscs();
+            GameApi.TryGetLocalHQ(out FactionHQ hq);
 
-            // Призраки всех площадок (поворот площадки + стрелка выхода; депо
-            // дополнительно наклонено под рельеф — как встанет при достройке).
+            // Призраки площадок СВОЕЙ фракции (поворот площадки + стрелка выхода;
+            // депо дополнительно наклонено под рельеф — как встанет при достройке).
+            // AI-командир строит через тот же BuildTasks — чужие силуэты не рисуем.
             foreach (BuildTasks.Task t in BuildTasks.All)
             {
+                if (t.Faction != hq)
+                    continue;
                 if (t.Definition == null)
                 {
                     // Задача-ВПП: силуэта-префаба нет — превью полосой с порогами.
@@ -319,7 +323,6 @@ namespace SupremeNuclear
                     ok = snap != null; // мекс/гидро — только на своей точке (маркер в зоне — норм)
                 if (ok && BuildTasks.IsHangarDefinition(def))
                 {
-                    GameApi.TryGetLocalHQ(out FactionHQ hq);
                     ok = BuildTasks.NearestOwnAirbase(at, hq, Settings.HangarAttachRadiusM) != null;
                 }
                 Quaternion rot = Quaternion.Euler(0f, yaw, 0f);
@@ -343,7 +346,6 @@ namespace SupremeNuclear
                     if (BuildTasks.IsHangarDefinition(def) &&
                         TryGetExit(def, out Matrix4x4 exitLocal))
                     {
-                        GameApi.TryGetLocalHQ(out FactionHQ hq);
                         Matrix4x4 m = root * exitLocal;
                         Vector3 fwd = m.MultiplyVector(Vector3.forward);
                         if (BuildTasks.TryPreviewTaxiRoute(m.GetColumn(3), fwd, hq,

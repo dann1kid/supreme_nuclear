@@ -18,6 +18,12 @@ namespace SupremeNuclear
         private readonly float[] _groupRecallAt = new float[10];
         private bool _stockMapWasActive; // была ли видна родная карта игры до режима командира
 
+        /// <summary>Скримиш: имя сейва, на входе в который режим командира включается
+        /// сам (юзер стартует из лобби — F10 жать не должен). Флаг держит ИМЯ миссии
+        /// и самоинвалидируется: чужая миссия его не съест; в sceneLoaded-сброс не
+        /// входит (сцена миссии и есть цель флага), чистится при потреблении/новом старте.</summary>
+        internal static string PendingAutoActivateMission;
+
         private void Awake()
         {
             Instance = this;
@@ -52,10 +58,19 @@ namespace SupremeNuclear
         private void UpdateSafe()
         {
             // Редактор миссий: Ctrl+<MapGenKey> — сгенерировать дуэльный сценарий
-            // на открытой карте (MapGen, файл миссии в User-группе).
+            // текущим шаблоном (MapGen, файл миссии в User-группе); Ctrl+Shift+
+            // <MapGenKey> — цикл СТИЛЯ карты (land/coast/seas/islands, пишется в
+            // JSON шаблона) + СРАЗУ генерация — селектор шаблонов-файлов запутал
+            // юзера (плейтест 2026-11-02 «работает только один стиль»).
             if (GameManager.gameState == GameState.Editor &&
                 RtsInput.Ctrl && RtsInput.KeyDown(Settings.MapGenKey))
             {
+                if (RtsInput.Shift)
+                {
+                    CommanderHud.Notice(ScenarioBuild.CycleStyleAndGenerate(
+                        Settings.MapGenTemplate, Settings.MapGenSeed, out _));
+                    return;
+                }
                 bool ok = ScenarioBuild.Generate(Settings.MapGenTemplate, Settings.MapGenSeed, out string gen);
                 CommanderHud.Notice(gen);
                 if (!ok)
@@ -74,6 +89,7 @@ namespace SupremeNuclear
             UnitRoster.EnsureApplied(); // ростер юнитов/зданий (тиры/цены/имена) — ДО всех потребителей
             EngineerService.EnsureCreated(); // клоны инженеров T2/T3 — после ростера (host-агностично)
             EconomyService.Tick();
+            WarheadService.Tick(UnityEngine.Time.deltaTime); // ЯО: налив зарядов/складов + пуски (host)
             SalvageService.Tick(); // салваж обломков — та же экономика (масса инженерам)
             ShipPadService.Tick(); // вертолётные палубы кораблей без Airbase (host)
             CaptureService.Tick(); // инженерный захват построек (энергия, v3)
@@ -89,6 +105,17 @@ namespace SupremeNuclear
             RouteRibbonMesh.Render();
             BuildGhosts.Render();
             TaxiSurface.Render(); // полосы дорисованных рулёжек (Update до рендера — №16)
+
+            // Скримиш: старт из лобби поднимает режим командира сам (флаг с именем
+            // миссии ставит SkirmishService перед StartHost — см. поле выше).
+            if (!string.IsNullOrEmpty(PendingAutoActivateMission) &&
+                MissionManager.CurrentMission != null &&
+                MissionManager.CurrentMission.Name == PendingAutoActivateMission)
+            {
+                PendingAutoActivateMission = null;
+                if (!IsActive)
+                    Activate();
+            }
 
             if (RtsInput.KeyDown(Settings.ToggleCommanderKey))
             {
@@ -243,7 +270,15 @@ namespace SupremeNuclear
                 {
                     if (!RtsInput.PointerOverUi &&
                         GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 rwyEnd))
-                        BuildTasks.PlacingRunwayEnd = rwyEnd.ToGlobalPosition();
+                    {
+                        // Фикс-длина (юзер-канон v0.139): протяжка задаёт только
+                        // НАПРАВЛЕНИЕ — торец = старт + dir × RunwayLengthM.
+                        Vector3 start = BuildTasks.PlacingSite.ToLocalPosition();
+                        Vector3 dir = new Vector3(rwyEnd.x - start.x, 0f, rwyEnd.z - start.z);
+                        if (dir.sqrMagnitude > 1f)
+                            BuildTasks.PlacingRunwayEnd =
+                                (start + dir.normalized * Settings.RunwayLengthM).ToGlobalPosition();
+                    }
                     BuildTasks.MarkConsumed();
                 }
                 else if (BuildTasks.PlacingActive && RtsInput.LeftUp)
@@ -403,10 +438,13 @@ namespace SupremeNuclear
                 else if (RtsInput.KeyDown(KeyCode.U)) OrderModes.Pending = OrderMode.Patrol;
                 else if (RtsInput.KeyDown(KeyCode.T)) OrderModes.Pending = OrderMode.Attack;
                 else if (RtsInput.KeyDown(KeyCode.V)) MoveOrders.ChargeSalvo();
+                else if (RtsInput.KeyDown(KeyCode.N)) MoveOrders.ChargeNuke(); // ЯО-прицел
                 else if (RtsInput.KeyDown(KeyCode.R))
                     MoveOrders.ChargeFanAttack(); // «Распределение»: копим цели ПКМ-ами
                 else if (RtsInput.KeyDown(KeyCode.S))
                     MoveOrders.CancelAll(Selection.Selected); // мгновенная отмена
+                if (alt && RtsInput.KeyDown(KeyCode.N))
+                    MoveOrders.ToggleNukeAuto(Selection.Selected); // авто-ЯО/автозарядка выделения
                 if (RtsInput.KeyDown(KeyCode.G))
                     MoveOrders.IssueReturnToBase(Selection.Selected); // борта — домой (Shift — RTB в очередь)
                 if (RtsInput.KeyDown(KeyCode.X))

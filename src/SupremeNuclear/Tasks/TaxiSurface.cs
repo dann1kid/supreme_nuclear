@@ -144,6 +144,30 @@ namespace SupremeNuclear
                 skirtR[i] = new Vector3(c.x - perp.x,
                     GameApi.GroundYNoUnits(c.x - perp.x, c.z - perp.y) - 0.2f, c.z - perp.y);
             }
+            // Диагностика «полотно в воздухе» (плейтест 2026-11-03): профиль
+            // готовой дороги против МЕША рельефа спец-карты (LastHeightmap —
+            // источник видимого меша). Профиль ≫ меша = физика видит фантом-
+            // коллайдер над рельефом; профиль == мешу, а визуал парит —
+            // преобразование кусков (root/FloatingOrigin). Событийный лог.
+            {
+                float minY = float.MaxValue, maxY = float.MinValue;
+                for (int i = 0; i < line.Length; i++)
+                {
+                    if (line[i].y < minY) minY = line[i].y;
+                    if (line[i].y > maxY) maxY = line[i].y;
+                }
+                Vector3 a0 = points[0].ToLocalPosition();
+                Vector3 a1 = points[points.Count - 1].ToLocalPosition();
+                Heightmap hmD = RuntimeMap.LastHeightmap;
+                Log.Info("TaxiSurface: дорога " + points.Count + " тчк, " + width.ToString("F0") +
+                    " м — профиль y " + minY.ToString("F1") + ".." + maxY.ToString("F1") +
+                    " (ground " + GameApi.GroundYNoUnits(a0.x, a0.z).ToString("F1") + "/" +
+                    GameApi.GroundYNoUnits(a1.x, a1.z).ToString("F1") +
+                    (hmD != null
+                        ? ", меш " + hmD.SampleHeight(a0.x, a0.z).ToString("F1") + "/" +
+                          hmD.SampleHeight(a1.x, a1.z).ToString("F1")
+                        : "") + ")");
+            }
             BuildPiece(left, right, line, skirtL, skirtR);
         }
 
@@ -255,6 +279,16 @@ namespace SupremeNuclear
                 rows.Add(row);
             }
             float top = forcedTop ?? max + LiftM;
+            // Диагностика «плита в воздухе» (2026-11-03): вершина против меша
+            // рельефа (см. такой же зонд в Register). Событийный лог.
+            {
+                Heightmap hmD = RuntimeMap.LastHeightmap;
+                if (hmD != null)
+                    Log.Info("TaxiSurface: плита " + sizeX.ToString("F0") + "×" + sizeZ.ToString("F0") +
+                        " м @ (" + center.x.ToString("F0") + "," + center.z.ToString("F0") + ") — верх " +
+                        top.ToString("F1") + " (ground max " + max.ToString("F1") + ", меш " +
+                        hmD.SampleHeight(center.x, center.z).ToString("F1") + ")");
+            }
             foreach (Vector3[] row in rows)
                 for (int i = 0; i < row.Length; i++)
                     row[i] = new Vector3(row[i].x, top, row[i].z);
@@ -409,7 +443,12 @@ namespace SupremeNuclear
                 Transform t = Pieces[i].Transform;
                 if (t == null)
                 {
-                    Pieces.RemoveAt(i); // сцена умерла — не копим мусор
+                    // Сцена умерла — не копим мусор. Диагностика 2026-11-03:
+                    // «плиты пропали» могло давать тихое исчезновение кусков
+                    // (root убит посреди миссии) — теперь видно в логе.
+                    Log.Info("TaxiSurface: кусок умер (трансформ null) — осталось " +
+                             (Pieces.Count - 1));
+                    Pieces.RemoveAt(i);
                     continue;
                 }
                 Piece p = Pieces[i];
