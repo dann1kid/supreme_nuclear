@@ -16,6 +16,9 @@ namespace SupremeNuclear
     {
         public static readonly List<string> Failures = new List<string>();
 
+        // Буфер пробы тумана войны (без аллокаций на вызов).
+        private static readonly List<Renderer> FogProbe = new List<Renderer>();
+
         public static void RunStartup()
         {
             Failures.Clear();
@@ -400,6 +403,23 @@ namespace SupremeNuclear
             {
                 if (!GameManager.GetLocalHQ(out _)) throw new System.Exception("локальная фракция не найдена");
             });
+            // Туман войны гасит отрисовку через Renderer/Light enabled — проверяем,
+            // что юниты действительно рендерятся компонентами на детях (правило №13).
+            Check("Renderer на детях юнита (туман войны)", () =>
+            {
+                int withRenderers = 0;
+                foreach (Unit unit in UnitRegistry.allUnits)
+                {
+                    if (unit == null)
+                        continue;
+                    unit.GetComponentsInChildren(true, FogProbe);
+                    if (FogProbe.Count > 0)
+                        withRenderers++;
+                    FogProbe.Clear();
+                }
+                if (UnitRegistry.allUnits.Count > 0 && withRenderers == 0)
+                    throw new System.Exception("ни у одного юнита нет Renderer — скрытие моделей туманом мертво");
+            });
             // Гашение Доплера в режиме командира (CommanderAudio) работает пер-источниковым
             // dopplerLevel: глобальный AudioSettings.dopplerFactor из этой версии Unity
             // вырезан. Проба на живом источнике: обнуление должно читаться обратно.
@@ -657,25 +677,17 @@ namespace SupremeNuclear
                          ", с хардпоинтами на префабе: " + withHardpoints +
                          " из " + encyclopedia2.aircraft.Count);
             });
-            Check("Командирский борт: детонация/победа/EMCON (разведка)", () =>
+            Check("Победа annihilation: счёт имущества фракции и конец игры", () =>
             {
-                if (HarmonyLib.AccessTools.Method(typeof(DamageEffects), "BlastFrag") == null)
-                    throw new System.Exception("DamageEffects.BlastFrag не найден — детонация борта мертва");
+                if (HarmonyLib.AccessTools.Field(typeof(FactionHQ), "factionUnits") == null)
+                    throw new System.Exception("FactionHQ.factionUnits не найден — счёт имущества фракции мёртв");
+                if (HarmonyLib.AccessTools.Method(typeof(FactionHQ), "RegisterFactionUnit") == null ||
+                    HarmonyLib.AccessTools.Method(typeof(FactionHQ), "RemoveFactionUnit") == null)
+                    throw new System.Exception("FactionHQ.Register/RemoveFactionUnit не найдены — счёт не ведётся нативом");
+                if (HarmonyLib.AccessTools.Property(typeof(GameManager), "gameResolution") == null)
+                    throw new System.Exception("GameManager.gameResolution не найден — гонка каналов победы не гасится");
                 if (HarmonyLib.AccessTools.Method(typeof(FactionHQ), "DeclareEndGame") == null)
-                    throw new System.Exception("FactionHQ.DeclareEndGame не найден — победа по борту мертва");
-                if (HarmonyLib.AccessTools.Method(typeof(FactionHQ), "DeregisterTrackedUnit") == null)
-                    throw new System.Exception("FactionHQ.DeregisterTrackedUnit не найден — EMCON не сотрёт контакты");
-                if (HarmonyLib.AccessTools.Field(typeof(Aircraft), "radar") == null)
-                    throw new System.Exception("Aircraft.radar не найден — EMCON не погасит радар");
-                if (HarmonyLib.AccessTools.Field(typeof(Unit), "RCS") == null)
-                    throw new System.Exception("Unit.RCS не найден — EMCON не снизит ЭПР");
-                if (typeof(Unit).GetEvent("onDisableUnit") == null)
-                    throw new System.Exception("Unit.onDisableUnit не найден — смерть борта не отследится");
-                if (HarmonyLib.AccessTools.Method(typeof(UnitDefinition), "IsAllowed") == null)
-                    throw new System.Exception("UnitDefinition.IsAllowed не найден — автоподбор борта возьмёт ивентовый UFO");
-                foreach (string f in new[] { "playerControlled", "fuel", "skill", "startingSpeed", "savedLoadout" })
-                    if (HarmonyLib.AccessTools.Field(typeof(SavedAircraft), f) == null)
-                        throw new System.Exception("SavedAircraft." + f + " не найден — сценарный спавн борта сломается");
+                    throw new System.Exception("FactionHQ.DeclareEndGame не найден — поражение по annihilation мертво");
             });
             Log.Info("SelfCheck(activation): " + (Failures.Count == 0 ? "ОК" : "ПРОВАЛОВ: " + Failures.Count));
         }

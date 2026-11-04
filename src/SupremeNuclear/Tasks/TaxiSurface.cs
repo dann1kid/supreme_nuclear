@@ -120,6 +120,22 @@ namespace SupremeNuclear
             // если рельеф рядом и так выше — штифт тихо игнорируется.
             if (!float.IsNaN(startY) && startY - LiftM > terrain[0])
                 terrain[0] = startY - LiftM;
+            // ПЛЕЧО СХОДА с плиты (плейтест 2026-11-03 «плита выше дорожки»):
+            // штифт держал только ПЕРВУЮ станцию, дальше полотно ныряло за
+            // рельефом на полных 12% (1,8 м со станции) — у кромки плиты
+            // виден перепад ~0,5–1 м. Первые станции уходим с высоты плиты
+            // на треть уклона — дорога покидает плиту плавно, насыпь юбкой.
+            if (!float.IsNaN(startY))
+            {
+                float base0 = startY - LiftM;
+                float soft = MaxGrade * StepM * 0.33f;
+                for (int i = 1; i <= 3 && i < terrain.Length; i++)
+                {
+                    float want = base0 - soft * i;
+                    if (want > terrain[i])
+                        terrain[i] = want;
+                }
+            }
             float[] top = graded ? Grade(terrain) : null;
 
             var line = new Vector3[center.Count];
@@ -397,6 +413,26 @@ namespace SupremeNuclear
             EnsureRoot();
             if (_root == null || verts.Count < 3)
                 return;
+            // FloatingOrigin (правило №1): нативный OriginShift двигает КОРНЕВЫЕ GO
+            // активной сцены — наш _root среди них, и после первого сдвига (порог
+            // всего 1024 м) его позиция ≠ 0. Вершины и разметку запекаем
+            // ОТНОСИТЕЛЬНО root (минус его текущая позиция): в момент постройки
+            // localToWorld даёт те же мировые точки, а при следующих сдвигах кусок
+            // едет с миром вместе с root. Плейтест 2026-11-03: плиты/дорожки,
+            // построенные после сдвига, ложились «+2 км вверх/на юг» — мировые
+            // координаты трактовались как локальные при уехавшем root.
+            Vector3 rootPos = _root.position;
+            for (int i = 0; i < verts.Count; i++)
+                verts[i] -= rootPos;
+            if (line != null)
+                for (int i = 0; i < line.Length; i++)
+                    line[i] -= rootPos;
+            if (left != null)
+                for (int i = 0; i < left.Length; i++)
+                    left[i] -= rootPos;
+            if (right != null)
+                for (int i = 0; i < right.Length; i++)
+                    right[i] -= rootPos;
             var mesh = new Mesh { name = "taxi-surface" };
             mesh.SetVertices(verts);
             mesh.SetTriangles(tris, 0);
@@ -455,18 +491,20 @@ namespace SupremeNuclear
                 QuadMatrix(p.Mesh, t.localToWorldMatrix, Asfalt);
                 if (p.Left != null)
                 {
-                    Line(p.Left, 0.6f, Edge, false);
-                    Line(p.Right, 0.6f, Edge, false);
-                    Line(p.Line, 1.1f, Dash, true);
+                    Line(p.Left, 0.6f, Edge, false, t.localToWorldMatrix);
+                    Line(p.Right, 0.6f, Edge, false, t.localToWorldMatrix);
+                    Line(p.Line, 1.1f, Dash, true, t.localToWorldMatrix);
                 }
                 else
-                    Line(p.Line, 0.6f, Edge, false); // периметр апрона
+                    Line(p.Line, 0.6f, Edge, false, t.localToWorldMatrix); // периметр апрона
             }
             DrawPreview();
         }
 
-        /// <summary>Линия/пунктир по ломаной: сегменты сэмплов, плоские квады.</summary>
-        private static void Line(Vector3[] pts, float width, Color c, bool dashed)
+        /// <summary>Линия/пунктир по ломаной: сегменты сэмплов, плоские квады.
+        /// Точки — ЛОКАЛЬНЫЕ к куску (запечены минус root, см. BuildPieceFromMesh),
+        /// матрица m = localToWorld куска — разметка едет с миром при сдвигах.</summary>
+        private static void Line(Vector3[] pts, float width, Color c, bool dashed, Matrix4x4 m)
         {
             if (pts == null || pts.Length < 2)
                 return;
@@ -479,21 +517,26 @@ namespace SupremeNuclear
                 if (len < 0.1f)
                     continue;
                 Vector3 mid = (pts[i] + pts[i + 1]) * 0.5f + Vector3.up * 0.06f;
-                Quad(mid, Quaternion.LookRotation(delta), width, len, c);
+                Quad(mid, Quaternion.LookRotation(delta), width, len, c, m);
             }
         }
 
         private static void QuadMatrix(Mesh mesh, Matrix4x4 m, Color c)
         {
             _block.SetColor(ColorId, c);
-            Graphics.DrawMesh(mesh, m, _mat, 0, null, 0, _block);
+            Graphics.DrawMesh(mesh, m, _mat, 0, null, 0, _block,
+                UnityEngine.Rendering.ShadowCastingMode.Off, false);
         }
 
-        private static void Quad(Vector3 pos, Quaternion rot, float sx, float sz, Color c)
+        /// <summary>Квад разметки: m ≠ identity — локально к куску (жизнь после
+        /// сдвигов FloatingOrigin); превью рисует с identity (мировые точки).</summary>
+        private static void Quad(Vector3 pos, Quaternion rot, float sx, float sz, Color c,
+            Matrix4x4 m)
         {
             _block.SetColor(ColorId, c);
-            Graphics.DrawMesh(_quad, Matrix4x4.TRS(pos, rot, new Vector3(sx, 1f, sz)),
-                _decalMat, 0, null, 0, _block);
+            Graphics.DrawMesh(_quad, m * Matrix4x4.TRS(pos, rot, new Vector3(sx, 1f, sz)),
+                _decalMat, 0, null, 0, _block,
+                UnityEngine.Rendering.ShadowCastingMode.Off, false);
         }
 
         // Превью будущей рулёжки на призраке установки (без коллайдеров).
@@ -547,7 +590,7 @@ namespace SupremeNuclear
                     Vector3 fwd = p1 - p0;
                     mid.y = SurfaceY(mid.x, mid.z) + 0.3f;
                     Quad(mid, Quaternion.LookRotation(fwd.normalized), _previewWidth,
-                        fwd.magnitude + 2f, PreviewTint);
+                        fwd.magnitude + 2f, PreviewTint, Matrix4x4.identity);
                 }
             }
             if (_previewRunway)
@@ -565,7 +608,7 @@ namespace SupremeNuclear
         {
             Quaternion rot = Quaternion.LookRotation(fwd);
             Vector3 pos = new Vector3(at.x, SurfaceY(at.x, at.z) + 0.35f, at.z);
-            Quad(pos, rot, _previewWidth * 0.8f, 3f, Edge);
+            Quad(pos, rot, _previewWidth * 0.8f, 3f, Edge, Matrix4x4.identity);
         }
 
         private static bool EnsureMaterial()

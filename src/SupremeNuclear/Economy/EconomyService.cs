@@ -438,51 +438,43 @@ namespace SupremeNuclear
         {
             Spawner spawner = NetworkSceneSingleton<Spawner>.i;
             Encyclopedia encyclopedia = Encyclopedia.i;
-            if (spawner == null || encyclopedia == null || encyclopedia.buildings == null || encyclopedia.buildings.Count == 0)
+            if (spawner == null || encyclopedia == null || encyclopedia.buildings == null || encyclopedia.buildings.Count == 0 ||
+                !BuildingPool.Ready)
             {
                 // Сцена может догружаться — ретраим молча, в лог пишем один раз.
                 if (!_loggedSceneWait)
                 {
                     _loggedSceneWait = true;
-                    Log.Info("Economy: ждём сцену (Spawner/Encyclopedia ещё не готовы)…");
+                    Log.Info("Economy: ждём сцену (Spawner/Encyclopedia/пул строений ещё не готовы)…");
                 }
                 return;
             }
 
             Log.Info("Economy: здания карты — " + string.Join(", ", JsonKeys(encyclopedia)));
 
-            // Роли экономики — runtime-КЛОНЫ нативных зданий (юзер-канон 2026-10-31:
-            // «сделай копии всех нужных строений и обзови как хочешь — в игре куча
-            // зданий»). Доноры — из таблицы предпочтений, каждый занимается РОВНО
-            // одной ролью: коллизии паттернов («fuel» у экстрактора И генератора)
-            // исключены по построению.
-            var used = new HashSet<BuildingDefinition>();
-            BuildingDefinition definition = PickDonor(encyclopedia, MesDonors, used);
-            if (definition == null)
+            // Роли экономики — из ПУЛА строений (v0.148: BuildingPool клонирует
+            // всех по ролям; доноры мекс/гидро — МЕЛКИЕ, юзер-канон 2026-11-03).
+            // Цена — из профиля, как раньше; имя/код/донор — спецификация пула.
+            _profile = EconomyProfile.Load(Settings.EconomyProfile);
+            _extractorDefinition = BuildingPool.Of("mes");
+            _hydroDefinition = BuildingPool.Of("hyd");
+            _generatorDefinition = BuildingPool.Of("gen");
+            if (_extractorDefinition == null)
             {
-                definition = FindExtractorDefinition(encyclopedia); // старый фолбэк: донор маркеров стоковых карт
-                if (definition != null)
-                    used.Add(definition);
-            }
-            if (definition == null)
-            {
-                // Зданий нет вовсе — на этой сцене экономика невозможна, не долбим лог каждые 5 с.
+                // Пула нет вовсе — на этой сцене экономика невозможна, не долбим лог каждые 5 с.
                 _gaveUp = true;
-                Log.Error("Economy: в Encyclopedia нет подходящих зданий — экстрактор спавнить не из чего; " +
+                Log.Error("Economy: в пуле строений нет роли mes — экстрактор спавнить не из чего; " +
                           "экономика отключена до смены сцены");
                 return;
             }
-
-            _profile = EconomyProfile.Load(Settings.EconomyProfile);
-            _generatorDefinition = CloneRole(PickDonor(encyclopedia, GenDonors, used),
-                "Генератор T1", "GEN", Mathf.Max(1f, _profile.generatorBuildCost), ref _genOriginal);
-            _hydroDefinition = CloneRole(PickDonor(encyclopedia, HydDonors, used),
-                "Гидрокарбонка", "HYD", Mathf.Max(1f, _profile.hydroBuildCost), ref _hydroOriginal);
-            _extractorDefinition = CloneRole(definition, "Экстрактор", "MES",
-                Mathf.Max(1f, _profile.extractorBuildCost), ref _extractorOriginal);
-            Log.Info("Economy: роли-клоны — MES ← " + (_extractorOriginal != null ? _extractorOriginal.jsonKey : "нет") +
-                     ", HYD ← " + (_hydroOriginal != null ? _hydroOriginal.jsonKey : "нет") +
-                     ", GEN ← " + (_genOriginal != null ? _genOriginal.jsonKey : "нет"));
+            _extractorDefinition.value = Mathf.Max(1f, _profile.extractorBuildCost);
+            if (_hydroDefinition != null)
+                _hydroDefinition.value = Mathf.Max(1f, _profile.hydroBuildCost);
+            if (_generatorDefinition != null)
+                _generatorDefinition.value = Mathf.Max(1f, _profile.generatorBuildCost);
+            Log.Info("Economy: роли из пула — MES ← " + DonorOf(_extractorDefinition) +
+                     ", HYD ← " + DonorOf(_hydroDefinition) +
+                     ", GEN ← " + DonorOf(_generatorDefinition));
             EnergyActive = (_generatorDefinition != null || _hydroDefinition != null) &&
                            _profile.generatorIncome > 0f;
             if (!EnergyActive)
@@ -514,9 +506,9 @@ namespace SupremeNuclear
                     bool coal = d.kind != null && d.kind.ToLowerInvariant() == "coal";
                     Vector3 local = new Vector3(d.x, GameApi.GroundY(d.x, d.z), d.z);
                     string label = (coal ? "Coal " : "Mass ") + (spawned + 1);
-                    Vector3 pos = local + (Vector3)definition.spawnOffset;
+                    Vector3 pos = local + (Vector3)_extractorDefinition.spawnOffset;
                     Unit unit = spawner.SpawnFromUnitDefinitionInEditor(
-                        definition, pos.ToGlobalPosition(), Quaternion.identity, null, label);
+                        _extractorDefinition, pos.ToGlobalPosition(), Quaternion.identity, null, label);
                     if (unit == null)
                     {
                         Log.Warn($"Economy: маркер месторождения не создан в ({d.x:F0}, {d.z:F0})");
@@ -613,81 +605,13 @@ namespace SupremeNuclear
             return fallback;
         }
 
-        /// <summary>Оригиналы-доноры ролей — ИЗЫМАЮТСЯ из каталога (заменяясь
-        /// клонами с честными именами; юзер-канон 2026-10-30: «скопировать объекты,
-        /// чтобы не было путаницы»).</summary>
-        public static bool IsReplacedOriginal(BuildingDefinition def) =>
-            def != null && (def == _extractorOriginal || def == _hydroOriginal || def == _genOriginal);
+        /// <summary>jsonKey донора роли пула (для логов; null → «нет»).</summary>
+        private static string DonorOf(BuildingDefinition def) =>
+            BuildingPool.SpecOf(def)?.donor ?? "нет";
 
-        /// <summary>Клон-роли (экстрактор/гидро/ген) — НЕ производственные здания:
-        /// нативный Factory-компонент донора (enrichment-фабрика) у них не
-        /// активируется, роли дают доход, а не войска.</summary>
-        public static bool IsRoleClone(BuildingDefinition def) =>
-            def != null && (def == ExtractorDefinition || def == HydroDefinition ||
-                            def == GeneratorDefinition);
-
-        private static BuildingDefinition _extractorOriginal, _hydroOriginal, _genOriginal;
-
-        /// <summary>Клон определения-роли: свой unitName (в каталоге/мире), бортовой
-        /// code и цена Т1 — оригинал остаётся нетронутым для нативных карт/миссий.</summary>
-        private static BuildingDefinition CloneRole(BuildingDefinition src, string name, string code,
-            float value, ref BuildingDefinition original)
-        {
-            if (src == null)
-                return null;
-            original = src;
-            var clone = Object.Instantiate(src);
-            clone.name = name;
-            clone.unitName = name;
-            clone.code = code;
-            clone.value = value;
-            return clone;
-        }
-
-        /// <summary>Поиск здания по подстроке jsonKey (регистронезависимо),
-        /// с предикатом-исключением (ген/гидро не должны совпасть с экстрактором).</summary>
-        private static BuildingDefinition FindByJsonKey(
-            Encyclopedia encyclopedia, string pattern, System.Func<BuildingDefinition, bool> except = null)
-        {
-            if (encyclopedia?.buildings == null || string.IsNullOrEmpty(pattern))
-                return null;
-            string p = pattern.ToLowerInvariant();
-            foreach (BuildingDefinition b in encyclopedia.buildings)
-            {
-                if (b == null) continue;
-                if (except != null && !except(b)) continue;
-                string key = b.jsonKey ?? string.Empty;
-                if (key.ToLowerInvariant().Contains(p))
-                    return b;
-            }
-            return null;
-        }
-
-        /// <summary>Таблица доноров ролей экономики: паттерны jsonKey по приоритету
-        /// (первый найденный побеждает). Роли берут доноров строго по очереди
-        /// (MES → GEN → HYD), занятое не переиспользуется — у каждой роли СВОЯ
-        /// модель-копия даже при пересекающихся паттернах.</summary>
-        private static readonly string[] MesDonors = { "enrichment", "mine" };
-        private static readonly string[] GenDonors = { "fuel", "tank" };
-        private static readonly string[] HydDonors = { "refinery" };
-
-        /// <summary>Первый свободный донор по таблице приоритетов; найденное
-        /// здание помечается занятым (защита от коллизий ролей).</summary>
-        private static BuildingDefinition PickDonor(
-            Encyclopedia encyclopedia, string[] patterns, HashSet<BuildingDefinition> used)
-        {
-            if (patterns == null || used == null)
-                return null;
-            foreach (string pattern in patterns)
-            {
-                BuildingDefinition found = FindByJsonKey(encyclopedia, pattern, b => !used.Contains(b));
-                if (found == null)
-                    continue;
-                used.Add(found);
-                return found;
-            }
-            return null;
-        }
+        // Донорские таблицы/CloneRole/PickDonor удалены (v0.148): роли экономики
+        // клонирует BuildingPool по Roster/buildings.json (МЕЛКИЕ доноры —
+        // юзер-канон 2026-11-03), здесь только цены из профиля.
 
         private static List<string> JsonKeys(Encyclopedia encyclopedia)
         {

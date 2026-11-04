@@ -91,7 +91,7 @@ namespace SupremeNuclear
             // панель гаснет сама (слепое слежение за протухшим контактом — чит).
             if (Inspected != null && (Inspected == null || Inspected.disabled ||
                                       !GameApi.TryGetLocalHQ(out FactionHQ inspectHq) ||
-                                      !GameApi.TryGetContact(Inspected, inspectHq, out _)))
+                                      !GameApi.IsVisibleToCommander(Inspected, inspectHq, out _)))
                 Inspected = null;
 
             if (RouteEditor.Consumed || RouteEditor.IsDragging || BuildTasks.Consumed ||

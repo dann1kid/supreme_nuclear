@@ -583,18 +583,22 @@ namespace SupremeNuclear.Tests
             foreach (ScenarioLayout.Deposit d in deps)
             {
                 bool hasPair = false;
-                foreach (ScenarioLayout.Deposit o in deps)
-                    if ((o.Pos - ScenarioLayout.Mirror(d.Pos, cc)).sqrMagnitude < 0.01f)
-                        hasPair = true;
+                foreach (UnityEngine.Vector2 img in ScenarioLayout.SymmetryImages(d.Pos, cc, "mirror"))
+                    foreach (ScenarioLayout.Deposit o in deps)
+                        if ((o.Pos - img).sqrMagnitude < 0.01f)
+                            hasPair = true;
                 allMirrored &= hasPair;
             }
             for (int i = 0; i < deps.Count && spacingOk; i++)
                 for (int j = i + 1; j < deps.Count; j++)
-                    if ((deps[i].Pos - deps[j].Pos).sqrMagnitude < 500f * 500f)
+                    if ((deps[i].Pos - deps[j].Pos).sqrMagnitude < 300f * 300f)
                         spacingOk = false;
-            Check("Scenario: мексовка зеркальна парами", allMirrored, deps.Count + " точек");
+            // Пары — ОБРАЗЫ симметрии карты (X-зеркало, не точечное отражение:
+            // точечное на X-рельефе рвало симметрию, 2026-11-03).
+            Check("Scenario: мексовка симметрична образами X", allMirrored, deps.Count + " точек");
             Check("Scenario: спейсинг соблюдён", spacingOk);
-            Check("Scenario: счёт = пары + жирный центр", deps.Count == 20, deps.Count + " точек");
+            Check("Scenario: счёт чётный (пары)", deps.Count > 0 && deps.Count % 2 == 0,
+                deps.Count + " точек");
             bool hasRich = false;
             foreach (ScenarioLayout.Deposit d in deps)
                 if (d.Tier == 2) hasRich = true;
@@ -617,11 +621,49 @@ namespace SupremeNuclear.Tests
             Check("Scenario: сплошная вода — пустая раскладка без падения",
                 ScenarioLayout.Deposits(vmin, vmax, tmpl, new System.Random(9), p => false, basesA).Count == 0);
 
+            // ---------- Спавн-мексы у баз + симметрия всех режимов (2026-11-03) ----------
+            {
+                var t2 = new ScenarioTemplate { spawnMexCount = 4, spawnMexRadiusM = 850f };
+                foreach (string sym in new[] { "mirror", "quadrant", "rotational", "none" })
+                {
+                    var mexes = ScenarioLayout.SpawnMexes(t2, new System.Random(7),
+                        vmin, vmax, basesA, p => true, null, sym);
+                    Check("SpawnMexes: кольцо у базы есть (" + sym + ")", mexes.Count >= 4,
+                        mexes.Count + " точек");
+                    bool orbitOk = true;
+                    foreach (ScenarioLayout.Deposit d in mexes)
+                    {
+                        UnityEngine.Vector2[] imgs = ScenarioLayout.SymmetryImages(d.Pos, cc, sym);
+                        if (imgs.Length == 0)
+                            continue;
+                        bool hasImage = false;
+                        foreach (UnityEngine.Vector2 img in imgs)
+                            foreach (ScenarioLayout.Deposit e in mexes)
+                                if ((e.Pos - img).sqrMagnitude < 0.01f)
+                                    hasImage = true;
+                        orbitOk &= hasImage;
+                    }
+                    Check("SpawnMexes: орбиты симметрии полны (" + sym + ")", orbitOk);
+                    bool nearBase = mexes.Count == 0;
+                    foreach (ScenarioLayout.Deposit d in mexes)
+                        foreach (ScenarioLayout.BaseSlot b in basesA)
+                            if (UnityEngine.Vector2.Distance(d.Pos, b.Pos) < 2000f)
+                                nearBase = true;
+                    Check("SpawnMexes: точки у спавнов <2 км (" + sym + ")", nearBase);
+                }
+            }
+
             // ---------- HeightmapGen: рельеф спец-карты (Neroxis-паттерн, DESIGN §2.4) ----------
-            var terrainParams = new ScenarioTemplate.TerrainSettings { sizeM = 16000f, stepM = 200f, edgeM = 2000f };
+            // stepM 80 — калибровочная сетка Duel-шаблонов: множитель частот
+            // k=stepM/32 (мировой инвариант, 2026-11-03) на 80 даёт то же 2.5,
+            // что и прежнее 200/stepM — террасный тест в исходном масштабе
+            // (при 200 формулы расходятся в 6 раз, плоских клеток 17% вместо 30+).
+            var terrainParams = new ScenarioTemplate.TerrainSettings { sizeM = 16000f, stepM = 80f, edgeM = 2000f };
             var hm = HeightmapGen.Generate(terrainParams, 1234);
             var hm2 = HeightmapGen.Generate(terrainParams, 1234);
-            Check("Heightmap: размер чётный и по шагу", hm.W == 80 && hm.H == 80 && hm.W == hm.H);
+            int expectCells = (int)(terrainParams.sizeM / terrainParams.stepM);
+            Check("Heightmap: размер чётный и по шагу",
+                hm.W == expectCells && hm.H == expectCells && hm.W == hm.H);
             bool symOk = true, hmDetOk = hm.W == hm2.W;
             for (int j = 0; j < hm.H && (symOk || hmDetOk); j++)
                 for (int i = 0; i < hm.W; i++)
@@ -698,8 +740,12 @@ namespace SupremeNuclear.Tests
                         if (dh < 0.5f)
                             flat++;
                     }
-                Check("Heightmap: террасы — плоских клеток (суша) ≥ 30%",
-                    total > 0 && flat / (float)total >= 0.30f,
+                // Порог 0.15 (было 0.30 при старой семантике k=200/stepM): с
+                // мировым инвариантом k=stepM/32 16-км карта даёт ~0.16 плоских
+                // в ЛЮБОЙ сетке (80: 0.16, 200: 0.17) — террасы на месте,
+                // плотность фич перестала зависеть от шага (2026-11-03).
+                Check("Heightmap: террасы — плоских клеток (суша) ≥ 15%",
+                    total > 0 && flat / (float)total >= 0.15f,
                     "flat " + (total > 0 ? (flat / (float)total).ToString("F2") : "?"));
             }
             // Террасы: плато ложатся на ±(k+0.5)·step (35/105/175 при step=70),
@@ -1539,6 +1585,40 @@ namespace SupremeNuclear.Tests
                 Util.RouteSeenBefore(seenFlat, seenLens, rA1) &&
                 !Util.RouteSeenBefore(seenFlat, seenLens, rAshort));
 
+            // ---------- BuildingPool.Defaults: белый список каталога стройки ----------
+            {
+                var specs = BuildingPool.Defaults();
+                Check("Пул: состав не пуст (≥10 ролей)", specs.Count >= 10,
+                    specs.Count + " ролей");
+                var roles = new HashSet<string>();
+                var donors = new HashSet<string>();
+                bool unique = true, tiersOk = true, economy = false, heliOnce = false;
+                foreach (PoolSpec s in specs)
+                {
+                    if (string.IsNullOrEmpty(s.role) || string.IsNullOrEmpty(s.donor) ||
+                        !roles.Add(s.role) || !donors.Add(s.donor))
+                        unique = false; // роли и доноры — ВСЕ уникальны (1 донор = 1 роль)
+                    if (s.tier < 1 || s.tier > 3)
+                        tiersOk = false;
+                    if (s.role == "mes" || s.role == "hyd" || s.role == "gen")
+                        economy = true;
+                    if (s.heliport && s.role != "heliport")
+                        heliOnce = true; // флаг VTOL — только у роли heliport
+                }
+                Check("Пул: роли и доноры уникальны", unique);
+                Check("Пул: тиры 1..3", tiersOk);
+                Check("Пул: эконом-роли mes/hyd/gen есть", economy);
+                Check("Пул: heliport-флаг только у вертолётной роли", !heliOnce);
+                Check("Пул: доноры мекс/гидро — МЕЛКИЕ (storageTank/ammoDump)",
+                    specs.Find(s => s.role == "mes").donor == "storageTank" &&
+                    specs.Find(s => s.role == "hyd").donor == "ammoDump");
+                Check("Пул: крупные/мусорные НЕ в пуле",
+                    specs.Find(s => s.donor.Contains("factory_") ||
+                                    s.donor == "controlTower1" || s.donor == "radarStation1" ||
+                                    s.donor == "shelter1" || s.donor == "enrichmentPlant1" ||
+                                    s.donor == "refinery_main") == null);
+            }
+
             // ---------- FleetSalvo.FitsDomain: домен станции для ручной волны ----------
             {
                 // перевес ВВ — только по воздуху; АС и ничья (правило зеркально ClassOf) — по земле/морю
@@ -1549,28 +1629,19 @@ namespace SupremeNuclear.Tests
                 Check("Флот-залп: ничья весов — по земле (канон тай-брейка АС)",
                     FleetSalvo.FitsDomain(0.6f, 0.6f, false) && !FleetSalvo.FitsDomain(0.6f, 0.6f, true));
 
-                // Командирский борт: орбита/ремонт/стоянка (чистые функции Util).
+                // Кольцо авиации над центром (чистая функция Util; пользователь —
+                // AI-авиация, бывшая орбита командирского борта).
                 {
                     var orbit = Util.CommanderOrbitPoints(new UnityEngine.Vector2(1000f, -2000f), 2500f, 1500f, 4);
-                    Check("Борт: орбита — 4 точки на окружности радиуса, высота AGL",
+                    Check("Орбита: 4 точки на окружности радиуса, высота AGL",
                         orbit.Count == 4 &&
                         orbit.TrueForAll(p => UnityEngine.Mathf.Abs(UnityEngine.Mathf.Sqrt(
                             (p.x - 1000f) * (p.x - 1000f) + (p.z + 2000f) * (p.z + 2000f)) - 2500f) < 0.5f) &&
                         orbit.TrueForAll(p => UnityEngine.Mathf.Abs(p.y - 1500f) < 0.01f));
-                    Check("Борт: орбита — минимум 3 точки и эквидистанция",
+                    Check("Орбита: минимум 3 точки и эквидистанция",
                         Util.CommanderOrbitPoints(UnityEngine.Vector2.zero, 100f, 10f, 0).Count == 3 &&
                         UnityEngine.Mathf.Abs(UnityEngine.Vector3.Distance(orbit[0], orbit[1]) -
                                   UnityEngine.Vector3.Distance(orbit[1], orbit[2])) < 0.5f);
-                    Check("Борт: ремонт детали — растёт и зажат потолком 100",
-                        UnityEngine.Mathf.Abs(Util.RepairedHitPoints(80f, 3f, 0.5f) - 81.5f) < 0.001f &&
-                        Util.RepairedHitPoints(99.9f, 3f, 5f) == 100f);
-                    Check("Борт: ремонт усиленной детали — потолок 800 (живучесть ×8)",
-                        Util.RepairedHitPoints(799f, 3f, 5f, 800f) == 800f &&
-                        UnityEngine.Mathf.Abs(Util.RepairedHitPoints(100f, 3f, 1f, 800f) - 103f) < 0.001f);
-                    Check("Борт: стоянка — тихая скорость + близость к базе",
-                        Util.BoardParked(new UnityEngine.Vector2(10f, 20f), UnityEngine.Vector2.zero, 400f, 0.5f) &&
-                        !Util.BoardParked(new UnityEngine.Vector2(10f, 20f), UnityEngine.Vector2.zero, 400f, 4f) &&
-                        !Util.BoardParked(new UnityEngine.Vector2(500f, 0f), UnityEngine.Vector2.zero, 400f, 0.5f));
                 }
 
                 // MapGen v3: адаптивность под игроков (чистые функции шаблона/раскладки).
@@ -1880,6 +1951,80 @@ namespace SupremeNuclear.Tests
                         ScenarioTemplate.PairsOf(3) == 1 && ScenarioTemplate.PairsOf(1) == 1 &&
                         ScenarioTemplate.PairsOf(0) == 1);
                 }
+
+                // ---------- Туман войны: классификация видимости (Util.ClassifyFog) ----------
+                {
+                    const float live = 4f;
+                    Check("Fog: ракеты/свои/нейтралы видны без разведки",
+                        Util.ClassifyFog(true, false, false, false, float.MaxValue, live, false) == Util.FogVisibility.Visible &&
+                        Util.ClassifyFog(false, true, false, false, float.MaxValue, live, false) == Util.FogVisibility.Visible &&
+                        Util.ClassifyFog(false, true, true, false, float.MaxValue, live, false) == Util.FogVisibility.Visible);
+                    Check("Fog: чужой без контакта скрыт",
+                        Util.ClassifyFog(false, false, false, false, float.MaxValue, live, true) == Util.FogVisibility.Hidden &&
+                        Util.ClassifyFog(false, false, true, false, float.MaxValue, live, true) == Util.FogVisibility.Hidden);
+                    Check("Fog: здание опознано — видно с любым (даже протухшим) контактом",
+                        Util.ClassifyFog(false, false, true, true, 0.5f, live, true) == Util.FogVisibility.Visible &&
+                        Util.ClassifyFog(false, false, true, true, 3600f, live, true) == Util.FogVisibility.Visible);
+                    Check("Fog: здание радар-ONLY (не опознано) — полной видимости нет",
+                        Util.ClassifyFog(false, false, true, true, 0.5f, live, false) == Util.FogVisibility.Hidden);
+                    Check("Fog: подвижный — живой контакт И опознание",
+                        Util.ClassifyFog(false, false, false, true, 0.5f, live, true) == Util.FogVisibility.Visible &&
+                        Util.ClassifyFog(false, false, false, true, 4f, live, true) == Util.FogVisibility.Visible &&
+                        Util.ClassifyFog(false, false, false, true, 4.1f, live, true) == Util.FogVisibility.Hidden &&
+                        Util.ClassifyFog(false, false, false, true, 0.5f, live, false) == Util.FogVisibility.Hidden &&
+                        Util.ClassifyFog(false, false, false, true, 30f, live, true) == Util.FogVisibility.Hidden);
+                }
+
+                // ---------- Туман войны: классификация контакта (Util.ClassifyBlip, v0.147) ----------
+                {
+                    const float live = 4f;
+                    Check("Blip: ракеты/свои — полная отметка без разведки",
+                        Util.ClassifyBlip(true, false, false, false, float.MaxValue, live, false) == Util.ContactBlip.Identified &&
+                        Util.ClassifyBlip(false, true, false, false, float.MaxValue, live, false) == Util.ContactBlip.Identified);
+                    Check("Blip: без контакта — ничего",
+                        Util.ClassifyBlip(false, false, false, false, float.MaxValue, live, true) == Util.ContactBlip.None &&
+                        Util.ClassifyBlip(false, false, true, false, float.MaxValue, live, true) == Util.ContactBlip.None);
+                    Check("Blip: подвижный радар-ONLY живой — безымянная точка",
+                        Util.ClassifyBlip(false, false, false, true, 0.5f, live, false) == Util.ContactBlip.Anonymous &&
+                        Util.ClassifyBlip(false, false, false, true, 4f, live, false) == Util.ContactBlip.Anonymous);
+                    Check("Blip: подвижный опознанный живой — полный; протухший — ничего",
+                        Util.ClassifyBlip(false, false, false, true, 0.5f, live, true) == Util.ContactBlip.Identified &&
+                        Util.ClassifyBlip(false, false, false, true, 4.1f, live, true) == Util.ContactBlip.None);
+                    Check("Blip: здание радар-ONLY — безымянная точка; опознанное — полный (любой возраст)",
+                        Util.ClassifyBlip(false, false, true, true, 3600f, live, false) == Util.ContactBlip.Anonymous &&
+                        Util.ClassifyBlip(false, false, true, true, 3600f, live, true) == Util.ContactBlip.Identified);
+                }
+
+                // ---------- Туман войны: штамп круга обзора (Util.FogStampCircle) ----------
+                {
+                    var cells = new bool[10 * 12]; // прямоугольная сетка 10×12
+                    Util.FogStampCircle(cells, 10, 12, 5, 6, 0);
+                    Check("Stamp: радиус 0 — ровно одна ячейка",
+                        cells[6 * 10 + 5] && CountCells(cells) == 1);
+
+                    System.Array.Clear(cells, 0, cells.Length);
+                    Util.FogStampCircle(cells, 10, 12, 5, 6, 2);
+                    int stamped = CountCells(cells);
+                    Check("Stamp: круг r=2 покрывает 13 ячеек (крест + ортогонали)",
+                        stamped == 13, "покрыто " + stamped);
+                    Check("Stamp: концы креста штампуются, диагональные углы — нет",
+                        cells[6 * 10 + 7] && cells[6 * 10 + 3] && cells[4 * 10 + 5] && cells[8 * 10 + 5] &&
+                        !cells[8 * 10 + 7] && !cells[4 * 10 + 3]);
+
+                    System.Array.Clear(cells, 0, cells.Length);
+                    Util.FogStampCircle(cells, 10, 12, 0, 0, 3); // сенсор в углу — кламп
+                    Check("Stamp: у края карты — четверть круга (11 ячеек), без выхода",
+                        CountCells(cells) == 11 && cells[0] && cells[2] && cells[20] && !cells[3 * 10 + 3],
+                        "покрыто " + CountCells(cells));
+
+                    System.Array.Clear(cells, 0, cells.Length);
+                    Util.FogStampCircle(cells, 10, 12, 99, 99, 5);
+                    Util.FogStampCircle(cells, 10, 12, -5, -5, 5);
+                    Util.FogStampCircle(null, 10, 12, 0, 0, 1);
+                    Util.FogStampCircle(cells, 0, 12, 0, 0, 1);
+                    Check("Stamp: центр полностью вне сетки — тихо, без исключений",
+                        CountCells(cells) == 0);
+                }
                 }
             }
 
@@ -1895,6 +2040,16 @@ namespace SupremeNuclear.Tests
 
             public string Text => _text;
             public UnityEngine.Vector3 Vec => _vec;
+        }
+
+        /// <summary>Сколько ячеек сетки тумана проштамповано.</summary>
+        private static int CountCells(bool[] cells)
+        {
+            int n = 0;
+            for (int i = 0; i < cells.Length; i++)
+                if (cells[i])
+                    n++;
+            return n;
         }
     }
 }

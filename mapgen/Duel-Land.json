@@ -2,7 +2,7 @@
   "_readme": "Лендовая карта: суша с краевыми горами, вода — только случайные мелкие озёра (waterAmount > 0 добавляет управляемые озёра). Пресет MapGen v3; переключение шаблонов — Ctrl+Shift+G в редакторе миссий.",
   "terrain": {
     "sizeM": 81920.0,
-    "stepM": 80.0,
+    "stepM": 40.0,
     "style": "land",
     "waterAmount": 0.0,
     "oceanFloorM": -350.0,
@@ -50,9 +50,6 @@
   "startFunds": 10000.0,
   "runwayLength": 1800.0,
   "runwayWidth": 45.0,
-  "commander": true,
-  "commanderJsonKey": "",
-  "commanderFuel": 1.0,
   "players": 2,
   "baseSpreadM": 2800.0,
   "engineerAirdropAltM": 150.0,

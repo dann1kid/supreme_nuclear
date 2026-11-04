@@ -54,7 +54,8 @@ namespace SupremeNuclear
                 AirbaseReserve.Reset(); // резервы ангаров умершей сцены недействительны
                 AirbaseAccess.Reset(); // тумблеры посадки/взлёта умершей сцены недействительны
                 SortieService.Reset(); // слоты выката привязаны к базам сцены
-                CommanderBoardService.Reset(); // борта-командиры умерли вместе со сценой
+                VictoryService.Reset(); // «имевшие имущество» фракции — объекты сцены
+                FogOfWarService.Reset(); // туман войны: скрытия/ghost-здания/сетка умерли со сценой
                 SupplyService.Reset(); // кэш станций снабжения умер вместе со сценой
                 WarheadService.Reset(); // заряды БЧ/точки пуска умерли вместе со сценой
                 SelectionService.ResetGroups();

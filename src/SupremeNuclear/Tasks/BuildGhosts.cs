@@ -125,7 +125,8 @@ namespace SupremeNuclear
             {
                 Matrix4x4 m = root * part.Local;
                 for (int sub = 0; sub < part.SubmeshCount; sub++)
-                    Graphics.DrawMesh(part.Mesh, m, mat, 0, null, sub, block);
+                    Graphics.DrawMesh(part.Mesh, m, mat, 0, null, sub, block,
+                        UnityEngine.Rendering.ShadowCastingMode.Off, false);
             }
         }
 
@@ -243,7 +244,8 @@ namespace SupremeNuclear
                 Mathf.Max(GameApi.GroundY(pos.x, pos.z), Datum.LocalSeaY) + 0.6f, pos.z);
             Matrix4x4 arrow = Matrix4x4.TRS(ground, Quaternion.LookRotation(fwd.normalized),
                 new Vector3(len, 1f, len));
-            Graphics.DrawMesh(ArrowMesh(), arrow, mat, 0, null, 0, Block(ExitTint));
+            Graphics.DrawMesh(ArrowMesh(), arrow, mat, 0, null, 0, Block(ExitTint),
+                UnityEngine.Rendering.ShadowCastingMode.Off, false);
         }
 
         /// <summary>Покадровая подача призраков (зовётся из Update контроллера ДО
@@ -339,11 +341,12 @@ namespace SupremeNuclear
                     Matrix4x4 root = Matrix4x4.TRS(
                         at + (Vector3)def.spawnOffset, rot, Vector3.one);
                     DrawExitArrow(def, root);
-                    // Превью будущей рулёжки (только ангар): светлая полоса от выхода
-                    // к точке подключения — видно маршрут до постановки. НЕ гейтится
-                    // валидностью площадки: цвет призрака уже несёт ок/не-ок,
-                    // а рядом стоящие инженеры (блокеры зоны) не должны прятать путь.
-                    if (BuildTasks.IsHangarDefinition(def) &&
+                    // Превью будущей рулёжки (только ангар, НЕ вертолётная площадка —
+                    // VTOL без рулёжки, юзер-канон 2026-11-03): светлая полоса от
+                    // выхода к точке подключения. НЕ гейтится валидностью площадки:
+                    // цвет призрака уже несёт ок/не-ок, а рядом стоящие инженеры
+                    // (блокеры зоны) не должны прятать путь.
+                    if (BuildTasks.IsHangarDefinition(def) && !BuildTasks.IsHeliportDef(def) &&
                         TryGetExit(def, out Matrix4x4 exitLocal))
                     {
                         Matrix4x4 m = root * exitLocal;
@@ -470,7 +473,8 @@ namespace SupremeNuclear
                 Vector3 p = s.Pos.ToLocalPosition();
                 p.y = GameApi.GroundY(p.x, p.z) + 1.5f;
                 Graphics.DrawMesh(_discMesh, Matrix4x4.TRS(p, Quaternion.identity, Vector3.one),
-                    s.Kind == EconomyService.DepositKind.Coal ? _coalDisc : _massDisc, 0);
+                    s.Kind == EconomyService.DepositKind.Coal ? _coalDisc : _massDisc, 0,
+                    null, 0, null, UnityEngine.Rendering.ShadowCastingMode.Off, false);
             }
         }
 

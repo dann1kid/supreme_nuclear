@@ -118,6 +118,7 @@ namespace SupremeNuclear
         // Кэш сенсорных дальностей (разведка): не ходить по иерархии детекторов 10 раз/с;
         // развёрнутый радар появится с задержкой кэша (2 с).
         private static readonly Dictionary<Unit, Vector2> VisionCache = new Dictionary<Unit, Vector2>();
+        private static readonly Dictionary<Unit, Vector2> VisualCache = new Dictionary<Unit, Vector2>();
         private const float VisionCacheSec = 2f;
 
         /// <summary>Дальность станции для кольца. У КОРАБЕЛЬНЫХ ракет targetRequirements.
@@ -736,8 +737,9 @@ namespace SupremeNuclear
         }
 
         /// <summary>Дальность разведки юнита с кэшем (максимум радара/визуала
-        /// АКТИВНЫХ детекторов — паттерн MapToolTip игры).</summary>
-        private static float VisionRangeOf(Unit unit)
+        /// АКТИВНЫХ детекторов — паттерн MapToolTip игры). Читают кольца разведки
+        /// и сетка затемнения тумана войны (FogOverlay).</summary>
+        internal static float VisionRangeOf(Unit unit)
         {
             float now = Time.unscaledTime;
             if (VisionCache.TryGetValue(unit, out Vector2 hit) && hit.x > now)
@@ -763,6 +765,29 @@ namespace SupremeNuclear
             return r;
         }
 
+        /// <summary>Дальность ТОЛЬКО ОПТИКИ юнита с кэшем (максимум визуала
+        /// АКТИВНЫХ детекторов, радар не считается): опознание сигнатур в тумане
+        /// войны (неопознанные радар-отметки, FogOfWarService).</summary>
+        internal static float VisualRangeOf(Unit unit)
+        {
+            float now = Time.unscaledTime;
+            if (VisualCache.TryGetValue(unit, out Vector2 hit) && hit.x > now)
+                return hit.y;
+            float r = 0f;
+            DetectorBuf.Clear();
+            unit.GetComponentsInChildren(false, DetectorBuf);
+            foreach (TargetDetector d in DetectorBuf)
+            {
+                if (d == null)
+                    continue;
+                float vis = d.GetVisualRange();
+                if (vis > r)
+                    r = vis;
+            }
+            VisualCache[unit] = new Vector2(now + VisionCacheSec, r);
+            return r;
+        }
+
         /// <summary>Сброс по sceneLoaded (круги держат юнитов — чистим; кэш
         /// сенсоров держит юнитов — чистим; кэш высот и профили точных высот —
         /// новая карта, профили в пул; материал без юнитов — живёт).</summary>
@@ -772,6 +797,7 @@ namespace SupremeNuclear
                 Circles[k].Clear();
             DetectorBuf.Clear();
             VisionCache.Clear();
+            VisualCache.Clear();
             Heights.Clear();
             foreach (KeyValuePair<Unit, FineProfile> kv in Fine)
                 FinePool.Push(kv.Value);

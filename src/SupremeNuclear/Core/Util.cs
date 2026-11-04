@@ -677,16 +677,82 @@ namespace SupremeNuclear
             return pts;
         }
 
-        /// <summary>Шаг ремонта детали: HP детали растёт на perSec·dt, потолок max
-        /// (деталь полная = 100; у командирского борта — усиленный масштаб). Чистая —
-        /// тестируется.</summary>
-        public static float RepairedHitPoints(float hitPoints, float perSec, float dt, float max = 100f) =>
-            Mathf.Min(max, hitPoints + perSec * dt);
+        // ---------- туман войны (v0.146): классификация видимости + сетка затемнения ----------
 
-        /// <summary>Борт «стоит на своей базе»: скорость почти нулевая и дистанция
-        /// до центра аэродрома в допуске (ремонтное «окно уязвимости»). Чистая.</summary>
-        public static bool BoardParked(Vector2 boardXz, Vector2 baseXz, float radiusM,
-            float speedSqr, float maxSpeedSqr = 1f) =>
-            speedSqr < maxSpeedSqr && (boardXz - baseXz).sqrMagnitude <= radiusM * radiusM;
+        /// <summary>Видимость чужого юнита локальному командиру (туман войны).</summary>
+        public enum FogVisibility { Visible, Hidden }
+
+        /// <summary>Что рисовать по чужому контакту (неопознанные радар-отметки,
+        /// v0.147): None — ничего; Anonymous — безымянная точка (радар держит
+        /// цель, но оптика её не опознала: без типа/владельца/HP); Identified —
+        /// полная иконка/модель.</summary>
+        public enum ContactBlip { None, Anonymous, Identified }
+
+        /// <summary>Классификация видимости юнита в тумане войны (канон SupCom —
+        /// бинарно, без «серых протухших» контактов): ракеты обеих сторон, свои и
+        /// нейтралы видны всегда; чужие ЗДАНИЯ — с момента ОПТИЧЕСКОЙ разведки и
+        /// до гибели (статика не двигается: раз опознана — помним, гибель вне
+        /// обзора не раскрывает себя, иконку держит ghost-реестр); чужая
+        /// ПОДВИЖНАЯ техника — только пока контакт «живой» (сенсоры обновляют
+        /// его чаще окна liveWindowSec) И сигнатура опознана оптикой (радар-ONLY
+        /// контакт — безымянная отметка, см. ClassifyBlip). Чистая — тестируется.</summary>
+        public static FogVisibility ClassifyFog(bool isMissile, bool ownOrNeutral, bool isBuilding,
+            bool hasContact, float contactAgeSec, float liveWindowSec, bool identified)
+        {
+            if (isMissile || ownOrNeutral)
+                return FogVisibility.Visible;
+            if (!hasContact || !identified)
+                return FogVisibility.Hidden;
+            if (isBuilding)
+                return FogVisibility.Visible;
+            return contactAgeSec <= liveWindowSec ? FogVisibility.Visible : FogVisibility.Hidden;
+        }
+
+        /// <summary>Классификация КОНТАКТА (что рисуем): ракеты/свои — полные;
+        /// чужие здания — контакт есть: опознана → полная, радар-ONLY → безымянная
+        /// точка; чужая подвижная техника — живой контакт: опознана → полная
+        /// (опознание живёт, пока контакт не потерян — канон SupCom «разведанная
+        /// сигнатура не теряется в зоне радаров»), иначе безымянная точка,
+        /// протухший контакт — ничего. Чистая — тестируется.</summary>
+        public static ContactBlip ClassifyBlip(bool isMissile, bool ownOrNeutral, bool isBuilding,
+            bool hasContact, float contactAgeSec, float liveWindowSec, bool identified)
+        {
+            if (isMissile || ownOrNeutral)
+                return ContactBlip.Identified;
+            if (!hasContact)
+                return ContactBlip.None;
+            if (isBuilding)
+                return identified ? ContactBlip.Identified : ContactBlip.Anonymous;
+            if (contactAgeSec > liveWindowSec)
+                return ContactBlip.None;
+            return identified ? ContactBlip.Identified : ContactBlip.Anonymous;
+        }
+
+        /// <summary>Штамп круга обзора в сетку тумана (cells — nx×nz, row-major по
+        /// z: индекс = z*nx + x): круг радиуса r ячеек вокруг (cx, cz), выход за
+        /// границы карты молча клампится (сенсор у края). Радиус 0 — одна ячейка.
+        /// Чистая — тестируется.</summary>
+        public static void FogStampCircle(bool[] cells, int nx, int nz, int cx, int cz, int r)
+        {
+            if (cells == null || nx <= 0 || nz <= 0 || cells.Length < nx * nz || r < 0)
+                return;
+            int r2 = r * r;
+            for (int dz = -r; dz <= r; dz++)
+            {
+                int z = cz + dz;
+                if (z < 0 || z >= nz)
+                    continue;
+                int row = z * nx;
+                for (int dx = -r; dx <= r; dx++)
+                {
+                    if (dx * dx + dz * dz > r2)
+                        continue;
+                    int x = cx + dx;
+                    if (x < 0 || x >= nx)
+                        continue;
+                    cells[row + x] = true;
+                }
+            }
+        }
     }
 }

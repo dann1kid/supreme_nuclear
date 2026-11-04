@@ -223,11 +223,6 @@ namespace SupremeNuclear
                         template.runwayLength, template.runwayWidth, GroundY, SavePos);
                     BuildStarter(mission, baseName, faction, pos, bases[k].YawDeg, starter,
                         GroundY, SavePos, template.engineerAirdropAltM);
-                    // Командирский борт (DESIGN §2.1): спавн в воздухе над ПЕРВИЧНОЙ
-                    // базой стороны, орбиту/EMCON/ремонт ведёт CommanderBoardService.
-                    if (template.commander && k == 0)
-                        SpawnCommanderBoard(mission, faction, side == 0 ? "A" : "B",
-                            pos, bases[k].YawDeg, template, GroundY, SavePos);
                 }
             }
 
@@ -258,8 +253,7 @@ namespace SupremeNuclear
             }
 
             // Победа: захват ВСЕХ баз противника (один objective, CompleteAll —
-            // дефолт CaptureAirbaseSavedObjective) → конец игры; второй путь —
-            // убийство командирского борта (CommanderBoardService, гибрид §2.7).
+            // дефолт CaptureAirbaseSavedObjective) → конец игры (§2.7 DESIGN).
             BuildVictory(mission, factions[0], baseNames[1], "A");
             BuildVictory(mission, factions[1], baseNames[0], "B");
 
@@ -498,57 +492,6 @@ namespace SupremeNuclear
                 ? EconomyService.FindExtractorDefinition(encyclopedia)
                 : null;
             return def != null ? def.jsonKey : "";
-        }
-
-        /// <summary>Командирский борт стороны: SavedAircraft в воздухе над своей базой
-        /// (нативный спавн-путь, AI-пилот со скиллом 1). Высота/скорость — из профиля
-        /// борта (единый источник баланса), модель — шаблон или самый дорогой самолёт.</summary>
-        private static void SpawnCommanderBoard(Mission mission, string faction, string sideTag,
-            Vector2 pos, float yawDeg, ScenarioTemplate template,
-            Func<Vector2, float> groundY, Func<Vector3, GlobalPosition> savePos)
-        {
-            string type = CommanderBoardType(template);
-            if (string.IsNullOrEmpty(type))
-            {
-                Log.Warn("MapGen: в энциклопедии нет самолётов — командирский борт пропущен");
-                return;
-            }
-            var profile = CommanderBoardProfile.Load();
-            mission.aircraft.Add(new SavedAircraft($"{CommanderBoardService.BoardMarker}-{sideTag}")
-            {
-                type = type,
-                faction = faction,
-                PlacementType = PlacementType.Custom,
-                globalPosition = savePos(new Vector3(pos.x, groundY(pos) + profile.orbitAltM, pos.y)),
-                rotation = Quaternion.Euler(0f, yawDeg, 0f),
-                playerControlled = false,
-                fuel = template.commanderFuel,
-                skill = 1f,
-                bravery = 1f,
-                startingSpeed = profile.spawnSpeed,
-            });
-            Log.Info($"MapGen: командирский борт стороны {sideTag} — {type}, " +
-                     $"высота {profile.orbitAltM:F0} м над базой");
-        }
-
-        /// <summary>Модель борта: явный jsonKey шаблона, иначе самый дорогой ДОПУСТИМЫЙ
-        /// самолёт энциклопедии (обычно стратегический — «летающий ACU» из тяжёлых
-        /// машин). Фильтр IsAllowed(false) — тот же, что у Spawner: наш сценарий не
-        /// включает ивентовый контент (allowEventContent не ставим), а «самый дорогой»
-        /// без фильтра — UFO, его Spawner молча отказался спавнить (плейтест 2026-10-31
-        /// «командирский борт не найден»).</summary>
-        private static string CommanderBoardType(ScenarioTemplate template)
-        {
-            if (!string.IsNullOrEmpty(template.commanderJsonKey))
-                return template.commanderJsonKey;
-            Encyclopedia encyclopedia = Encyclopedia.i;
-            if (encyclopedia?.aircraft == null || encyclopedia.aircraft.Count == 0)
-                return null;
-            AircraftDefinition best = null;
-            foreach (AircraftDefinition a in encyclopedia.aircraft)
-                if (a != null && a.IsAllowed(false) && (best == null || a.value > best.value))
-                    best = a;
-            return best != null ? best.jsonKey : null;
         }
 
         /// <summary>Ростр старта: роль → jsonKey ( depot = корпус верфи/депо, engineer = TRUCK,

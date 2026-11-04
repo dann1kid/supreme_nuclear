@@ -23,13 +23,21 @@ namespace SupremeNuclear
         private sealed class FactoryProfile
         {
             public string comment = "Апгрейды фабрик (T1→T2→T3 наливом): масса/энергия/секунды. " +
-                                    "Одна таблица на все виды фабрик (депо/аэродром/верфь).";
+                                    "Одна таблица на все виды фабрик (депо/аэродром/верфь). " +
+                                    "HQ-модель (канон FAF, юзер 2026-11-03): ШТАБ = полная цена, " +
+                                    "полный ростер, независим; дешёвая версия = hqSupportFactor цены, " +
+                                    "полный ростер только пока жив HQ тира, иначе — только инженеры.";
             public bool enabled = true;
             public float tier2Mass = 1500f, tier2Energy = 800f, tier2Seconds = 60f;
             public float tier3Mass = 4000f, tier3Energy = 2000f, tier3Seconds = 120f;
+            public float hqSupportFactor = 0.6f; // цена дешёвой версии от HQ-цены
         }
 
         private static readonly Dictionary<object, int> _tiers = new Dictionary<object, int>();
+        // ШТАБ-тиры фабрики (до какого тира фабрика — HQ): нет записи — все дешёвые.
+        // Канон FAF: HQ дорог, независим и держит ростер ДРУГИМ дешёвым фабрикам
+        // тира; потеря всех HQ тира → дешёвые строят только инженеров.
+        private static readonly Dictionary<object, int> _hqTiers = new Dictionary<object, int>();
         private static FactoryProfile _profile;
         private static float _nextPrune;
 
@@ -46,15 +54,12 @@ namespace SupremeNuclear
             }
         }
 
-        /// <summary>Ключ тира: ангар → его АЭРОДРОМ (тир авиации живёт на базе
-        /// целиком); прочие фабрики — сами. Ключи зеркальны ProductionTasks;
-        /// публичен для очереди (EnqueueUpgrade/UpgradeItemOf).</summary>
-        public static object KeyOfFactory(object factory)
-        {
-            if (factory is Hangar h && h.parentAirbase != null)
-                return h.parentAirbase;
-            return factory;
-        }
+        /// <summary>Ключ тира — САМА фабрика: юзер-канон 2026-11-03 «раздели
+        /// каждую фабрику»: каждый ангар (вертолётная площадка в том числе) —
+        /// ОТДЕЛЬНАЯ фабрика со своим тиром/веткой/HQ, без склейки через
+        /// аэродром. Ключи зеркальны ProductionTasks; публичен для очереди
+        /// (EnqueueUpgrade/UpgradeItemOf).</summary>
+        public static object KeyOfFactory(object factory) => factory;
 
         /// <summary>Тир фабрики (1..3; нет записи — 1). Ангар спрашивает тир
         /// своего аэродрома; площадка-недострой — свой (Adopt перенесёт).</summary>
@@ -66,13 +71,106 @@ namespace SupremeNuclear
                 : 1;
         }
 
-        /// <summary>Гейт выпуска: тир определения ≤ тиру фабрики (юзниты —
-        /// ростер, клоны-инженеры зарегистрированы туда же).</summary>
-        public static bool CanProduce(object factory, UnitDefinition def) =>
-            def != null && UnitRoster.TierOf(def) <= TierOf(factory);
+        /// <summary>ШТАБ-тир фабрики (0 — дешёвые переходы; HQ не наследуется
+        /// между тирами автоматически: _hqTiers хранит «до какого тира HQ»).</summary>
+        public static int HqTierOf(object factory)
+        {
+            object key = KeyOfFactory(factory);
+            return key != null && _hqTiers.TryGetValue(key, out int hq)
+                ? Mathf.Clamp(hq, 0, 3)
+                : 0;
+        }
 
-        /// <summary>Цена следующего тира фабрики (false — максимум/выключено).</summary>
-        public static bool NextCost(int tier, out float mass, out float energy, out float seconds)
+        /// <summary>Ветка фабрики выбрана (тир ≥2 или апгрейд в очереди) и это
+        /// ШТАБ-ветка. Дальнейшие плитки — ТОЛЬКО этой ветки (юзер-канон
+        /// 2026-11-03: «выбирает ветку, дальше подкладываются плитки ветки»);
+        /// T1-фабрика без апгрейда в очереди — false (ветки ещё нет, выбор из двух).</summary>
+        public static bool BranchIsHq(object factory)
+        {
+            object key = KeyOfFactory(factory);
+            if (key == null)
+                return false;
+            int tier = TierOf(key);
+            if (tier >= 2)
+                return HqTierOf(key) >= tier;
+            return ProductionTasks.PendingBranchHq(key);
+        }
+
+        /// <summary>Тип фабрики для HQ-модели: наземка/авиация/флот — HQ держит
+        /// ростер и дешёвую ветку ТОЛЬКО фабрикам СВОЕГО типа (юзер-канон
+        /// 2026-11-03 «HQ нужной фабрики»: воздушный HQ не открывает дешёвую
+        /// наземку и наоборот).</summary>
+        public static string KindOfKey(object key)
+        {
+            switch (key)
+            {
+                case Hangar _:
+                case Airbase _:
+                    return "air";
+                case VehicleDepot _:
+                    return "land";
+                case BuildTasks.Task site:
+                    return site.IsDock
+                        ? "naval"
+                        : site.Definition != null && BuildTasks.IsHangarDefinition(site.Definition)
+                            ? "air"
+                            : "land";
+                case Building _:
+                    return "naval"; // верфь-корпус (не депо — тот выше по кейсу)
+                default:
+                    return "land";
+            }
+        }
+
+        /// <summary>Живой HQ тира у фракции (полный ростер держит ДРУГИМ
+        /// фабрикам; сам HQ независим). kind ≠ null — только HQ своего типа
+        /// фабрики. Перебор реестра — фабрик у фракции единицы, троттла не нужно.</summary>
+        public static bool AnyHq(FactionHQ owner, int tier, string kind = null)
+        {
+            if (owner == null || tier < 2)
+                return false;
+            foreach (KeyValuePair<object, int> kv in _hqTiers)
+                if (kv.Value >= tier && OwnerOf(kv.Key) == owner && Alive(kv.Key) &&
+                    (kind == null || KindOfKey(kv.Key) == kind))
+                    return true;
+            return false;
+        }
+
+        /// <summary>Дешёвая ветка апгрейда доступна: у фракции есть живой HQ
+        /// целевого тира ТОГО ЖЕ типа фабрики (юзер-канон 2026-11-03: «дешёвый
+        /// апгрейд доступен только после наличия HQ нужной фабрики»). Первый HQ
+        /// своей фракции строится только полной плиткой.</summary>
+        public static bool CheapUpgradeAvailable(object factory, int toTier) =>
+            AnyHq(OwnerOf(KeyOfFactory(factory)), toTier, KindOfKey(KeyOfFactory(factory)));
+
+        /// <summary>Гейт выпуска: тир определения ≤ тиру фабрики И ростер —
+        /// юниты T2+ требуют либо HQ у самой фабрики, либо живой HQ тира
+        /// фракции; дешёвая фабрика без HQ строит ТОЛЬКО инженеров (канон
+        /// FAF, юзер 2026-11-03). T1 — всегда полный.</summary>
+        public static bool CanProduce(object factory, UnitDefinition def)
+        {
+            if (def == null)
+                return false;
+            int tier = UnitRoster.TierOf(def);
+            if (tier <= 1 || tier <= TierOf(factory) && tier <= HqTierOf(factory))
+                return tier <= TierOf(factory);
+            if (tier > TierOf(factory))
+                return false;
+            // T2+: фабрика доросла — решает HQ-модель (HQ своего типа фабрики)
+            object key = KeyOfFactory(factory);
+            return AnyHq(OwnerOf(key), tier, KindOfKey(key)) || IsEngineerDef(def);
+        }
+
+        /// <summary>Определение — инженер (дешёвым фабрикам без HQ остаётся
+        /// строить их): тип TRUCK/LC — тот же детект, что GameApi.IsEngineer
+        /// (клоны-инженеры наследуют vehicleType донора-грузовика).</summary>
+        private static bool IsEngineerDef(UnitDefinition def) =>
+            def is VehicleDefinition vd && vd.vehicleType == VehicleType.TRUCK ||
+            def is ShipDefinition sea && sea.shipType == ShipType.LC;
+
+        /// <summary>Цена следующего тира фабрики (false — максимум/выключено).
+        /// hq=true — ШТАБ (полная цена); false — дешёвая версия (hqSupportFactor).</summary>
+        public static bool NextCost(int tier, bool hq, out float mass, out float energy, out float seconds)
         {
             mass = energy = seconds = 0f;
             if (_profile == null)
@@ -87,22 +185,35 @@ namespace SupremeNuclear
             {
                 mass = _profile.tier3Mass; energy = _profile.tier3Energy; seconds = _profile.tier3Seconds;
             }
+            if (!hq)
+            {
+                float f = Mathf.Clamp(_profile.hqSupportFactor, 0.1f, 1f);
+                mass *= f;
+                energy *= f;
+                seconds *= f; // дешёвая — и наливается быстрее (та же скорость/сек)
+            }
             return mass > 0f;
         }
 
         /// <summary>Завершение апгрейда (зовёт ProductionTasks.Tick, когда позиция
-        /// апгрейда в очереди оплачена): тир растёт, владелец получает Notice.</summary>
-        public static void Complete(object factory, int toTier)
+        /// апгрейда в очереди оплачена): тир растёт; hq — фабрика становится
+        /// ШТАБОМ до этого тира (держит ростер себе и дешёвым фабрикам фракции).</summary>
+        public static void Complete(object factory, int toTier, bool hq)
         {
             object key = KeyOfFactory(factory);
             if (key == null)
                 return;
             _tiers[key] = Mathf.Clamp(toTier, 1, 3);
+            if (hq)
+                _hqTiers[key] = Mathf.Clamp(toTier, 1, 3);
             Version++;
-            Log.Info("FactoryTier: фабрика → T" + toTier + " (" + Describe(key) + ")");
+            Log.Info("FactoryTier: фабрика → T" + toTier + (hq ? " ШТАБ" : "") +
+                     " (" + Describe(key) + ")");
             FactionHQ owner = OwnerOf(key);
             if (owner != null && GameApi.TryGetLocalHQ(out FactionHQ local) && local == owner)
-                CommanderHud.Notice(Loc.F("Фабрика → T{0}", toTier));
+                CommanderHud.Notice(hq
+                    ? Loc.F("Штаб-фабрика → T{0}", toTier)
+                    : Loc.F("Фабрика → T{0}", toTier));
         }
 
         /// <summary>Чистка мёртвых ключей (каждую секунду, host); налив апгрейда
@@ -159,6 +270,13 @@ namespace SupremeNuclear
                 if (!Alive(key))
                 {
                     _tiers.Remove(key);
+                    _hqTiers.Remove(key); // HQ умер — дешёвые фабрики тира теряют ростер
+                    touched = true;
+                }
+            foreach (object key in new List<object>(_hqTiers.Keys))
+                if (!Alive(key))
+                {
+                    _hqTiers.Remove(key);
                     touched = true;
                 }
             if (touched)
@@ -214,7 +332,11 @@ namespace SupremeNuclear
             if (_tiers.TryGetValue(site, out int tier) && tier > 1 &&
                 (!_tiers.TryGetValue(key, out int live) || live < tier))
                 _tiers[key] = tier;
+            if (_hqTiers.TryGetValue(site, out int siteHq) && siteHq > 0 &&
+                (!_hqTiers.TryGetValue(key, out int liveHq) || liveHq < siteHq))
+                _hqTiers[key] = siteHq;
             _tiers.Remove(site);
+            _hqTiers.Remove(site);
             Version++;
         }
 
@@ -225,13 +347,14 @@ namespace SupremeNuclear
         {
             if (site == null)
                 return;
-            if (_tiers.Remove(site))
+            if (_tiers.Remove(site) | _hqTiers.Remove(site))
                 Version++;
         }
 
         public static void Reset()
         {
             _tiers.Clear();
+            _hqTiers.Clear();
             _nextPrune = 0f;
             Version++;
         }

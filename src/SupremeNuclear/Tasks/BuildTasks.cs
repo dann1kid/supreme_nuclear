@@ -169,6 +169,14 @@ namespace SupremeNuclear
 
         /// <summary>Здание-ангар (на префабе есть компонент Hangar): пристраивается
         /// к своему аэродрому и становится слотом производства мультифабрики.</summary>
+        /// <summary>Вертолётная площадка: ФЛАГ РОЛИ ПУЛА (heliport=true в
+        /// Roster/buildings.json, v0.148). Прежние детекты (имя здания, каталог
+        /// живого ангара — пуст сразу после спавна, автопилот префаба —
+        /// рантайм-компонент) заменены явной ролью: наш каталог = только пул,
+        /// значит у каждой построенной площадки есть спецификация.</summary>
+        internal static bool IsHeliportDef(BuildingDefinition def) =>
+            BuildingPool.IsHeliport(def);
+
         public static bool IsHangarDefinition(BuildingDefinition def)
         {
             if (def == null)
@@ -2128,7 +2136,13 @@ namespace SupremeNuclear
                     EconomyService.Refund(t.Faction, t.PaidEnergy);
                     return null;
                 }
-                ConnectTaxiway(airbase, hangar, padY);
+                // Вертолётная площадка — БЕЗ рулёжки (VTOL, юзер-канон
+                // 2026-11-03): флаг РОЛИ ПУЛА (v0.148), плита-площадка остаётся.
+                bool heliport = IsHeliportDef(t.Definition);
+                Log.Info("Build: ангар " + t.Definition.unitName + " — " +
+                         (heliport ? "ВЕРТОЛЁТНАЯ площадка, без рулёжки" : "рулёжка строится"));
+                if (!heliport)
+                    ConnectTaxiway(airbase, hangar, padY);
                 CommanderHud.Notice(Loc.F("Построено: {0} → {1}", t.Definition.unitName, airbase.name));
                 Log.Info($"Build: ангар {t.Definition.unitName} пристыкован к {airbase.name} " +
                          $"на ({local.x:F0},{local.z:F0}), поворот {t.YawDeg:F0}°, " +
@@ -2180,11 +2194,13 @@ namespace SupremeNuclear
                 return null;
             }
             // Нативная Factory (Large/Vertical): без FactoryOptions здание мертво —
-            // конфигурируем под дешёвый MBT; ProduceUnit кладёт юнита в саплай
+            // конфигурируем под дешёвый MBT (только здания НЕ из пула: поведение
+            // пула задают роли, донорские Factory не оживляем, v0.148);
+            // ProduceUnit кладёт юнита в саплай
             // фракции, DeployUnits сама выкатывает через депо (медленный интервал
             // — нативный тик бесплатен, деньги берёт постройка; экономика-интеграция — §12).
             Factory factory = unit.GetComponent<Factory>();
-            if (factory != null && !EconomyService.IsRoleClone(t.Definition))
+            if (factory != null && !BuildingPool.IsPool(t.Definition))
             {
                 VehicleDefinition tank = AiCommanderService.TankDefinition();
                 if (tank != null)

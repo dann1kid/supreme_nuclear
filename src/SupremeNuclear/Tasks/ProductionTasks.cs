@@ -28,6 +28,7 @@ namespace SupremeNuclear
             public bool IsUpgrade;              // позиция = АПГРЕЙД ТИРА фабрики (не юнит):
                                                 // встаёт ГОЛОВОЙ и занимает производство (SupCom)
             public int ToTier;                  // ...целевой тир апгрейда
+            public bool UpToHq;                 // ...ШТАБ (полная цена, полный ростер; иначе — дешёвая версия, канон FAF)
             public float UpgradeSeconds;        // ...темп налива апгрейда (factory.json)
             public VehicleDefinition GroundDef;
             public AircraftDefinition AirDef;
@@ -38,6 +39,9 @@ namespace SupremeNuclear
             public float EnergyNeed;            // явная энергопотребность апгрейда (масса = Cost)
             public float PaidMass;   // налито массы (factionFunds)
             public float PaidEnergy; // налито энергии (сток EconomyService)
+            public bool EnergyStalled; // не наливается: энергосток пуст (гейты
+                // зелёные, DrainStep режет обе валюты; плейтест 2026-11-03: «вторая
+                // фабрика не апается» = общий энергосток фракции)
             /// <summary>Полная энергопотребность позиции: апгрейд — явная цена
             /// профиля, юнит — стоимость × фактор профиля.</summary>
             public float EnergyCost => IsUpgrade && EnergyNeed > 0f
@@ -68,7 +72,8 @@ namespace SupremeNuclear
             new Dictionary<(object factory, UnitDefinition def), int>();
         /// <summary>Аэродромы с идущим апгрейдом тира (кадровый набор): их ангары
         /// не наливаются — апгрейд занимает производство базы (SupCom).</summary>
-        private static readonly HashSet<Airbase> _upgradingAirbases = new HashSet<Airbase>();
+        private static float _nextUpgradeDiag; // троттл диагностики апгрейд-позиций (5 с)
+        private static float _nextStallNotice; // троттл Notice энергостолла (10 с)
         private static readonly Dictionary<object, FactoryState> Factories =
             new Dictionary<object, FactoryState>();
 
@@ -524,6 +529,14 @@ namespace SupremeNuclear
                     PendingTierOf(depot), UnitRoster.TierOf(def)));
                 return;
             }
+            // HQ-модель: полный ростер T2+ — только HQ-фабрике или при живом HQ
+            // тира (дешёвые без HQ — инженеры). Заказ-гейт зеркален гейту оплаты.
+            if (!FactoryTierService.CanProduce(depot, def))
+            {
+                CommanderHud.Notice(Loc.F("Не строится без живого ШТАБ T{0} — постройте HQ",
+                    UnitRoster.TierOf(def)));
+                return;
+            }
             Queue.Add(new QueueItem
             {
                 Depot = depot,
@@ -731,7 +744,7 @@ namespace SupremeNuclear
         /// наливаются раньше него (у депо/верфи поток один и он линейный); юниты
         /// ПОСЛЕ — честно ждут своей очереди (тир-гейт оплаты в Tick). Цепочка
         /// стакается: цель — от «пендящего» тира (PendingTierOf).</summary>
-        public static void EnqueueUpgrade(object factory)
+        public static void EnqueueUpgrade(object factory, bool hq = false)
         {
             if (!IsHost)
                 return;
@@ -741,24 +754,38 @@ namespace SupremeNuclear
             if (key is Airbase ab && !AirbaseAlive(ab))
                 return;
             int from = PendingTierOf(key);
+            // Ветка выбрана (тир ≥2 или апгрейд уже стоит) — следующие переходы
+            // ТОЛЬКО её ветки (юзер-канон 2026-11-03): ШТАБ→ШТАБ, дешёвая→дешёвая.
+            if (FactoryTierService.TierOf(key) >= 2 || UpgradeItemOf(key) != null)
+                hq = FactoryTierService.BranchIsHq(key);
+            // Дешёвая ветка требует живой HQ целевого тира СВОЕГО типа фабрики
+            // (канон: «дешёвая — после наличия HQ нужной фабрики»); оборона
+            // заказ-слоя поверх UI-гейта плитки.
+            if (!hq && !FactoryTierService.CheapUpgradeAvailable(key, from + 1))
+            {
+                Log.Info("FactoryTier: дешёвый апгрейд отклонён — нет живого HQ T" +
+                         (from + 1) + " нужного типа");
+                return;
+            }
             if (from >= 3 ||
-                !FactoryTierService.NextCost(from, out float mass, out float energy, out float seconds))
+                !FactoryTierService.NextCost(from, hq, out float mass, out float energy, out float seconds))
                 return;
             Queue.Add(new QueueItem
             {
                 IsUpgrade = true,
                 ToTier = from + 1,
+                UpToHq = hq,
                 Cost = mass,
                 EnergyNeed = energy,
                 UpgradeSeconds = seconds,
                 Depot = key as VehicleDepot,
+                Hangar = key as Hangar,
                 Dock = key as Building,
                 Site = key as BuildTasks.Task,
-                Base = key as Airbase,
             });
             Version++;
-            Log.Info("FactoryTier: апгрейд до T" + (from + 1) + " в очередь фабрики (" +
-                     (key is Airbase ? "аэродром" : "фабрика") + ")");
+            Log.Info("FactoryTier: апгрейд до T" + (from + 1) + (hq ? " ШТАБ" : "") +
+                     " в очередь фабрики (" + (key is Airbase ? "аэродром" : "фабрика") + ")");
         }
 
         /// <summary>Стоящая в очереди позиция апгрейда этой фабрики (ангар
@@ -772,6 +799,20 @@ namespace SupremeNuclear
                 if (item.IsUpgrade && item.Factory == key)
                     return item;
             return null;
+        }
+
+        /// <summary>Ветка стоящего апгрейда — ШТАБ? (цепочка в очереди несёт
+        /// ветку первого же апгрейда фабрики; пусто — false). UI показывает
+        /// следующие плитки ТОЛЬКО этой ветки (юзер-канон 2026-11-03).</summary>
+        public static bool PendingBranchHq(object factory)
+        {
+            object key = FactoryTierService.KeyOfFactory(factory);
+            if (key == null)
+                return false;
+            foreach (QueueItem item in Queue)
+                if (item.IsUpgrade && item.Factory == key)
+                    return item.UpToHq;
+            return false;
         }
 
         /// <summary>Эффективный тир фабрики с учётом цепочки в очереди:
@@ -913,12 +954,13 @@ namespace SupremeNuclear
                 touched = true;
                 if (item.IsUpgrade)
                 {
-                    // Апгрейд площадки переезжает ЦЕЛИКОМ (тип позиции не важен):
-                    // ангар-площадка апгрейдит свой аэродром (тир авиации — на базе).
+                    // Апгрейд площадки переезжает ЦЕЛИКОМ (тип позиции не важен);
+                    // ангар-площадка апгрейдит СВОЙ ангар — фабрики разделены,
+                    // склейки с аэродромом больше нет (юзер-канон 2026-11-03).
                     item.Depot = depot;
                     item.Hangar = hangar;
                     item.Dock = dock;
-                    item.Base = hangar != null ? hangar.parentAirbase : key as Airbase;
+                    item.Base = null;
                     continue;
                 }
                 if (depot != null && item.GroundDef != null)
@@ -1218,7 +1260,6 @@ namespace SupremeNuclear
             float dt = Time.deltaTime;
             var paidSlots = PaidSlotsMap;
             paidSlots.Clear();
-            _upgradingAirbases.Clear();
 
             for (int i = 0; i < Queue.Count; )
             {
@@ -1269,25 +1310,36 @@ namespace SupremeNuclear
                     def: item.Depot != null || item.Dock != null || item.Base != null
                         ? null : item.UnitDef);
                 paidSlots.TryGetValue(slotKey, out int usedSlot);
-                // Апгрейд аэродрома ЗАНИМАЕТ производство базы: пока его головная
-                // позиция не оплачена, ангары не наливаются (апгрейд стоит в
-                // очереди РАНЬШЕ их — см. EnqueueUpgrade).
-                bool baseBusy = item.Hangar != null && item.Hangar.parentAirbase != null &&
-                                _upgradingAirbases.Contains(item.Hangar.parentAirbase);
-                // Скрипт очереди: юнит тира выше ТЕКУЩЕГО тира фабрики ждёт — его
-                // апгрейд стоит раньше и ещё не оплачен (заказать можно заранее:
-                // гейт постановки смотрит на «пендящий» тир, гейт оплаты — на факт).
+                // Фабрики РАЗДЕЛЕНЫ (юзер-канон 2026-11-03): каждый ангар — своя
+                // фабрика со своим потоком; былой «апгрейд базы занимает все
+                // ангары» (baseBusy) упразднён вместе со склейкой через аэродром.
+                // Скрипт очереди: юнит тира выше РАЗРЕШЁННОГО ждёт (заказать
+                // можно заранее: гейт постановки смотрит на «пендящий» тир).
                 bool tierWait = !item.IsUpgrade && item.UnitDef != null &&
-                                UnitRoster.TierOf(item.UnitDef) >
-                                FactoryTierService.TierOf(factory);
-                bool canPay = !baseBusy && !tierWait && usedSlot < PaySlots(item);
+                                !FactoryTierService.CanProduce(factory, item.UnitDef);
+                // CanProduce = тир И HQ-ростер: дешёвая фабрика, потерявшая HQ
+                // тира, НЕ наливает позиции неразрешённых юнитов (деградация
+                // канона FAF; инженеры остаются). Позиция ждёт в очереди.
+                bool canPay = !tierWait && usedSlot < PaySlots(item);
                 if (canPay)
                     paidSlots[slotKey] = usedSlot + 1;
 
                 FactoryState state = StateOf(factory);
-                if (item.IsUpgrade && item.Base != null && !state.Paused &&
-                    item.PaidMass < item.Cost - 0.5f)
-                    _upgradingAirbases.Add(item.Base);
+                // Диагностика «апгрейд встал и не наливается» (плейтест 2026-11-03:
+                // у ВТОРОГО депо позиция 0% вечно — тогда чиним по этим строкам):
+                // логируем ТОЛЬКО позиции БЕЗ единого налитого рубля — здоровые
+                // апгрейды начинают течь за секунды и лог не засоряют.
+                if (item.IsUpgrade && item.PaidMass < 1f &&
+                    Time.unscaledTime >= _nextUpgradeDiag)
+                {
+                    _nextUpgradeDiag = Time.unscaledTime + 5f;
+                    Log.Info("UpgradeDiag: " + factory.GetType().Name + "#" + factory.GetHashCode() +
+                        " →T" + item.ToTier + " — paid " + item.PaidMass.ToString("F0") + "/" +
+                        item.Cost.ToString("F0") + ", canPay=" + canPay + ", paused=" + state.Paused +
+                        ", slot=" + usedSlot + ", tierWait=" + tierWait +
+                        ", funds=" + (hq != null ? hq.factionFunds.ToString("F0") : "?") +
+                        ", energyOn=" + EconomyService.EnergyActive);
+                }
                 if (canPay && !state.Paused)
                 {
                     // Темп: апгрейд — из factory.json; флот тяжелее техники — свой
@@ -1307,6 +1359,20 @@ namespace SupremeNuclear
                     EcoFlow.Paid paid = EconomyService.Drain(hq, massWant, massWant * energyFactor);
                     item.PaidMass += paid.Mass;
                     item.PaidEnergy += paid.Energy;
+                    // Энергостолл: гейты зелёные (canPay, деньги есть), налив срезан
+                    // в ноль — режет общий энергосток фракции (SupCom-семантика).
+                    // Флаг — плитке очереди (⚡), Notice с тротлом — игроку.
+                    item.EnergyStalled = EconomyService.EnergyActive &&
+                        massWant > 0.01f && paid.Mass < massWant * 0.25f;
+                    if (item.EnergyStalled && hq != null &&
+                        GameApi.TryGetLocalHQ(out FactionHQ localHq) && localHq == hq &&
+                        Time.unscaledTime >= _nextStallNotice)
+                    {
+                        _nextStallNotice = Time.unscaledTime + 10f;
+                        CommanderHud.Notice(Loc.Tr("Производство стоит: нет энергии — постройте генераторы"));
+                        Log.Info("Production: энергостолл — доход " +
+                            EconomyService.EnergyIncomePerSecond(hq).ToString("F1") + "/с");
+                    }
                 }
 
                 if (item.PaidMass >= item.Cost - 0.01f &&
@@ -1315,7 +1381,7 @@ namespace SupremeNuclear
                     if (item.IsUpgrade)
                     {
                         // Апгрейд оплачен: тир фабрики растёт (Notice — владельцу).
-                        FactoryTierService.Complete(factory, item.ToTier);
+                        FactoryTierService.Complete(factory, item.ToTier, item.UpToHq);
                         Queue.RemoveAt(i);
                         Version++;
                         continue;

@@ -87,6 +87,7 @@ namespace SupremeNuclear
             GameApi.TickOriginShiftMonitor();
             GameApi.TickHpCache();
             UnitRoster.EnsureApplied(); // ростер юнитов/зданий (тиры/цены/имена) — ДО всех потребителей
+            BuildingPool.EnsureCreated(); // пул строений по ролям — после ростера (каталог стройки = только пул)
             EngineerService.EnsureCreated(); // клоны инженеров T2/T3 — после ростера (host-агностично)
             EconomyService.Tick();
             WarheadService.Tick(UnityEngine.Time.deltaTime); // ЯО: налив зарядов/складов + пуски (host)
@@ -97,10 +98,10 @@ namespace SupremeNuclear
             BuildTasks.Tick();
             ProductionTasks.Tick();
             SortieService.Tick(); // миссии вылетов живут и со закрытым столом командира
-            CommanderBoardService.Tick(); // командирский борт: орбита/EMCON/ремонт/победа (host)
             SalvoService.Tick();  // залп-приказы — тоже (пуски на хосте)
             WeaponGateService.Tick(); // гейты вооружения — блок Ready() выключенных станций
             AiCommanderService.Tick(); // AI-фракции играют тем же Task-API (до ворот режима)
+            VictoryService.Tick(); // annihilation: сторона без юнитов/зданий проигрывает (host)
             RouteRibbonMesh.Tick();
             RouteRibbonMesh.Render();
             BuildGhosts.Render();
@@ -137,6 +138,9 @@ namespace SupremeNuclear
             }
 
             CommanderAudio.Tick(); // доплер держим нулём: новые источники (взлёт/ракеты) дочищаются
+
+            FogOfWarService.Tick(); // туман войны: скрытие моделей + ghost-здания + сетка затемнения
+            FogOverlay.Render();    // меш затемнения — DrawMesh из Update до рендера (№16)
 
             RouteEditor.Tick(this);
 
@@ -391,11 +395,6 @@ namespace SupremeNuclear
             // (урон по деталям, обломки), площадка-недострой сносится. Хост.
             if (RtsInput.Ctrl && RtsInput.KeyDown(KeyCode.K))
                 SelfDestructSelection();
-
-            // Ctrl+E — EMCON своего командирского борта (радиомолчание: слеп, но
-            // невидим для пеленга; DESIGN §2.1). Хост.
-            if (RtsInput.Ctrl && RtsInput.KeyDown(KeyCode.E))
-                CommanderBoardService.ToggleEmcon();
 
             // Ctrl+M — отладочные деньги (плейтесты стройки/производства без гринда)
             // + энергия до капа: без генераторов фонового потока на стройку не хватает
@@ -723,6 +722,7 @@ namespace SupremeNuclear
         {
             IsActive = false;
             CommanderAudio.Restore(); // доплер гасили на входе — вернули на любом выходе
+            FogOfWarService.Leave(); // туман: погашенные рендереры вернуть (инвариант №9)
             _cameraState = null;
             Selection.Reset();
             CameraStateManager cam = GameApi.CamManager;

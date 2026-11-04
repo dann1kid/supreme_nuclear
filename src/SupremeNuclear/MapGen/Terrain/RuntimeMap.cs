@@ -140,10 +140,11 @@ namespace SupremeNuclear
 
             // Гибрид v4.20: albedo (зоны+пятна) + нормал-деталь field_n 1 м.
             TerrainMaterial.RememberAlbedo(albedo);
+            MapTextures.RememberSplatSource(hm, template.terrain); // сплат-маска/тайлы по этой карте
             TerrainMaterial.Plan plan = TerrainMaterial.ResolvePlan(albedo, albedo,
                 template.terrain.sizeM, 1f);
             TerrainMesh.Build(root.transform, hm, plan.Mat, plan.UvTileM,
-                h => MapTextures.VertexColor(hm, template.terrain, h));
+                (x, z, h) => MapTextures.VertexColorZone(hm, template.terrain, x, z));
 
             var details = ScriptableObject.CreateInstance<MapDetails>();
             details.PrefabName = mapName;

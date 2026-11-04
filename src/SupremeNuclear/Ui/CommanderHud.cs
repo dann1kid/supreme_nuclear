@@ -405,72 +405,8 @@ namespace SupremeNuclear
             }
 
             DrawAirbaseDiamonds(cam, hq, px);
-            DrawCommanderBoards(cam, hq, px);
             DrawHostileIcons(cam, hq, px);
             DrawMissileWarnings(cam, hq, px);
-        }
-
-        /// <summary>Маркер командирского борта (DESIGN §2.1): свой — зелёная
-        /// «корона» с подписью КОМАНДИР (+EMCON при молчании); чужой — красный,
-        /// только пока есть контакт разведки (как чужой аэродром).</summary>
-        private static void DrawCommanderBoards(Camera cam, FactionHQ hq, float px)
-        {
-            IReadOnlyList<CommanderBoardService.BoardRec> boards = CommanderBoardService.Boards;
-            if (boards == null || boards.Count == 0)
-                return;
-            float d = px * 2.1f;
-            for (int i = 0; i < boards.Count; i++)
-            {
-                CommanderBoardService.BoardRec rec = boards[i];
-                Unit board = rec.Board;
-                if (board == null || board.disabled || rec.DeadHandled)
-                    continue;
-                bool own = rec.Hq == hq;
-                if (!own && !GameApi.TryGetContact(board, hq, out _))
-                    continue; // чужой борт — только по разведке
-                Vector3 pos = board.transform.position;
-                Vector3 sp = cam.WorldToScreenPoint(pos);
-                if (sp.z <= 0f || sp.x < -60f || sp.x > Screen.width + 60f ||
-                    sp.y < -60f || sp.y > Screen.height + 60f)
-                    continue;
-                float gx = sp.x;
-                float gy = Screen.height - sp.y;
-                if (UnderMinimapWindow(new Vector2(gx, gy)))
-                    continue;
-                Color c = own
-                    ? new Color(0.45f, 0.95f, 0.5f, 0.95f)
-                    : new Color(1f, 0.35f, 0.3f, 0.95f);
-                // «Корона»: треугольник вверх над точкой + двойная нижняя перекладина.
-                var tri = new[]
-                {
-                    new Vector2(gx, gy - d * 0.7f),
-                    new Vector2(gx + d * 0.5f, gy + d * 0.25f),
-                    new Vector2(gx - d * 0.5f, gy + d * 0.25f),
-                };
-                for (int e = 0; e < 3; e++)
-                {
-                    Vector2 a1 = tri[e];
-                    Vector2 a2 = tri[(e + 1) % 3];
-                    int dots = Mathf.Clamp((int)(Vector2.Distance(a1, a2) / 7f), 1, 14);
-                    for (int k = 0; k <= dots; k++)
-                    {
-                        Vector2 p = Vector2.Lerp(a1, a2, k / (float)dots);
-                        DrawRect(new Rect(p.x - 1.2f, p.y - 1.2f, 2.4f, 2.4f), c);
-                    }
-                }
-                DrawRect(new Rect(gx - d * 0.5f, gy + d * 0.38f, d, 2.4f), c);
-                DrawRect(new Rect(gx - 2f, gy - 2f, 4f, 4f), c);
-                // Подпись: свой — «КОМАНДИР» (+ «EMCON» приглушённо),
-                // чужой — метка цели.
-                if (own)
-                {
-                    ClosedLabel(gx, gy + d * 0.6f, Loc.Tr("КОМАНДИР"));
-                    if (rec.Emcon)
-                        ClosedLabel(gx, gy + d * 0.6f + 14f, "EMCON"); // аббревиатура, не переводится
-                }
-                else
-                    ClosedLabel(gx, gy + d * 0.6f, Loc.Tr("ГЛАВНАЯ ЦЕЛЬ"));
-            }
         }
 
         /// <summary>Аэродромы — ромбы: свой зелёный; чужой красный ТОЛЬКО под разведкой,
@@ -544,12 +480,16 @@ namespace SupremeNuclear
             _small.alignment = prevAlign;
         }
 
-        /// <summary>Чужие юниты и здания — ТОЛЬКО по разведке: без контакта скрыты,
-        /// красные под наблюдением, серые тающие по давности (у статики размер иконки
-        /// не отключается по apparent-size — это стратегический слой).</summary>
+        /// <summary>Чужие юниты и здания — по разведке, бинарно (канон SupCom,
+        /// DESIGN §2.15): опознанная оптикой сигнатура — полная иконка (подвижная
+        /// техника — пока контакт жив, здания — пока живы, приглушённым красным
+        /// «в памяти»); радар-ONLY контакт — БЕЗЫМЯННАЯ отметка-точка без типа/
+        /// владельца (v0.147); протухших «серых тающих» нет; погибшее вне
+        /// наблюдения здание держит ghost-иконка (FogOfWarService) до
+        /// переразведки. У статики размер иконки не отключается по apparent-size
+        /// — это стратегический слой.</summary>
         private static void DrawHostileIcons(Camera cam, FactionHQ hq, float px)
         {
-            float now = Time.timeSinceLevelLoad;
             int drawn = 0;
             foreach (Unit unit in UnitRegistry.allUnits)
             {
@@ -560,16 +500,15 @@ namespace SupremeNuclear
                 if (!(unit is GroundVehicle || unit is Ship || unit is Aircraft || unit is Building))
                     continue;
                 bool isStatic = unit is Building;
-                if (!isStatic && !Settings.IconsAlwaysOn && GameApi.ApparentSizePx(unit, cam) >= Settings.IconMinPx)
-                    continue;
 
                 TrackingInfo info = hq.GetTrackingData(unit.persistentID);
-                if (info == null)
+                Util.ContactBlip blip = Util.ClassifyBlip(isMissile: false, ownOrNeutral: false,
+                    isBuilding: isStatic, hasContact: info != null,
+                    contactAgeSec: info != null ? Time.timeSinceLevelLoad - info.lastSpottedTime : float.MaxValue,
+                    liveWindowSec: GameApi.ContactLiveSec,
+                    identified: FogOfWarService.IsIdentified(unit));
+                if (blip == Util.ContactBlip.None)
                     continue;
-                float age = now - info.lastSpottedTime;
-                if (age > Settings.StaleContactSec)
-                    continue;
-                bool live = age < 4f;
 
                 Vector3 staleAnchor = info.GetPosition().ToLocalPosition() + Vector3.up * (unit.maxRadius * 0.7f);
                 Vector3 sp = cam.WorldToScreenPoint(staleAnchor);
@@ -578,18 +517,31 @@ namespace SupremeNuclear
                 float guiY = Screen.height - sp.y;
                 if (UnderMinimapWindow(new Vector2(sp.x, guiY)))
                     continue;
+
+                // Безымянная радар-отметка: маленькая тускло-красная точка без
+                // спрайта/типа — «что-то там есть» (SupCom unidentified blip).
+                if (blip == Util.ContactBlip.Anonymous)
+                {
+                    DrawUnitSprite(new Vector2(sp.x, guiY), px * 0.6f, null,
+                        new Color(0.9f, 0.5f, 0.4f, 0.85f), false);
+                    drawn++;
+                    continue;
+                }
+
+                if (!isStatic && !Settings.IconsAlwaysOn && GameApi.ApparentSizePx(unit, cam) >= Settings.IconMinPx)
+                    continue;
                 float size = isStatic ? px * 1.3f : (unit is Ship ? px * 1.4f : px);
-                Color tint = live
+                // Живой контакт — яркий красный; здание «в памяти» (разведано,
+                // но вне обзора сейчас) — приглушённый: стоим по последней разведке.
+                Color tint = GameApi.IsLiveContact(info)
                     ? new Color(1f, 0.35f, 0.3f, 1f)
-                    : new Color(0.75f, 0.75f, 0.75f, Mathf.Lerp(0.85f, 0.2f, age / Settings.StaleContactSec));
+                    : new Color(1f, 0.35f, 0.3f, 0.75f);
 
                 if (unit is Aircraft && unit.definition != null && unit.definition.mapOrient && unit.definition.mapIcon != null)
                 {
                     float ang = HeadingScreenAngle(unit, cam);
                     DrawOrientedSprite(new Vector2(sp.x + 1.5f, guiY + 1.5f), size, unit.definition.mapIcon, new Color(0f, 0f, 0f, 0.5f), ang);
                     DrawOrientedSprite(new Vector2(sp.x, guiY), size, unit.definition.mapIcon, tint, ang);
-                    if (!live)
-                        DrawCross(new Vector2(sp.x, guiY + size * 0.7f), size * 0.5f, tint * 0.8f);
                     drawn++;
                     continue;
                 }
@@ -598,9 +550,38 @@ namespace SupremeNuclear
                     ? (unit.definition.hostileIcon != null ? unit.definition.hostileIcon : unit.definition.friendlyIcon)
                     : null;
                 DrawUnitSprite(new Vector2(sp.x, guiY), size, sprite, tint, true);
-                if (!live)
-                    DrawCross(new Vector2(sp.x, guiY + size * 0.7f), size * 0.5f, tint * 0.8f);
                 drawn++;
+            }
+
+            DrawGhostBuildings(cam, hq, px);
+        }
+
+        /// <summary>Призраки разведанных зданий (SupCom-память): здание погибло
+        /// ВНЕ наблюдения — иконка на последней известной позиции с крестиком
+        /// «не подтверждено», пока сенсоры не переразведают точку.</summary>
+        private static void DrawGhostBuildings(Camera cam, FactionHQ hq, float px)
+        {
+            if (FogOfWarService.BuildingGhosts.Count == 0)
+                return;
+            float size = px * 1.3f;
+            Color tint = new Color(0.85f, 0.45f, 0.4f, 0.8f);
+            foreach (KeyValuePair<PersistentID, FogOfWarService.BuildingGhost> kv in FogOfWarService.BuildingGhosts)
+            {
+                FogOfWarService.BuildingGhost g = kv.Value;
+                if (g == null || g.Hq == hq)
+                    continue; // своё здание (захвачено) — не призрак
+                Vector3 anchor = g.Position.ToLocalPosition() + Vector3.up * 20f;
+                Vector3 sp = cam.WorldToScreenPoint(anchor);
+                if (sp.z <= 0f || sp.x < -60f || sp.x > Screen.width + 60f || sp.y < -60f || sp.y > Screen.height + 60f)
+                    continue;
+                float guiY = Screen.height - sp.y;
+                if (UnderMinimapWindow(new Vector2(sp.x, guiY)))
+                    continue;
+                Sprite sprite = g.Definition != null
+                    ? (g.Definition.hostileIcon != null ? g.Definition.hostileIcon : g.Definition.friendlyIcon)
+                    : null;
+                DrawUnitSprite(new Vector2(sp.x, guiY), size, sprite, tint, true);
+                DrawCross(new Vector2(sp.x, guiY + size * 0.7f), size * 0.5f, tint);
             }
         }
 

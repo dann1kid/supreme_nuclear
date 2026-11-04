@@ -268,19 +268,53 @@ namespace SupremeNuclear
         public static bool IsFriendlyUnit(Unit unit, FactionHQ localHq) =>
             unit != null && localHq != null && unit.NetworkHQ == localHq;
 
-        /// <summary>Контакт разведки по юниту, если он «видим»: ракеты обеих сторон
-        /// трекаются без разведки (как мигающие метки HUD), чужие юниты — только пока
-        /// контакт свежее StaleContactSec (тот же гейт, что у вражеских иконок).</summary>
-        public static bool TryGetContact(Unit unit, FactionHQ hq, out TrackingInfo info)
+        /// <summary>Нативное окно «живого» контакта (TrackingInfo.Observed): пока
+        /// сенсоры обновляют контакт чаще этого окна, цель считается под наблюдением.
+        /// Единый порог тумана войны: иконки, миникарта, осмотр, скрытие моделей.</summary>
+        public const float ContactLiveSec = 4f;
+
+        /// <summary>Контакт «живой» (сенсоры обновляли его в последние ContactLiveSec)?
+        /// Протухший мобильный контакт в тумане войны не виден.</summary>
+        public static bool IsLiveContact(TrackingInfo info) =>
+            info != null && Time.timeSinceLevelLoad - info.lastSpottedTime < ContactLiveSec;
+
+        /// <summary>Единый гейт ПОЛНОЙ видимости тумана войны (DESIGN §2.15, ядро —
+        /// Util.ClassifyFog): ракеты обеих сторон, свои и нейтралы — видимы всегда;
+        /// чужие ЗДАНИЯ — с момента ОПТИЧЕСКОЙ разведки (гибель вне обзора скрыта,
+        /// иконку держит ghost-реестр FogOfWarService); чужая подвижная техника —
+        /// живой контакт И опознанная сигнатура (радар-ONLY — безымянная отметка,
+        /// не «полная» видимость). Гасит по нему: 3D-модели, иконки HUD, блипы
+        /// миникарты, осмотр ЛКМ (карточка). Для БЕЗЫМЯННЫХ отметок и пика цели
+        /// ПКМ — IsRadarContact.</summary>
+        public static bool IsVisibleToCommander(Unit unit, FactionHQ hq, out TrackingInfo info)
         {
             info = null;
             if (unit == null || hq == null)
                 return false;
-            if (unit is Missile)
-                return true; // ракеты/бомбы рисуются обеим сторонам без развед-гейта
+            bool ownOrNeutral = unit.NetworkHQ == null || unit.NetworkHQ == hq;
+            if (!ownOrNeutral)
+                info = hq.GetTrackingData(unit.persistentID);
+            float age = info != null ? Time.timeSinceLevelLoad - info.lastSpottedTime : float.MaxValue;
+            return Util.ClassifyFog(unit is Missile, ownOrNeutral, unit is Building,
+                       info != null, age, ContactLiveSec, FogOfWarService.IsIdentified(unit))
+                   == Util.FogVisibility.Visible;
+        }
+
+        /// <summary>Есть ли ОТМЕТКА по чужому юниту (радар-ONLY включительно):
+        /// подвижная техника — живой контакт, здания — любой контакт. По этому
+        /// гейту ПКМ-пик цели (атаковать безымянную точку — канон SupCom) и
+        /// безымянные блипы; полная видимость — IsVisibleToCommander.</summary>
+        public static bool IsRadarContact(Unit unit, FactionHQ hq, out TrackingInfo info)
+        {
+            info = null;
+            if (unit == null || hq == null)
+                return false;
+            if (unit is Missile || unit.NetworkHQ == null || unit.NetworkHQ == hq)
+                return true;
             info = hq.GetTrackingData(unit.persistentID);
-            return info != null &&
-                   Time.timeSinceLevelLoad - info.lastSpottedTime <= Settings.StaleContactSec;
+            if (info == null)
+                return false;
+            return unit is Building || IsLiveContact(info);
         }
 
         /// <summary>Можно осмотреть ЛКМ (инфопанель): ракеты обеих сторон — всегда,
@@ -289,7 +323,7 @@ namespace SupremeNuclear
         public static bool IsInspectableForeign(Unit unit, FactionHQ localHq) =>
             unit != null && localHq != null &&
             (unit is Missile || (unit.NetworkHQ != null && unit.NetworkHQ != localHq)) &&
-            TryGetContact(unit, localHq, out _);
+            IsVisibleToCommander(unit, localHq, out _);
 
         /// <summary>Якорь чужой цели там, где рисуется её иконка: живой контакт —
         /// актуальная позиция юнита, протухший — последняя известная разведкой
@@ -441,7 +475,9 @@ namespace SupremeNuclear
             new Dictionary<Airbase, Building>();
         private static float _nextAirbaseScan;
 
-        /// <summary>Аэродром под разведкой (свежий контакт по его зданию)?</summary>
+        /// <summary>Аэродром под разведкой: контакт по зданию И сигнатура ОПОЗНАНА
+        /// оптикой (радар-ONLY детект чужой базы держит ромб жёлтым «неизвестно»,
+        /// канон SupCom; туман войны v0.147).</summary>
         public static bool IsAirbaseScouted(Airbase airbase, FactionHQ hq)
         {
             if (airbase == null || hq == null)
@@ -456,8 +492,8 @@ namespace SupremeNuclear
             }
             if (!_airbaseBuildings.TryGetValue(airbase, out Building building) || building == null)
                 return false;
-            TrackingInfo info = hq.GetTrackingData(building.persistentID);
-            return info != null && Time.timeSinceLevelLoad - info.lastSpottedTime <= Settings.StaleContactSec;
+            return hq.GetTrackingData(building.persistentID) != null &&
+                   FogOfWarService.IsIdentified(building);
         }
 
 

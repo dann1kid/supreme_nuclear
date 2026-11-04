@@ -1382,10 +1382,12 @@ namespace SupremeNuclear
 
         /// <summary>Враг под курсором — экранный пик. КРИТИЧНО: вражеская иконка на
         /// стратегическом слое рисуется по позиции КОНТАКТА РАЗВЕДКИ (CommanderHud.
-        /// DrawHostileIcons), которая у движущейся цели отстаёт от фактической на
-        /// десятки метров — пик обязан принимать ОБЕ точки, иначе клик по видимой
-        /// красной иконке промахивается и превращается в приказ движения. Радиус —
-        /// max(базовых px, половины видимого корпуса); из кандидатов ближайший к курсору.</summary>
+        /// DrawHostileIcons), и пик берёт ТОЛЬКО её — живая позиция невидимого врага
+        /// не «прощупывается» ПКМ (утечка тумана войны). Гейт — «есть отметка»
+        /// (GameApi.IsRadarContact, опознание НЕ нужно — атаковать безымянную
+        /// радар-точку можно, канон SupCom): подвижные — живой контакт, здания —
+        /// любой. Радиус — max(базовых px, половины видимого корпуса); из
+        /// кандидатов ближайший к курсору.</summary>
         private Unit TryPickEnemyAt(FactionHQ localHq, float radiusPx = 0f)
         {
             if (radiusPx <= 0f)
@@ -1402,25 +1404,19 @@ namespace SupremeNuclear
                     continue;
                 if (!IsAttackable(unit))
                     continue;
-                Vector3 sp = cam.WorldToScreenPoint(GameApi.UnitAnchorWorld(unit));
+                // Ракеты видны обеим сторонам без разведки — якорь живой позиции;
+                // прочие враги — только якорь контакта (туман войны).
+                Vector3 anchor;
+                if (unit is Missile)
+                    anchor = GameApi.UnitAnchorWorld(unit);
+                else if (GameApi.IsRadarContact(unit, localHq, out TrackingInfo info))
+                    anchor = GameApi.ContactAnchorWorld(unit, info);
+                else
+                    continue; // отметки нет — пика нет
+                Vector3 sp = cam.WorldToScreenPoint(anchor);
                 if (sp.z <= 0f)
                     continue;
                 float d = Vector2.Distance(new Vector2(sp.x, sp.y), mouse);
-                // Позиция контакта — там, где игрок ВИДИТ цель (иконка); якорь тот же,
-                // что у отрисовки: трекинг-точка + 0.7×радиуса вверх.
-                TrackingInfo info = localHq.GetTrackingData(unit.persistentID);
-                if (info != null)
-                {
-                    Vector3 contact = info.GetPosition().ToLocalPosition() +
-                                      Vector3.up * (unit.maxRadius * 0.7f);
-                    Vector3 cp = cam.WorldToScreenPoint(contact);
-                    if (cp.z > 0f)
-                    {
-                        float dc = Vector2.Distance(new Vector2(cp.x, cp.y), mouse);
-                        if (dc < d)
-                            d = dc;
-                    }
-                }
                 // Ракеты — мелкие и быстрые (перехват): радиус притягивания шире,
                 // чтобы навестись на летящую цель было реально.
                 float limit = unit is Missile ? radiusPx * 2.5f

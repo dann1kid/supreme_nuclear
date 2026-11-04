@@ -876,27 +876,55 @@ step = "arrows";
             return _ctxFactories;
         }
 
-        /// <summary>Плитка «переход на тир» в каталоге фабрики (канон SupCom,
-        /// v0.136): ПЕРВОЙ в списке СВОЕГО тира (и в «Все»); клик ставит апгрейд
-        /// ГОЛОВОЙ очереди — он занимает производство. Цепочка стакается (v0.137):
-        /// цель — от «пендящего» тира (в очереди T1→T2 → плитка «T2→T3»);
-        /// исчерпана (T3 в очереди) — плитки нет, состояние живёт в очереди.</summary>
+        /// <summary>Плитки «переход на тир» в каталоге фабрики (канон SupCom,
+        /// v0.136): ПЕРВОЙ в списке СВОЕГО тира; клик ставит апгрейд в очередь.
+        /// HQ-модель (канон FAF, юзер 2026-11-03): T1-фабрика БЕЗ ветки видит ДВЕ
+        /// плитки — «→T2» (дешёвая, 60%: полный ростер пока жив HQ тира) и
+        /// «→T2 ШТАБ» (100%: независимый ростер, держит дешёвые фракции). Ветка
+        /// ВЫБРАНА (тир ≥2 или апгрейд в очереди) — плитка ТОЛЬКО её ветки.
+        /// Цепочка стакается: цель — от «пендящего» тира.</summary>
         private void UpgradeOrderTile(object factory)
         {
             if (factory == null)
                 return;
             int from = ProductionTasks.PendingTierOf(factory);
-            if (from >= 3 || !FactoryTierService.NextCost(from, out float mass, out _, out _))
+            if (from >= 3)
+                return;
+            bool branchChosen = FactoryTierService.TierOf(factory) >= 2 ||
+                                ProductionTasks.UpgradeItemOf(factory) != null;
+            bool hq = FactoryTierService.BranchIsHq(factory);
+            if (!FactoryTierService.NextCost(from, hq, out float mass, out _, out _))
                 return;
             if (_prodTier > 0 && _prodTier != from)
                 return; // плитка в списке СВОЕГО тира: T1-список → «→T2»
-            Tile(_strip1Content, new TileSpec
+            void TileUp(bool asHq, float price)
             {
-                Caption = "T" + from + "→T" + (from + 1), // цифры/стрелка — не переводится
-                TypeBadge = Loc.Tr("АПГРЕЙД"),
-                Badge = mass.ToString("F0"),
-                OnLeft = () => ProductionTasks.EnqueueUpgrade(factory),
-            });
+                Tile(_strip1Content, new TileSpec
+                {
+                    Caption = "T" + from + "→T" + (from + 1) + // цифры/стрелка — не переводится
+                        (asHq ? " " + Loc.Tr("ШТАБ") : ""),
+                    TypeBadge = Loc.Tr("АПГРЕЙД"),
+                    Badge = price.ToString("F0"),
+                    OnLeft = () => ProductionTasks.EnqueueUpgrade(factory, asHq),
+                });
+            }
+            if (branchChosen)
+            {
+                // Дешёвая ветка обезглавлена (HQ тира умер) — плитки нет вовсе:
+                // продолжение невозможно, пока фракция не построит новый HQ.
+                if (hq || FactoryTierService.CheapUpgradeAvailable(factory, from + 1))
+                    TileUp(hq, mass);
+            }
+            else
+            {
+                // Выбор ветки: дешёвая — ТОЛЬКО при живом HQ целевого тира своего
+                // типа фабрики (канон: «дешёвая после наличия HQ нужной фабрики»);
+                // нет HQ — одна плитка ШТАБ (полная).
+                if (FactoryTierService.CheapUpgradeAvailable(factory, from + 1))
+                    TileUp(false, mass);
+                if (FactoryTierService.NextCost(from, true, out float hqMass, out _, out _))
+                    TileUp(true, hqMass);
+            }
         }
 
         /// <summary>Позиции апгрейда в строке очереди (по плитке на звено цепочки,
@@ -913,9 +941,12 @@ step = "arrows";
                 ProductionTasks.QueueItem item = up;
                 Tile(_strip2Content, new TileSpec
                 {
-                    Caption = "T" + (item.ToTier - 1) + "→T" + item.ToTier,
+                    Caption = "T" + (item.ToTier - 1) + "→T" + item.ToTier +
+                        (item.EnergyStalled ? " ⚡" : ""),
                     TypeBadge = Loc.Tr("АПГРЕЙД"),
                     Progress = item.Progress01,
+                    BarColor = item.EnergyStalled
+                        ? new Color(1f, 0.75f, 0.2f, 0.95f) : (Color?)null,
                     OnRight = () => ProductionTasks.Cancel(item),
                 });
             }
@@ -1397,10 +1428,9 @@ step = "arrows";
             }
 
             GameApi.TryGetLocalHQ(out FactionHQ hq);
-            float age = float.MaxValue;
-            if (GameApi.TryGetContact(u, hq, out TrackingInfo info) && info != null)
-                age = Time.timeSinceLevelLoad - info.lastSpottedTime;
-            bool live = age < 4f; // тот же порог «живого» контакта, что у иконок
+            GameApi.IsVisibleToCommander(u, hq, out TrackingInfo info);
+            float age = info != null ? Time.timeSinceLevelLoad - info.lastSpottedTime : float.MaxValue;
+            bool live = GameApi.IsLiveContact(info); // тот же порог, что у иконок тумана войны
 
             int hash = 17 * 31 + u.GetInstanceID();
             hash = hash * 31 + (live ? 1 : 0);
@@ -2238,8 +2268,13 @@ step = "arrows";
             {
                 foreach (object f in _ctxFactories)
                     _ctxTier = Mathf.Min(_ctxTier, ProductionTasks.PendingTierOf(f));
-                if (airbase != null)
-                    _ctxTier = Mathf.Min(_ctxTier, ProductionTasks.PendingTierOf(airbase));
+                // Контекст аэродрома (вышка/авианосец): фабрики РАЗДЕЛЕНЫ — тир
+                // контекста = минимум по ЕГО ангарам (аэродром больше не фабрика).
+                if (airbase != null && airbase.hangars != null)
+                    foreach (Hangar hangar in airbase.hangars)
+                        if (hangar != null)
+                            _ctxTier = Mathf.Min(_ctxTier,
+                                ProductionTasks.PendingTierOf(hangar));
             }
             if (_prodTier > _ctxTier)
                 _prodTier = 0; // фильтр-просмотр выше нового контекста — в «Все»
@@ -2748,6 +2783,7 @@ step = "arrows";
             var totals = new Dictionary<UnitDefinition, int>();
             var activeCounts = new Dictionary<UnitDefinition, int>();
             var topProgress = new Dictionary<UnitDefinition, float>();
+            var stalled = new Dictionary<UnitDefinition, bool>();
             foreach (ProductionTasks.QueueItem item in ProductionTasks.All)
             {
                 if (item.UnitDef == null)
@@ -2767,6 +2803,8 @@ step = "arrows";
                     order.Add(item.UnitDef);
                 }
                 totals[item.UnitDef]++;
+                if (item.EnergyStalled)
+                    stalled[item.UnitDef] = true;
                 if (item.PaidMass > 0f)
                 {
                     activeCounts[item.UnitDef] = activeCounts.TryGetValue(item.UnitDef, out int n)
@@ -2783,7 +2821,8 @@ step = "arrows";
                 Tile(_strip2Content, new TileSpec
                 {
                     Icon = IconOf(d),
-                    Caption = Catalog.ShortLabel(d.code, d.unitName),
+                    Caption = Catalog.ShortLabel(d.code, d.unitName) +
+                        (stalled.TryGetValue(def, out bool st) && st ? " ⚡" : ""),
                     TypeBadge = TypeBadgeOf(d),
                     Badge = "×" + totals[def] + (act > 0 ? " ▲" + act : ""),
                     Progress = act > 0 && topProgress.TryGetValue(def, out float p) ? p : (float?)null,
@@ -2832,6 +2871,20 @@ step = "arrows";
             ClearChildren(_strip2Content);
             if (factory == null)
                 return;
+            // Зонд «общая очередь апгрейда» (плейтест 2026-11-03): что реально
+            // смэтчилось фабрике при одиночном выделении — по этим строкам виден
+            // чужой ключ, если фильтр где-то пропускает.
+            {
+                int mine = 0, upg = 0;
+                foreach (ProductionTasks.QueueItem q in ProductionTasks.All)
+                    if (q.Factory == factory)
+                    {
+                        mine++;
+                        if (q.IsUpgrade) upg++;
+                    }
+                Log.Info("QueueUI: " + factory.GetType().Name + "#" + factory.GetHashCode() +
+                         " — позиций " + mine + " (апгрейдов " + upg + ")");
+            }
             // Стак подряд идущих одинаковых позиций. НАЛИВАЕМЫЕ позиции (Paid > 0)
             // при параллельной оплате видны КАЖДАЯ со своей полосой (SupCom-очередь),
             // ждущий хвост — одной плиткой ×N. Раньше полоса была только у головы
@@ -2852,10 +2905,13 @@ step = "arrows";
                     Tile(_strip2Content, new TileSpec
                     {
                         Icon = IconOf(runDef),
-                        Caption = Catalog.ShortLabel(runDef.code, runDef.unitName),
+                        Caption = Catalog.ShortLabel(runDef.code, runDef.unitName) +
+                            (active.EnergyStalled ? " ⚡" : ""),
                         TypeBadge = TypeBadgeOf(runDef),
                         TierBadge = "T" + UnitRoster.TierOf(runDef),
                         Progress = active.Progress01,
+                        BarColor = active.EnergyStalled
+                            ? new Color(1f, 0.75f, 0.2f, 0.95f) : (Color?)null,
                         OnLeft = () => ProductionTasks.InsertAfter(active, RtsInput.Shift ? 5 : 1),
                         OnRight = () => ProductionTasks.Cancel(active),
                         Def = runDef,
@@ -2891,9 +2947,12 @@ step = "arrows";
                     ProductionTasks.QueueItem up = item;
                     Tile(_strip2Content, new TileSpec
                     {
-                        Caption = "T" + (up.ToTier - 1) + "→T" + up.ToTier,
+                        Caption = "T" + (up.ToTier - 1) + "→T" + up.ToTier +
+                            (up.EnergyStalled ? " ⚡" : ""),
                         TypeBadge = Loc.Tr("АПГРЕЙД"),
                         Progress = up.Progress01,
+                        BarColor = up.EnergyStalled
+                            ? new Color(1f, 0.75f, 0.2f, 0.95f) : (Color?)null,
                         OnRight = () => ProductionTasks.Cancel(up),
                     });
                     continue;
@@ -3150,7 +3209,7 @@ step = "arrows";
                 _contextTitle.text = hangars.Count == 1
                     ? Loc.Tr("Ангар — авиация (клик: в очередь)") + tierName
                     : Loc.F("Ангары ×{0} — клик: +1 каждому умеющему", hangars.Count) + tierName;
-                UpgradeOrderTile(hangars[0]); // «→T2/→T3» — первой плиткой (тир аэродрома)
+                UpgradeOrderTile(hangars[0]); // «→T2/→T3» — своей веткой (фабрики разделены)
                 var defs = new List<AircraftDefinition>();
                 foreach (Hangar hangar in hangars)
                     foreach (AircraftDefinition a in hangar.GetAvailableAircraft())
@@ -3214,7 +3273,7 @@ step = "arrows";
                 }
                 return; // нижняя строка — очередь верфи (RefreshTabs)
             }
-            if (hasEngineer && Encyclopedia.i != null && Encyclopedia.i.buildings != null)
+            if (hasEngineer && BuildingPool.Ready)
             {
                 _contextTitle.text = Loc.Tr("Стройка (инженер): здание → ЛКМ по земле") + tierName;
                 // ВПП — особый элемент: не здание, по готовности создаёт НОВЫЙ
@@ -3245,22 +3304,11 @@ step = "arrows";
                             BuildTasks.PendingDock = true;
                         },
                     });
-                var defs = new List<BuildingDefinition>();
-                foreach (BuildingDefinition def in Encyclopedia.i.buildings)
-                    if (def != null && !EconomyService.IsReplacedOriginal(def) &&
-                        !UnitRoster.IsHidden(def))
-                        defs.Add(def); // оригиналы-доноры заменены клонами с честными именами
-                // Тир-гейт строек — ЯВНЫЕ тиры ростера зданий (§2.13) ≤ тиру ЛУЧШЕГО
-                // инженера выделения (_ctxTier); эко-клоны без записи — тир 1.
+                // Каталог стройки = ТОЛЬКО ПУЛ (белый список, v0.148): мусор и
+                // крупные нативные здания в меню не попадают вовсе; тиры/цены/
+                // имена/доноры — Roster/buildings.json (правки без пересборки).
+                var defs = new List<BuildingDefinition>(BuildingPool.All);
                 Catalog.TierFilterByTier(defs, UnitRoster.BuildingTierOf, _prodTier, _ctxTier);
-                // Эконом-постройки ВНЕ общего порядка: базовая экономика доступна
-                // в ЛЮБОМ тире — как ВПП/верфь (канон SupCom: мекс/ген — фундамент).
-                if (EconomyService.GeneratorDefinition != null)
-                    defs.Insert(0, EconomyService.GeneratorDefinition);
-                if (EconomyService.HydroDefinition != null)
-                    defs.Insert(0, EconomyService.HydroDefinition);
-                if (EconomyService.ExtractorDefinition != null)
-                    defs.Insert(0, EconomyService.ExtractorDefinition);
                 foreach (BuildingDefinition def in defs)
                 {
                     BuildingDefinition d = def;
@@ -3316,7 +3364,12 @@ step = "arrows";
                 _contextTitle.text = (airbase.AttachedAirbase
                     ? Loc.Tr("Авианосец — авиация (клик: в очередь; РЕЗ — выкат)")
                     : Loc.Tr("Аэродром — авиация (клик: в очередь; РЕЗ — выкат)")) + tierName;
-                UpgradeOrderTile(airbase); // «→T2/→T3» — первой плиткой каталога базы
+                // Плитки апгрейда — ПЕР-АНГАРНЫЕ (фабрики разделены): по первой
+                // плитке каждого ангара базы (у каждого — свой тир/ветка).
+                if (airbase.hangars != null)
+                    foreach (Hangar hangar in airbase.hangars)
+                        if (hangar != null)
+                            UpgradeOrderTile(hangar);
                 // Резерв ангаров (вернувшиеся «на базу» борта): выкат бесплатный,
                 // плитки ПЕРЕД каталогом, бейдж РЕЗ + счётчик.
                 var reserve = AirbaseReserve.Of(airbase);

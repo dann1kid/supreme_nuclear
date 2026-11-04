@@ -60,10 +60,17 @@ namespace SupremeNuclear
                 .ToLocalPosition() + UnityEngine.Vector3.up * 10000f;
             bool hit = UnityEngine.Physics.Raycast(probe, UnityEngine.Vector3.down,
                 out UnityEngine.RaycastHit rh, 20000f, PhysicsLayers.StaticsMask);
+            // ВСЁ в ГЛОБАЛЬНЫХ координатах (world − origin.position): мировые
+            // числа после первого OriginShift (стартовая камера карты уводит
+            // origin на (0,−2496,24576)) отличаются от высот hm на ровно этот
+            // сдвиг — «баг высот при перезагрузке» 2026-11-03 был ЛОЖНОЙ
+            // ТРЕВОГОЙ именно из-за печати мировых Y рядом с глобальными.
+            UnityEngine.Vector3 op = Datum.originPosition;
             Log.Info($"MapGen: карта включена — коллайдеров {colliders.Length}, bounds " +
-                     $"{(any ? bounds.size.x.ToString("F0") + "x" + bounds.size.z.ToString("F0") + "м, y " + bounds.min.y.ToString("F0") + ".." + bounds.max.y.ToString("F0") : "нет")}, " +
-                     $"проба (8000,0): {(hit ? "земля " + rh.point.y.ToString("F0") + " м" : "МИМО")}, " +
-                     $"origin {Datum.originPosition.x.ToString("F0")},{Datum.originPosition.z.ToString("F0")}");
+                     $"{(any ? bounds.size.x.ToString("F0") + "x" + bounds.size.z.ToString("F0") + "м, y(глоб) " + (bounds.min.y - op.y).ToString("F0") + ".." + (bounds.max.y - op.y).ToString("F0") : "нет")}, " +
+                     $"проба (8000,0): {(hit ? "земля(глоб) " + (rh.point.y - op.y).ToString("F0") + " м" : "МИМО")}, " +
+                     $"origin {op.x.ToString("F0")},{op.y.ToString("F0")},{op.z.ToString("F0")}, " +
+                     $"root карты {mapSettings.transform.position.ToString("F0")}");
             PositionHqAtBases();
         }
 

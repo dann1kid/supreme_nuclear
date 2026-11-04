@@ -41,7 +41,11 @@ namespace SupremeNuclear
         public static float IconMinPx = 6f;             // мельче этого видимого размера — рисуем иконку (если IconsAlwaysOn=false)
         public static float IconSizePx = 18f;           // базовый размер иконки при 1440p
         public static int IconMaxUnits = 500;
-        public static float StaleContactSec = 30f;      // сколько секунд показывать врага без контакта
+
+        // Туман войны (DESIGN §2.14): бинарная видимость по разведке (канон SupCom)
+        public static bool FogOfWar = true;    // скрывать 3D-модели неразведанных врагов
+        public static bool FogDimming = true;  // затемнять местность/миникарту вне обзора сенсоров
+        public static float FogDimAlpha = 0.55f; // сила затемнения, 0..1
         public static float SelectionRingMinPx = 12f;   // минимальный радиус кольца выделения, px
         public static float RouteRibbonWidthM = 40f;
         public static bool RouteUseMesh = true;     // ленты мировым мешом (порт command_graph_renderer FA: UV вдоль пути, текстуры, анимация) — фолбэк IMGUI
@@ -255,8 +259,13 @@ namespace SupremeNuclear
             RouteRibbonWidthM = config.Bind("Routes", "RouteLegWidthM", 40f, Loc.Tr("Ширина ленты маршрута на земле, м")).Value;
             RouteSampleStepM = config.Bind("Routes", "RouteSampleStepM", 200f, Loc.Tr("Шаг сэмплирования рельефа и сегментов Эрмит-кривых ленты маршрута, м")).Value;
             RouteGroupWidthMax = config.Bind("Routes", "RouteGroupWidthMax", 3f, Loc.Tr("Максимальная толщина групповой ленты маршрута, × от одиночной (растёт как корень из числа юнитов приказа)")).Value;
-            StaleContactSec = config.Bind("Icons", "StaleContactSec", 30f,
-                Loc.Tr("Сколько секунд показывать вражеский контакт без обновления разведки, с")).Value;
+            FogOfWar = config.Bind("Icons", "FogOfWar", true,
+                Loc.Tr("Туман войны: скрывать 3D-модели неразведанных врагов")).Value;
+            FogDimming = config.Bind("Icons", "FogDimming", true,
+                Loc.Tr("Туман войны: затемнять местность и миникарту вне обзора сенсоров")).Value;
+            FogDimAlpha = config.Bind("Icons", "FogDimAlpha", 0.55f,
+                new ConfigDescription(Loc.Tr("Сила затемнения тумана войны, 0..1"),
+                    new AcceptableValueRange<float>(0.15f, 0.85f))).Value;
 
             EconomyEnabled = config.Bind("Economy", "Enabled", true, Loc.Tr("Включить экономику v1 (месторождения + экстракторы)")).Value;
             EconomyProfile = config.Bind("Economy", "Profile", "default",

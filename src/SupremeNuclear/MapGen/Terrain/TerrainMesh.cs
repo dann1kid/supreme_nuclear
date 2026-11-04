@@ -21,7 +21,7 @@ namespace SupremeNuclear
         /// ванильного террейна (uv0 = мир/uvTileM, шейдер Field тайлит деталь
         /// сам — как на родных картах). UV2 всегда 0..1 (макро-маска).</param>
         public static void Build(Transform parent, Heightmap hm, Material material, float uvTileM,
-            System.Func<float, Color> vertexColor = null)
+            System.Func<float, float, float, Color> vertexColor = null)
         {
             float tile = Mathf.Max(1f, uvTileM);
             int cells = Mathf.Max(1, hm.W / ChunksPerSide);
@@ -43,7 +43,8 @@ namespace SupremeNuclear
         }
 
         private static void BuildChunk(Transform parent, Heightmap hm, Material material,
-            float uvTileM, System.Func<float, Color> vertexColor, int i0, int i1, int j0, int j1, int ci, int cj)
+            float uvTileM, System.Func<float, float, float, Color> vertexColor,
+            int i0, int i1, int j0, int j1, int ci, int cj)
         {
             int w = i1 - i0, h = j1 - j0;
             float half = hm.W * hm.Step * 0.5f;
@@ -66,7 +67,7 @@ namespace SupremeNuclear
                     uvs[v] = new Vector3((x + half) / uvTileM, (z + half) / uvTileM, 0f);
                     uv2s[v] = new Vector2((x + half) / (half * 2f), (z + half) / (half * 2f));
                     if (colors != null)
-                        colors[v] = vertexColor(verts[v].y);
+                        colors[v] = vertexColor(x, z, verts[v].y);
                 }
 
             int t = 0;

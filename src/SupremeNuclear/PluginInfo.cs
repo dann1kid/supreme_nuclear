@@ -4,6 +4,6 @@ namespace SupremeNuclear
     {
         public const string Guid = "com.supremenuclear.rts";
         public const string Name = "Supreme Nuclear (RTS)";
-        public const string Version = "0.143.10";
+        public const string Version = "0.148.0";
     }
 }

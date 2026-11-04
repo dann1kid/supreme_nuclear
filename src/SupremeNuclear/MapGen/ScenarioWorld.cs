@@ -71,17 +71,30 @@ namespace SupremeNuclear
                     bases = ScenarioLayout.Bases(min, max, t, rng, p => hm.StampableOk(p.x, p.y));
             }
 
-            List<ScenarioLayout.Deposit> mass = ScenarioLayout.Deposits(
-                min, max, t, rng, p => hm.SiteOk(p.x, p.y), bases, p => hm.StampableOk(p.x, p.y));
+            // Спавн-мексы — ПЕРВЫМИ (random-пары их видят в spacing), симметрия —
+            // образами карты (не точечным зеркалом: оно на X-зеркальном рельефе
+            // рвало симметрию раскладки, плейтест 2026-11-03).
+            List<ScenarioLayout.Deposit> mass = ScenarioLayout.SpawnMexes(
+                t, rng, min, max, bases, p => hm.SiteOk(p.x, p.y),
+                p => hm.StampableOk(p.x, p.y), t.terrain.symmetry);
+            List<ScenarioLayout.Deposit> extra = ScenarioLayout.Deposits(
+                min, max, t, rng, p => hm.SiteOk(p.x, p.y), bases,
+                p => hm.StampableOk(p.x, p.y), t.terrain.symmetry, mass);
+            mass.AddRange(extra);
             if (mass.Count == 0)
+            {
                 mass = ScenarioLayout.Deposits(
-                    min, max, t, rng, p => hm.StampableOk(p.x, p.y), bases);
+                    min, max, t, rng, p => hm.StampableOk(p.x, p.y), bases,
+                    symmetry: t.terrain.symmetry);
+            }
 
             List<ScenarioLayout.Deposit> coal = ScenarioLayout.CoalSites(
-                min, max, t, rng, p => hm.SiteOk(p.x, p.y), mass, bases, p => hm.StampableOk(p.x, p.y));
+                min, max, t, rng, p => hm.SiteOk(p.x, p.y), mass, bases,
+                p => hm.StampableOk(p.x, p.y), t.terrain.symmetry);
             if (coal.Count == 0)
                 coal = ScenarioLayout.CoalSites(
-                    min, max, t, rng, p => hm.StampableOk(p.x, p.y), mass, bases);
+                    min, max, t, rng, p => hm.StampableOk(p.x, p.y), mass, bases,
+                    symmetry: t.terrain.symmetry);
 
             // Штампы: базы — прямоугольник под полосу+старт-линию+депо (обе
             // стороны зеркала), точки — круг. Кромки мягкие (см. Heightmap.StampPad).

@@ -39,18 +39,17 @@ namespace SupremeNuclear
             public float UvTileM;
         }
 
-        /// <summary>Материал рельефа и UV-канон нашего меша. Сток с «тайловым»
-        /// UV0 (uv0max &gt; 1.5, как у ванили): клон БЕЗ tiling (шейдер читает
-        /// UV как есть), наш меш получает uv0 = мир/период — шейдер работает
-        /// ровно как на родной карте. Сток с UV 0..1 (семпл по миру): меш 0..1 +
-        /// страховочный tiling клона. Фолбэк — URP Lit + albedo (меш 0..1).
-        /// Маска зон подменяется нашей, только если у ванильного чанка есть
-        /// второй UV-канал (макро-маска не обязана жить в тайл-UV0).</summary>
+        /// <summary>Материал рельефа и UV-канон нашего меша. Основной (юзер-канон
+        /// 2026-11-03 «текстуры по карте высот») — ГИБРИД: наш albedo (ZoneColor:
+        /// высоты/скалы/пляж/снег/дно) на всю карту + ванильная нормал-деталь
+        /// field_n тайлом 1 м (UV меша — мировые метры). Field-клон стока убран по
+        /// итогам зонда 2026-11-03: его «голый» вид — равномерное зелёное поле,
+        /// зон-каналов нет и у ванили (TexCoord0/Color её меша ПУСТЫ, _Colormask —
+        /// серая ±10% модуляция, кейвордов нет). Фолбэк — URP Lit + albedo.</summary>
         public static Plan ResolvePlan(Texture2D albedo, Texture2D colorMask,
             float sizeM, float tileM)
         {
-            // Разведка: доступен ли Complex Lit (detail-слой albedo) и какие
-            // URP-шейдеры вообще живут в памяти билда (стрipped-проверка).
+            // Разведка: какие URP-шейдеры живут в памяти билда (stripped-проверка).
             try
             {
                 var sb = new System.Text.StringBuilder();
@@ -64,63 +63,61 @@ namespace SupremeNuclear
                 Log.Warn("MapGen: перечисление шейдеров не удалось — " + e.Message);
             }
             ChunkInfo chunk = FindStockChunk();
+            Texture detailNormal = null;
             if (chunk != null)
             {
                 Dump(chunk.Mat, 1);
-                // v4.20 (разведка 2026-11-03): Complex Lit ВЫРЕЗАН из билда,
-                // палитра стока = 1 материал (field) — двухслойный albedo и
-                // разные покрытия недоступны. Финальная схема — ГИБРИД: наш
-                // albedo (зоны + ПЯТНИСТАЯ суб-текстура, юзер-канон «как
-                // Neroxis») + ванильная нормал-деталь field_n тайлом 1 м.
-                Texture detailNormal = chunk.Mat.HasProperty("_Normal")
+                detailNormal = chunk.Mat.HasProperty("_Normal")
                     ? chunk.Mat.GetTexture("_Normal")
                     : null;
-                if (detailNormal != null)
-                {
-                    Material hybrid = TerrainMesh.MakeUrpMaterial(albedo);
-                    hybrid.name = "SN-TerrainHybrid";
-                    hybrid.SetTextureScale("_BaseMap", new Vector2(1f / sizeM, 1f / sizeM));
-                    hybrid.SetTexture("_BumpMap", detailNormal);
-                    hybrid.SetTextureScale("_BumpMap", Vector2.one); // тайл 1 м (UV меша — метры)
-                    if (hybrid.HasProperty("_BumpScale"))
-                        hybrid.SetFloat("_BumpScale", 1f);
-                    // DETAIL-слой URP Lit (плейтест 2026-11-03 «вблизи размазано,
-                    // вид из кабины»): R-канал detail-карты модулирует albedo СВОИМ
-                    // тайлом — цепляем ванильную ЦВЕТОВУЮ фактуру field_b периодом
-                    // 1 м: микро-деталь цвета у земли, наши зоны — базой.
-                    Texture detailAlbedo = chunk.Mat.HasProperty("_Basecolor")
-                        ? chunk.Mat.GetTexture("_Basecolor")
-                        : null;
-                    if (detailAlbedo != null && hybrid.HasProperty("_DetailMap"))
-                    {
-                        hybrid.SetTexture("_DetailMap", detailAlbedo);
-                        hybrid.SetTextureScale("_DetailMap", Vector2.one); // тайл 1 м
-                        if (hybrid.HasProperty("_DetailAlbedoMapScale"))
-                            hybrid.SetFloat("_DetailAlbedoMapScale", 1f);
-                        Log.Info("MapGen: Detail-слой жив: " + detailAlbedo.name + " (1 м)");
-                    }
-                    else
-                    {
-                        Log.Info("MapGen: Detail-слой недоступен (" +
-                                 (detailAlbedo != null ? "нет свойства _DetailMap" : "нет field_b") +
-                                 ") — только нормал-деталь");
-                    }
-                    Log.Info("MapGen: материал рельефа — ГИБРИД: albedo " + AlbedoSize(albedo) +
-                             " + нормал-деталь " + detailNormal.name + " (1 м)");
-                    return new Plan { Mat = hybrid, UvTileM = 1f };
-                }
-                Material variant = new Material(chunk.Mat) { name = "SN-TerrainStock" };
-                if (albedo != null && variant.HasProperty("_Colormask"))
-                {
-                    variant.SetTexture("_Colormask", albedo);
-                    variant.SetTextureScale("_Colormask", new Vector2(1f / sizeM, 1f / sizeM));
-                }
-                Log.Info("MapGen: нормаль стока недоступна — Field-клон с нашей маской");
-                return new Plan { Mat = variant, UvTileM = 1f };
             }
-            Log.Info("MapGen: сток-материал недоступен — URP Lit + albedo " +
+            if (detailNormal != null)
+            {
+                // Сплат (канон SupCom/Neroxis, юзер-канон 2026-11-03): тайловая
+                // деталь по маске видов поверх макро-зон — потолок «м/тексель»
+                // снимается. Требует бандл со своим шейдером (splatshader/),
+                // нет бандла — гибрид.
+                Material splat = TerrainSplat.TryCreateMaterial(albedo, sizeM, detailNormal);
+                if (splat != null)
+                    return new Plan { Mat = splat, UvTileM = sizeM };
+                return new Plan
+                {
+                    Mat = MakeHybrid(albedo, sizeM, chunk.Mat, detailNormal),
+                    UvTileM = 1f,
+                };
+            }
+            Log.Info("MapGen: нормал-деталь стока недоступна — URP Lit + albedo " +
                      AlbedoSize(albedo));
             return new Plan { Mat = TerrainMesh.MakeUrpMaterial(albedo), UvTileM = sizeM };
+        }
+
+        /// <summary>Гибрид «текстуры по карте высот»: albedo-зоны на всю карту
+        /// (scale 1/sizeM) + ванильная нормал-деталь 1 м (+ detail-слой albedo,
+        /// если свойство живо в этом билде).</summary>
+        private static Material MakeHybrid(Texture2D albedo, float sizeM, Material stock,
+            Texture detailNormal)
+        {
+            Material hybrid = TerrainMesh.MakeUrpMaterial(albedo);
+            hybrid.name = "SN-TerrainHybrid";
+            hybrid.SetTextureScale("_BaseMap", new Vector2(1f / sizeM, 1f / sizeM));
+            hybrid.SetTexture("_BumpMap", detailNormal);
+            hybrid.SetTextureScale("_BumpMap", Vector2.one); // тайл 1 м (UV меша — метры)
+            if (hybrid.HasProperty("_BumpScale"))
+                hybrid.SetFloat("_BumpScale", 1f);
+            Texture detailAlbedo = stock.HasProperty("_Basecolor")
+                ? stock.GetTexture("_Basecolor")
+                : null;
+            if (detailAlbedo != null && hybrid.HasProperty("_DetailMap"))
+            {
+                hybrid.SetTexture("_DetailMap", detailAlbedo);
+                hybrid.SetTextureScale("_DetailMap", Vector2.one); // тайл 1 м
+                if (hybrid.HasProperty("_DetailAlbedoMapScale"))
+                    hybrid.SetFloat("_DetailAlbedoMapScale", 1f);
+                Log.Info("MapGen: Detail-слой жив: " + detailAlbedo.name + " (1 м)");
+            }
+            Log.Info("MapGen: материал рельефа — ГИБРИД «по карте высот»: albedo " +
+                     AlbedoSize(albedo) + " + нормал-деталь " + detailNormal.name + " (1 м)");
+            return hybrid;
         }
 
         private static string AlbedoSize(Texture2D albedo) =>
@@ -253,9 +250,17 @@ namespace SupremeNuclear
                 var sb = new System.Text.StringBuilder();
                 foreach (UnityEngine.Rendering.VertexAttributeDescriptor attr in
                          bestMesh.GetVertexAttributes())
-                    sb.Append(attr.attribute).Append(':')
-                      .Append(attr.format).Append(' ');
+                    sb.Append(attr.attribute).Append(":d").Append(attr.dimension)
+                      .Append('(').Append(attr.format).Append(") ");
                 Log.Info("MapGen:   атрибуты меша ванили: " + sb);
+                // Ванильные вершинные ЦВЕТА (Color:UNorm8): константа (белые) или
+                // зоны? Решает, несёт ли Field макро-цвет вершинами.
+                Color[] vcol = bestMesh.colors;
+                if (vcol != null && vcol.Length > 0)
+                    Log.Info("MapGen:   цвета вершин ванили: " + vcol.Length + " (v0 " +
+                             vcol[0] + ", v1000 " + vcol[Mathf.Min(vcol.Length - 1, 1000)] + ")");
+                else
+                    Log.Info("MapGen:   цвета вершин ванили: НЕТ");
                 // Семантика TexCoord0 (dimension 3/4 — mesh.uv его не видит):
                 // первые вершины UV против локальных позиций — масштаб/смещение.
                 var uvs4 = new System.Collections.Generic.List<Vector4>();
@@ -315,30 +320,36 @@ namespace SupremeNuclear
                              "рельеф остаётся на URP Lit + albedo");
                     return;
                 }
-                // v4.18: Field-клон с нашей маской на всю карту (меш старого
-                // фолбэка — UV 0..1, масштаб маски 1/sizeM как раз 0..1 и даёт;
-                // свежие Ctrl+G строят меш с UV-метрами — формула та же).
-                Material variant = new Material(chunk.Mat) { name = "SN-TerrainStock" };
-                Texture2D mask = _lastAlbedo != null ? _lastAlbedo : mapSettings.TerrainColorMap;
-                if (mask != null && variant.HasProperty("_Colormask"))
+                Texture detailNormal = chunk.Mat.HasProperty("_Normal")
+                    ? chunk.Mat.GetTexture("_Normal")
+                    : null;
+                if (detailNormal == null)
                 {
-                    variant.SetTexture("_Colormask", mask);
-                    variant.SetTextureScale("_Colormask",
-                        new Vector2(1f / mapSettings.MapSize.x, 1f / mapSettings.MapSize.x));
+                    Log.Info("MapGen: нормал-деталь стока недоступна в сцене игры — " +
+                             "рельеф остаётся как есть");
+                    return;
                 }
+                // v4.23 (юзер-канон «текстуры по карте высот», зонд 2026-11-03):
+                // гибрид — наш albedo-зоны + ванильная нормаль field_n. Field-клон
+                // (SN-TerrainStock) тоже подлежит замене: его «голый» вид —
+                // равномерное зелёное поле, зон-каналов нет (см. ResolvePlan).
+                Texture2D mask = _lastAlbedo != null ? _lastAlbedo : mapSettings.TerrainColorMap;
+                Material variant = MakeHybrid(mask, mapSettings.MapSize.x, chunk.Mat, detailNormal);
                 int upgraded = 0;
                 foreach (MeshRenderer r in mapSettings.GetComponentsInChildren<MeshRenderer>(true))
                 {
-                    if (r == null || r.sharedMaterial == null || r.sharedMaterial.name != "SN-Terrain")
+                    if (r == null || r.sharedMaterial == null)
+                        continue;
+                    string n = r.sharedMaterial.name;
+                    if (n != "SN-Terrain" && n != "SN-TerrainHybrid" && n != "SN-TerrainStock")
                         continue;
                     r.sharedMaterial = variant;
                     upgraded++;
                 }
                 if (upgraded > 0)
-                    Log.Info("MapGen: материал рельефа апгрейднут на Field-клон с нашей маской (" +
-                             chunk.Mat.shader.name + ") у " + upgraded + " чанков");
-                // Контрольная лампа (скрины 2026-11-03: детальная фактура Field
-                // на карте юзера не видна вовсе): что ФАКТИЧЕСКИ висит на чанках.
+                    Log.Info("MapGen: материал рельефа приведён к гибриду «по карте высот» у " +
+                             upgraded + " чанков");
+                // Контрольная лампа: что ФАКТИЧЕСКИ висит на чанках.
                 MeshRenderer probe = null;
                 foreach (MeshRenderer r in mapSettings.GetComponentsInChildren<MeshRenderer>(true))
                     if (r != null && r.sharedMaterial != null)
@@ -348,14 +359,7 @@ namespace SupremeNuclear
                     }
                 if (probe != null)
                     Log.Info("MapGen: фактический материал чанков клона — '" +
-                             probe.sharedMaterial.name + "' / " + probe.sharedMaterial.shader.name +
-                             " (маска " + (variant.HasProperty("_Colormask")
-                                 ? (variant.GetTexture("_Colormask") != null
-                                     ? variant.GetTexture("_Colormask").name + " " +
-                                       variant.GetTexture("_Colormask").width + "×" +
-                                       variant.GetTexture("_Colormask").height
-                                     : "null")
-                                 : "нет свойства") + ")");
+                             probe.sharedMaterial.name + "' / " + probe.sharedMaterial.shader.name);
             }
             catch (Exception e)
             {

@@ -15,10 +15,13 @@ namespace SupremeNuclear
     internal static class MapTextures
     {
         private const int ColorMapRes = 1024; // TerrainColorMap (CPU-подбор цвета юнитов)
-        private const int MacroRes = 1024;    // макро-поле зон для albedo (дорогие расчёты)
-        private const int AlbedoRes = 12288;  // дефолт albedo (6.7 м/тексель на 82 км;
-                                              // вблизи «так себе» при 8192 — плейтест 2026-11-03;
-                                              // ручка terrain.albedoRes, потолок 16384)
+        private const int MacroRes = 1024;    // макро-поле зон: миникарта/TerrainColor
+        private const int AlbedoMacroRes = 4096; // макро-зоны albedo: 20 м/пиксель —
+        // границы зон (пляж/скалы) у 1024 (80 м) мылили вблизи (плейтест 2026-11-03);
+        // генерация дорожает (ZoneColor × 16.7M) — юзер-канон «тяжесть пайплайна ОК»
+        private const int AlbedoRes = 16384;  // дефолт albedo (5 м/тексель на 82 км;
+        // «полосатость» 2026-11-03 была багом индексации макро-буфера, НЕ GPU —
+        // после фикса 16384² RGBA32 жив; ручка terrain.albedoRes для слабых машин)
         private const int DepthRes = 1024;    // OceanDepthmap (мелководная кромка без смазанной полосы)
         private const int MinimapRes = 1024;  // MapImage (миникарта/меню карт)
 
@@ -27,27 +30,31 @@ namespace SupremeNuclear
             TexFromPixels(RenderPixels(hm, t, ColorMapRes), ColorMapRes,
                 "SN-TerrainColor", readable: true, mips: false);
 
-        /// <summary>Albedo рельефа (фолбэк-материал меша URP Lit): дорогие зоны
-        /// (палитра/скалы/пляж/пятна fBm) считаются в макро-буфере 1024² и
-        /// билинейно апсемплятся, поверх — ЗЕРНО-шум тремя масштабами (10/130/900 м
-        /// при 8192) — без зерна неразмноженная текстура «мылила» на любом
-        /// разрешении (плейтесты 2026-11-02 ×3). Разрешение — ручка terrain.albedoRes
-        /// (слабые машины — вниз). Основной путь — сток-материал игры
-        /// (TerrainMaterial), это только фолбэк.</summary>
+        /// <summary>Albedo рельефа (основной материал — гибрид «по карте высот»):
+        /// дорогие зоны (палитра/скалы/пляж/пятна fBm) считаются в макро-буфере
+        /// 2048² и билинейно апсемплятся, поверх — ЗЕРНО-шум несколькими
+        /// масштабами — без зерна неразмноженная текстура «мылила» на любом
+        /// разрешении (плейтесты 2026-11-02 ×3). Разрешение — ручка
+        /// terrain.albedoRes (слабые машины — вниз), после сборки — GPU-компрессия
+        /// в BC (VRAM ×4 вниз, иначе 16384² RGBA32 не жить).</summary>
         public static Texture2D Albedo(Heightmap hm, ScenarioTemplate.TerrainSettings t)
         {
             int res = Mathf.Clamp(t.albedoRes <= 0 ? AlbedoRes : t.albedoRes, 1024, 16384);
-            Color32[] macro = RenderPixels(hm, t, MacroRes);
+            // Потолок текстур GPU (у части карт 8192): создание сверх него —
+            // мусор в сэмплах, «размазанная» текстура.
+            res = Mathf.Min(res, SystemInfo.maxTextureSize);
+            Color32[] macro = RenderPixels(hm, t, AlbedoMacroRes);
             var tex = new Texture2D(res, res, TextureFormat.RGBA32, true, true);
             tex.wrapMode = TextureWrapMode.Clamp;
-            tex.anisoLevel = 9; // наклонный RTS-ракурс без анизотропы мылит вдоль взгляда
+            tex.anisoLevel = 16; // наклонный RTS-ракурс без анизотропы мылит вдоль взгляда
             tex.name = "SN-TerrainAlbedo";
             var px = new Color32[res * res];
-            float scale = (float)MacroRes / res;
+            float scale = (float)AlbedoMacroRes / res;
             float size = hm.W * hm.Step;
-            // Пятна «проталин» — в буфер 4096² (параллельно): fBm не умножается
-            // на 151M пикселей albedo (главный тормоз генерации, 2026-11-03).
-            const int SpotRes = 4096;
+            // Пятна «проталин» — в буфер 8192² (параллельно): fBm не умножается
+            // на 268M пикселей albedo (главный тормоз генерации, 2026-11-03);
+            // 8192 = 10 м/пятно-пиксель — резче вблизи (юзер-канон «можно и лучше»).
+            const int SpotRes = 8192;
             var spots = new float[SpotRes * SpotRes];
             Parallel.For(0, SpotRes, sj =>
             {
@@ -67,7 +74,7 @@ namespace SupremeNuclear
             {
                 for (int i = 0; i < res; i++)
                 {
-                    Color c = SampleBilinear(macro, MacroRes, (i + 0.5f) * scale - 0.5f,
+                    Color c = SampleBilinear(macro, AlbedoMacroRes, (i + 0.5f) * scale - 0.5f,
                         (j + 0.5f) * scale - 0.5f);
                     float x = (i + 0.5f) / res * size - size * 0.5f;
                     float z = (j + 0.5f) / res * size - size * 0.5f;
@@ -80,12 +87,14 @@ namespace SupremeNuclear
                     else
                     {
                         // Суб-текстура «как Neroxis»: пятна — билинейно из буфера
-                        // 4096² (периоды ≥25 м не теряют резкости), поверх крап.
+                        // 4096² (периоды ≥25 м не теряют резкости), поверх крап
+                        // (амплитуда поднята против «размазанности» вблизи,
+                        // плейтест 2026-11-03).
                         float spot = SampleBilinearF(spots, SpotRes,
                             (x + size * 0.5f) / size, (z + size * 0.5f) / size);
                         float patch = spot > 0.60f ? 0.86f : spot < 0.40f ? 1.12f : 1f;
-                        grain = patch * (0.97f + 0.06f * Noise2D(i, j) +
-                                         0.03f * Noise2D(i / 3, j / 3));
+                        grain = patch * (0.955f + 0.085f * Noise2D(i, j) +
+                                         0.04f * Noise2D(i / 3, j / 3));
                     }
                     c.r *= grain;
                     c.g *= grain;
@@ -96,6 +105,11 @@ namespace SupremeNuclear
             });
             tex.SetPixels32(px);
             tex.Apply(true, true); // мипы, пиксели CPU не нужны
+            // БЕЗ рантайм-компрессии: GPU Compress→DXT5 на 16384² давал битые
+            // блоки — «полосы в разные стороны + синие зоны» (плейтест
+            // 2026-11-03, компрессия по логу «успешна»). RGBA32 16384² ≈ 1 ГБ
+            // VRAM — приемлемо для десктопа; слабым машинам — terrain.albedoRes.
+            Log.Info("MapGen: albedo " + res + "² " + tex.format + " (без компрессии)");
             return tex;
         }
 
@@ -116,6 +130,152 @@ namespace SupremeNuclear
         /// и albedo-макро — ОДИН расчёт вместо трёх (запрос 2026-11-03 «сократить
         /// время генерации»).</summary>
         private static Color32[] _macroCache;
+
+        // ---------- Сплат-канон (SupCom/Neroxis): маска видов + тайлы ----------
+
+        private static Heightmap _splatHm;
+        private static ScenarioTemplate.TerrainSettings _splatT;
+        private static Texture2D _splatMask;
+        private static Texture2D[] _splatTiles;
+
+        /// <summary>Запомнить источник сплата (вызывается при сборке карты ДО
+        /// ResolvePlan — маска/тайлы генерятся лениво по первому запросу).</summary>
+        public static void RememberSplatSource(Heightmap hm, ScenarioTemplate.TerrainSettings t)
+        {
+            _splatHm = hm;
+            _splatT = t;
+            _splatMask = null; // карта новая — стереть
+        }
+
+        /// <summary>Маска видов поверхности (R=трава G=песок B=скала A=снег) на
+        /// всю карту, 2048² (весам хватает 40 м/пиксель — переходы плавные).
+        /// Правила — те же поля, что у ZoneColor (высота/крутизна/у кромки),
+        /// с дизерингом порогов — естественные границы слоёв.</summary>
+        public static Texture2D SplatMask()
+        {
+            if (_splatMask != null)
+                return _splatMask;
+            Heightmap hm = _splatHm;
+            ScenarioTemplate.TerrainSettings t = _splatT;
+            if (hm == null || t == null)
+                return null;
+            const int res = 2048;
+            float[,] distToWater = DistToWaterM(hm);
+            float size = hm.W * hm.Step;
+            var px = new Color32[res * res];
+            System.Threading.Tasks.Parallel.For(0, res, j =>
+            {
+                float z = (j + 0.5f) / res * size - size * 0.5f;
+                for (int i = 0; i < res; i++)
+                {
+                    float x = (i + 0.5f) / res * size - size * 0.5f;
+                    float h = hm.SampleHeight(x, z);
+                    int ci = Clamp((int)(x / hm.Step + hm.W * 0.5f), 0, hm.W - 1);
+                    int cj = Clamp((int)(z / hm.Step + hm.H * 0.5f), 0, hm.H - 1);
+                    float dith = (Noise2D(i * 3 + 11, j * 3 + 7) - 0.5f) * 24f; // м-дизеринг порогов
+
+                    // Скала — крутизна (как rock в ZoneColor).
+                    float dh = Mathf.Max(
+                        Mathf.Abs(h - CellHeight(hm, ci, cj, ci + 1, cj)),
+                        Mathf.Abs(h - CellHeight(hm, ci, cj, ci, cj + 1))) / hm.Step;
+                    float rock = Smooth01((dh - 0.30f) / 0.35f);
+
+                    // Снег — вершины.
+                    float snow = t.snowHeightM < hm.Max
+                        ? Smooth01((h - t.snowHeightM + dith) / 150f) * 0.95f
+                        : 0f;
+
+                    // Песок — пляжная полоса + подводные склоны (дно).
+                    float beach = 1f - Smooth01((distToWater[ci, cj] - t.beachWidthM * 0.4f +
+                                                  dith) / (t.beachWidthM * 0.6f));
+                    float under = h < hm.SeaLevel
+                        ? Mathf.Clamp01((hm.SeaLevel - h) / 8f)
+                        : 0f;
+                    float sand = Mathf.Max(beach * 0.9f, under);
+
+                    float grass = Mathf.Clamp01(1f - Mathf.Max(rock, Mathf.Max(snow, sand)));
+
+                    // Нормировка суммы весов (шейдер нормирует сам — порядок
+                    // в RGBA фиксируем и здесь).
+                    float sum = grass + sand + rock + snow + 1e-4f;
+                    px[j * res + i] = new Color32(
+                        (byte)(grass / sum * 255f), (byte)(sand / sum * 255f),
+                        (byte)(rock / sum * 255f), (byte)(snow / sum * 255f));
+                }
+            });
+            var tex = new Texture2D(res, res, TextureFormat.RGBA32, true, true)
+            {
+                name = "SN-SplatMask",
+                wrapMode = TextureWrapMode.Clamp,
+                anisoLevel = 4,
+            };
+            tex.SetPixels32(px);
+            tex.Apply(true, true);
+            _splatMask = tex;
+            Log.Info("MapGen: сплат-маска " + res + "² готова");
+            return tex;
+        }
+
+        /// <summary>Четыре процедурных ТАЙЛА детальной фактуры (grayscale,
+        /// 2048², период задаёт шейдер _TileMetres): ворс травы / крап песка /
+        /// трещиноватая скала (ridged fBm) / мягкий снег. Repeat + мипы.</summary>
+        public static Texture2D[] SplatTiles()
+        {
+            if (_splatTiles != null)
+                return _splatTiles;
+            const int res = 2048; // ×4 плотность фактуры (юзер-канон 2026-11-03)
+            _splatTiles = new Texture2D[4];
+            for (int kind = 0; kind < 4; kind++)
+                _splatTiles[kind] = MakeTile(kind, res);
+            Log.Info("MapGen: сплат-тайлы 4×" + res + "² готовы");
+            return _splatTiles;
+        }
+
+        private static Texture2D MakeTile(int kind, int res)
+        {
+            var px = new Color32[res * res];
+            System.Threading.Tasks.Parallel.For(0, res, j =>
+            {
+                for (int i = 0; i < res; i++)
+                {
+                    float u = i / (float)res, v = j / (float)res;
+                    float g;
+                    switch (kind)
+                    {
+                        case 0: // трава: два мелких октавных ворса
+                            g = 0.86f + 0.10f * Fbm(u * 48f, v * 48f, 501, 2) +
+                                         0.06f * Fbm(u * 110f, v * 110f, 502, 2);
+                            break;
+                        case 1: // песок: ровный мелкий крап
+                            g = 0.90f + 0.08f * Fbm(u * 90f, v * 90f, 511, 2) +
+                                         0.03f * Noise2D(i * 5, j * 5);
+                            break;
+                        case 2: // скала: ridged fBm — «трещины» (1-|n|), контрастнее
+                        {
+                            float r1 = 1f - Mathf.Abs(Fbm(u * 14f, v * 14f, 521, 3) * 2f - 1f);
+                            float r2 = 1f - Mathf.Abs(Fbm(u * 34f, v * 34f, 522, 2) * 2f - 1f);
+                            g = 0.68f + 0.28f * r1 + 0.16f * r2;
+                            break;
+                        }
+                        default: // снег: мягкие крупные пятна
+                            g = 0.92f + 0.07f * Fbm(u * 22f, v * 22f, 531, 2);
+                            break;
+                    }
+                    g = Mathf.Clamp01(g);
+                    byte b = (byte)(g * 255f);
+                    px[j * res + i] = new Color32(b, b, b, 255);
+                }
+            });
+            var tex = new Texture2D(res, res, TextureFormat.RGBA32, true, true)
+            {
+                name = "SN-SplatTile" + kind,
+                wrapMode = TextureWrapMode.Repeat, // тайл!
+                anisoLevel = 9,
+            };
+            tex.SetPixels32(px);
+            tex.Apply(true, true);
+            return tex;
+        }
 
         /// <summary>Пиксели зонной окраски (без создания текстуры). Параллельно
         /// по строкам (пиксели независимы — детерминизм сохранён).</summary>
@@ -356,17 +516,38 @@ namespace SupremeNuclear
             };
         }
 
-        /// <summary>Цвет вершины рельефа — ЗОНАЛЬНАЯ палитра высот (80%): GPU-дамп
-        /// закрыл механику Field (2026-11-03): _Colormask — СЕРАЯ оттеночная
-        /// модуляция (R≈G≈B≈0.55, A=1), а МАКРО-ЦВЕТ зон несут именно ВЕРШИННЫЕ
-        /// ЦВЕТА (_VertexColorize). Осветлённая база (20% белого) не даёт
-        /// погаснуть детальной фактуре.</summary>
-        public static Color VertexColor(Heightmap hm, ScenarioTemplate.TerrainSettings t, float h)
+        /// <summary>Цвет вершины рельефа — ПОЛНАЯ зона (высота + тип поверхности):
+        /// палитра высот + скалы по крутизне + пляж у кромки воды + снег на
+        /// вершинах + дно/мель подводных склонов + пятна «провинций» + затенение
+        /// склонов — та же ZoneColor, что красит карту/миникарту. GPU-дамп закрыл
+        /// механику Field (2026-11-03): _Colormask — СЕРАЯ оттеночная модуляция
+        /// (R≈G≈B≈0.55), МАКРО-ЦВЕТ зон несут именно ВЕРШИННЫЕ ЦВЕТА
+        /// (_VertexColorize); одна палитра высот на террасных плато давала
+        /// «однообразную текстуру на всю карту» (плейтест 2026-11-03). База 20%
+        /// белого — детальная фактура field_b не гаснет.</summary>
+        public static Color VertexColorZone(Heightmap hm, ScenarioTemplate.TerrainSettings t,
+            float x, float z)
         {
-            Color[] palette = ParsePalette(t.palette);
-            float span = Mathf.Max(1f, hm.Max - hm.SeaLevel);
-            return Color.Lerp(Color.white, Sample(palette, (h - hm.SeaLevel) / span), 0.8f);
+            if (_palHm != hm)
+            {
+                _palCache = ZonePalette.Of(t);
+                _palHm = hm;
+            }
+            if (_distHm != hm)
+            {
+                _distCache = DistToWaterM(hm);
+                _distHm = hm;
+            }
+            Color c = ZoneColor(hm, t, _palCache, _distCache, x, z);
+            return Color.Lerp(Color.white, c, 0.8f);
         }
+
+        // Кэши полей зон для покраски ВЕРШИН (миллион вызовов на карту):
+        // палитра/поле дистанции до воды пересобираются только при смене карты.
+        private static ZonePalette _palCache;
+        private static Heightmap _palHm;
+        private static float[,] _distCache;
+        private static Heightmap _distHm;
 
         private static Color Sample(Color[] palette, float f01)
         {

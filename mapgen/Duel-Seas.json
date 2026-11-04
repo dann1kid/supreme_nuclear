@@ -2,7 +2,7 @@
   "_readme": "Полуморская карта: крупные внутренние моря и заливы, суша доминирует и связна; флот играет роль, перешейки — чокпоинты. Пресет MapGen v3; переключение шаблонов — Ctrl+Shift+G в редакторе миссий.",
   "terrain": {
     "sizeM": 81920.0,
-    "stepM": 80.0,
+    "stepM": 40.0,
     "style": "seas",
     "waterAmount": 0.55,
     "oceanFloorM": -350.0,
@@ -50,9 +50,6 @@
   "startFunds": 10000.0,
   "runwayLength": 1800.0,
   "runwayWidth": 45.0,
-  "commander": true,
-  "commanderJsonKey": "",
-  "commanderFuel": 1.0,
   "players": 2,
   "baseSpreadM": 2800.0,
   "engineerAirdropAltM": 150.0,

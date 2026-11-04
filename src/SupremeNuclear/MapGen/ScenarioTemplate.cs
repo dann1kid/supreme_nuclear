@@ -157,14 +157,13 @@ namespace SupremeNuclear
         public int depositCount = 14;      // зеркальных ПАР точек массы (T1)
         public int centerRichCount = 2;    // пар жирного центра (T2)
         public int coalPerSide = 2;        // зеркальных ПАР угольных точек — у баз (бутстрап энергии, v3)
+        public int spawnMexCount = 4;      // мексов кольцом у КАЖДОЙ базы (канон SupCom, 2026-11-03)
+        public float spawnMexRadiusM = 850f; // радиус кольца спавн-мексов от центра базы
         public float depositSpacing = 3000f;
         public float baseSearchDeg = 45f;  // сектор поиска пригодной площадки вокруг оси
         public float startFunds = 10000f; // запас на бутстрап: уголь + мекс + депо (поднят с 5000 для тестов, 2026-10-30)
         public float runwayLength = 1800f; // стартовая ВПП слота
         public float runwayWidth = 45f;
-        public bool commander = true;      // командирский борт — условие победы «убей борта» (DESIGN §2.1)
-        public string commanderJsonKey = ""; // модель борта; пусто = самый дорогой самолёт энциклопедии
-        public float commanderFuel = 1f;
 
         // Адаптивность «под количество игроков» (юзер-канон 2026-10-31, уточнён
         // им же: размер — отдельная ручка гибкости): players задаёт РАСКЛАДКУ —

@@ -187,8 +187,7 @@ namespace SupremeNuclear
         public static int Count => Plans.Count;
 
         /// <summary>План борта (живые ссылки на сегменты). Мутация планов — только
-        /// через API сервиса; исключение — CommanderBoardService перештамповывает
-        /// высоту орбиты (AltAgl) сразу после выдачи патруля.</summary>
+        /// через API сервиса (SetPatrol/Enqueue/Insert/Drop), не напрямую по списку.</summary>
         internal static List<OrderSegment> PlanOf(Unit aircraft) =>
             Plans.TryGetValue(aircraft, out List<OrderSegment> plan) ? plan : null;
 

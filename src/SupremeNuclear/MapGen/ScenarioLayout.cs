@@ -30,6 +30,33 @@ namespace SupremeNuclear
         /// <summary>Отражение точки относительно центра (пара для симметрии).</summary>
         public static Vector2 Mirror(Vector2 p, Vector2 center) => center * 2f - p;
 
+        /// <summary>Образы точки при симметрии КАРТЫ (дополнительные к p точки
+        /// орбиты; режимы — как HeightmapGen.Symmetrize: mirror = отражение по X,
+        /// quadrant = ±X/±Z, rotational = точечный поворот 180°, none = пусто).
+        /// Пары раскладки обязаны строиться ТЕМИ ЖЕ преобразованиями, что и
+        /// рельеф: прежнее точечное Mirror на X-зеркальном рельефе давало
+        /// «точка на сопке — пара в долине» («месторождения иногда
+        /// несимметричны», плейтест 2026-11-03).</summary>
+        public static Vector2[] SymmetryImages(Vector2 p, Vector2 c, string symmetry)
+        {
+            switch (HeightmapGen.SymmetryOf(symmetry))
+            {
+                case "mirror":
+                    return new[] { new Vector2(2f * c.x - p.x, p.y) };
+                case "quadrant":
+                    return new[]
+                    {
+                        new Vector2(2f * c.x - p.x, p.y),
+                        new Vector2(p.x, 2f * c.y - p.y),
+                        new Vector2(2f * c.x - p.x, 2f * c.y - p.y),
+                    };
+                case "rotational":
+                    return new[] { Mirror(p, c) };
+                default:
+                    return new Vector2[0];
+            }
+        }
+
         /// <summary>Единичный вектор длинной оси карты (куда ставить базы).</summary>
         public static Vector2 LongAxis(Vector2 min, Vector2 max) =>
             (max.x - min.x) >= (max.y - min.y) ? Vector2.right : Vector2.up;
@@ -113,12 +140,15 @@ namespace SupremeNuclear
         /// </summary>
         public static List<Deposit> Deposits(Vector2 min, Vector2 max, ScenarioTemplate t,
             System.Random rng, Func<Vector2, bool> siteOk, List<BaseSlot> bases,
-            Func<Vector2, bool> siteLoose = null)
+            Func<Vector2, bool> siteLoose = null, string symmetry = null,
+            List<Deposit> prefill = null)
         {
             var result = new List<Deposit>();
             Vector2 c = Center(min, max);
             Vector2 axis = LongAxis(min, max);
             float extent = Mathf.Max(max.x - min.x, max.y - min.y);
+            if (prefill != null)
+                result.AddRange(prefill); // спавн-мексы: случайные пары их видят (spacing)
 
             bool FarEnough(Vector2 p, float spacing)
             {
@@ -132,6 +162,24 @@ namespace SupremeNuclear
                 return true;
             }
 
+            // Орбита точки: p + образы симметрии карты. Годится, только если
+            // пригодны ВСЕ точки орбиты (иначе раскладка теряет симметрию).
+            bool OrbitOk(Vector2 p, Func<Vector2, bool> ok, float spacing, List<Deposit> addTo)
+            {
+                var orbit = new List<Vector2> { p };
+                orbit.AddRange(SymmetryImages(p, c, symmetry));
+                foreach (Vector2 q in orbit)
+                    if (!ok(q) || !FarEnough(q, spacing))
+                        return false;
+                for (int a = 0; a < orbit.Count; a++)
+                    for (int b = a + 1; b < orbit.Count; b++)
+                        if ((orbit[a] - orbit[b]).sqrMagnitude < 300f * 300f)
+                            return false;
+                foreach (Vector2 q in orbit)
+                    addTo.Add(new Deposit { Pos = q, Tier = 1 });
+                return true;
+            }
+
             // Жирный центр: тир 2, компактное кольцо вокруг центра (центр часто
             // озеро/горы — жирные точки опциональны, фолбэку не подлежат).
             float[] rings = { 0.05f, 0.08f };
@@ -141,16 +189,18 @@ namespace SupremeNuclear
                 float ring = extent * rings[i % rings.Length];
                 float ang = i * 2.39996f; // золотой угол — без кластеров
                 Vector2 p = c + new Vector2(Mathf.Cos(ang), Mathf.Sin(ang)) * ring;
-                Vector2 m = Mirror(p, c);
-                if (!siteOk(p) || !siteOk(m) || !FarEnough(p, t.depositSpacing) || !FarEnough(m, t.depositSpacing))
+                var orbit = new List<Deposit>();
+                if (!OrbitOk(p, siteOk, t.depositSpacing, orbit))
                     continue;
-                result.Add(new Deposit { Pos = p, Tier = 2 });
-                result.Add(new Deposit { Pos = m, Tier = 2 });
+                foreach (Deposit d in orbit)
+                    d.Tier = 2;
+                result.AddRange(orbit);
             }
 
-            // Зеркальные пары: точки на СТОРОНЕ положительной полуоси (dot > 0).
+            // Пары по орбитам симметрии: кандидаты на СТОРОНЕ положительной полуоси
+            // (dot > 0), добавляется вся орбита (образы — теми же осями, что рельеф).
             int want = Mathf.Max(0, t.depositCount);
-            int target = rich * 2 + want * 2;
+            int target = result.Count + rich * 2 + want * 2;
             float[] std = { 0.16f, 0.26f, 0.36f, 0.30f, 0.20f };
             float[] wide = { 0.10f, 0.16f, 0.26f, 0.36f, 0.30f, 0.20f, 0.42f };
             int Pass(float spacingScale, float[] radii, Func<Vector2, bool> ok, int attempts)
@@ -163,12 +213,7 @@ namespace SupremeNuclear
                     Vector2 p = c + new Vector2(Mathf.Cos(ang), Mathf.Sin(ang)) * ring * extent;
                     if (Vector2.Dot(p - c, axis) <= 0f)
                         continue; // только своя половина
-                    Vector2 m = Mirror(p, c);
-                    if (!ok(p) || !ok(m) || !FarEnough(p, t.depositSpacing * spacingScale) ||
-                        !FarEnough(m, t.depositSpacing * spacingScale))
-                        continue;
-                    result.Add(new Deposit { Pos = p, Tier = 1 });
-                    result.Add(new Deposit { Pos = m, Tier = 1 });
+                    OrbitOk(p, ok, t.depositSpacing * spacingScale, result);
                 }
                 return result.Count - before;
             }
@@ -182,6 +227,84 @@ namespace SupremeNuclear
         }
 
         /// <summary>
+        /// Спавн-мексы (канон SupCom, юзер-канон 2026-11-03 «месторождения рядом
+        /// со спавнами»): кольцо spawnMexCount точек в радиусе spawnMexRadiusM
+        /// у КАЖДОЙ базы. Симметрия по образам карты: кольцо строится у одной
+        /// базы орбиты, близнецы-образы получают отражённые точки (жителя rng
+        /// у близнеца нет — раскладка симметрична по построению). Возврат —
+        /// список для prefill в Deposits (случайные пары учтут их в spacing).
+        /// Фолбэк siteLoose обязателен: без мексов у спавна старт недееспособен.
+        /// </summary>
+        public static List<Deposit> SpawnMexes(ScenarioTemplate t, System.Random rng,
+            Vector2 min, Vector2 max, List<BaseSlot> bases,
+            Func<Vector2, bool> siteOk, Func<Vector2, bool> siteLoose, string symmetry)
+        {
+            var result = new List<Deposit>();
+            if (bases == null || bases.Count == 0 || t.spawnMexCount <= 0)
+                return result;
+            Vector2 c = Center(min, max);
+            var covered = new List<Vector2>();
+
+            bool Place(bool loose)
+            {
+                Func<Vector2, bool> ok = loose ? siteLoose : siteOk;
+                if (ok == null)
+                    return false;
+                float gapSq = 380f * 380f;
+                bool Far(Vector2 q)
+                {
+                    foreach (Deposit d in result)
+                        if ((d.Pos - q).sqrMagnitude < gapSq)
+                            return false;
+                    return true;
+                }
+                foreach (BaseSlot b in bases)
+                {
+                    // Близнец-образ уже обработанной базы — его кольцо придёт образами.
+                    foreach (Vector2 a in covered)
+                        if ((a - b.Pos).sqrMagnitude <
+                            4f * t.spawnMexRadiusM * t.spawnMexRadiusM)
+                            goto NextBase;
+                    covered.Add(b.Pos);
+                    int placed = 0;
+                    for (int attempt = 0; attempt < 300 && placed < t.spawnMexCount; attempt++)
+                    {
+                        float ang = attempt * 2.39996f + (float)rng.NextDouble() * 0.7f;
+                        float r = t.spawnMexRadiusM * (0.7f + 0.5f * (float)rng.NextDouble());
+                        Vector2 p = b.Pos + new Vector2(Mathf.Cos(ang), Mathf.Sin(ang)) * r;
+                        var orbit = new List<Vector2> { p };
+                        orbit.AddRange(SymmetryImages(p, c, symmetry));
+                        bool good = true;
+                        foreach (Vector2 q in orbit)
+                        {
+                            if (!ok(q) || !Far(q) ||
+                                (q - b.Pos).sqrMagnitude < 450f * 450f)
+                            {
+                                good = false;
+                                break;
+                            }
+                        }
+                        if (!good)
+                            continue;
+                        foreach (Vector2 q in orbit)
+                            result.Add(new Deposit { Pos = q, Tier = 1 });
+                        placed++;
+                    }
+                    NextBase: ;
+                }
+                return result.Count > 0;
+            }
+
+            if (!Place(false))
+            {
+                result.Clear();
+                covered.Clear();
+                Place(true); // глухой рельеф у базы — хотя бы по loose
+            }
+            return result;
+        }
+
+        /// <summary>
         /// Угольные точки (v3): зеркальные ПАРЫ У БАЗ — бутстрап энергии (дешёвый
         /// генератор с бустом строится на угле, как гидро в SupCom). Кольцо вокруг
         /// КАЖДОЙ базовой точки (round-robin), отражение даёт пары у зеркальных баз;
@@ -190,7 +313,7 @@ namespace SupremeNuclear
         /// </summary>
         public static List<Deposit> CoalSites(Vector2 min, Vector2 max, ScenarioTemplate t,
             System.Random rng, Func<Vector2, bool> siteOk, List<Deposit> mass, List<BaseSlot> bases,
-            Func<Vector2, bool> siteLoose = null)
+            Func<Vector2, bool> siteLoose = null, string symmetry = null)
         {
             var result = new List<Deposit>();
             if (bases == null || bases.Count == 0 || t.coalPerSide <= 0)
@@ -222,11 +345,17 @@ namespace SupremeNuclear
                     float ring = baseRMin + (float)rng.NextDouble() * (baseRMax - baseRMin);
                     float ang = (float)rng.NextDouble() * Mathf.PI * 2f;
                     Vector2 p = anchor + new Vector2(Mathf.Cos(ang), Mathf.Sin(ang)) * ring;
-                    Vector2 m = Mirror(p, c);
-                    if (!ok(p) || !ok(m) || !Free(p) || !Free(m))
+                    // Орбита симметрии карты (не точечное зеркало — см. Deposits).
+                    var orbit = new List<Vector2> { p };
+                    orbit.AddRange(SymmetryImages(p, c, symmetry));
+                    bool good = true;
+                    foreach (Vector2 q in orbit)
+                        if (!ok(q) || !Free(q))
+                        { good = false; break; }
+                    if (!good)
                         continue;
-                    result.Add(new Deposit { Pos = p, Tier = 1 });
-                    result.Add(new Deposit { Pos = m, Tier = 1 });
+                    foreach (Vector2 q in orbit)
+                        result.Add(new Deposit { Pos = q, Tier = 1 });
                 }
                 return result.Count - before;
             }

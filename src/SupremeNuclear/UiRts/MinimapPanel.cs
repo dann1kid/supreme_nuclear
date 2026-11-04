@@ -13,6 +13,7 @@ namespace SupremeNuclear
         private FloatingWindow _window;
         private RectTransform _mapRect;      // фон карты (RawImage со спрайтом или заливка)
         private RawImage _mapRaw;            // фон: uvRect показывает окно обзора (зум)
+        private RawImage _fogRaw;            // вуаль тумана войны (та же сетка знания)
         private RectTransform _iconsRoot;
         private readonly Image[] _viewEdges = new Image[4];
         // Окно обзора миникарты в нормализованных координатах карты (0..1):
@@ -60,6 +61,21 @@ namespace SupremeNuclear
         private static readonly Color Hostile = new Color(1f, 0.35f, 0.3f, 0.95f);
         private static readonly Color Deposit = new Color(1f, 0.85f, 0.2f, 0.95f);
         private static readonly Color MissileFriendly = new Color(0.5f, 0.9f, 0.55f, 0.9f);
+
+        /// <summary>Безымянная радар-отметка (SupCom unidentified blip, v0.147):
+        /// тускло-красная точка без спрайта — «что-то есть», без типа/владельца.</summary>
+        private static readonly Color Anonymous = new Color(0.9f, 0.5f, 0.4f, 0.85f);
+
+        /// <summary>Классификация чужого контакта (что рисовать) — та же, что у
+        /// IMGUI-иконок CommanderHud: ядро чистое (Util.ClassifyBlip).</summary>
+        private static Util.ContactBlip ClassifyHostileBlip(Unit unit, TrackingInfo info, bool isBuilding) =>
+            Util.ClassifyBlip(isMissile: false, ownOrNeutral: false, isBuilding: isBuilding,
+                hasContact: info != null,
+                contactAgeSec: info != null
+                    ? Time.timeSinceLevelLoad - info.lastSpottedTime
+                    : float.MaxValue,
+                liveWindowSec: GameApi.ContactLiveSec,
+                identified: FogOfWarService.IsIdentified(unit));
 
         private void Update()
         {
@@ -179,6 +195,7 @@ namespace SupremeNuclear
                 _window?.DestroyAll();
                 _window = null;
                 _mapRect = null;
+                _fogRaw = null;
                 _iconsRoot = null;
                 Log.Error("MinimapPanel: сбой построения — " + e.GetType().Name + ": " + e.Message +
                           " | " + e.StackTrace);
@@ -224,6 +241,19 @@ namespace SupremeNuclear
             mapImg.uvRect = new Rect(0f, 0f, 1f, 1f);
             var clicks = mapGo.AddComponent<MapClicks>();
             clicks.Owner = this;
+
+            // Вуаль тумана войны: та же текстура сетки знания (FogOverlay), uvRect —
+            // окно зума, как у рельефа (строки юг→север). Под блипами (создана
+            // раньше _iconsRoot), не интерактивна; сама обновляется в ApplyViewUv.
+            var fogGo = new GameObject("fogVeil", typeof(RectTransform), typeof(RawImage));
+            var fogRt = (RectTransform)fogGo.transform;
+            fogRt.SetParent(_mapRect, false);
+            fogRt.anchorMin = Vector2.zero;
+            fogRt.anchorMax = Vector2.one;
+            fogRt.offsetMin = fogRt.offsetMax = Vector2.zero;
+            _fogRaw = fogGo.GetComponent<RawImage>();
+            _fogRaw.raycastTarget = false;
+            _fogRaw.gameObject.SetActive(false);
 
             // Полоска режимов под картой, ДВЕ строки: верх — «Рельеф» (фон: высоты
             // + горизонтали) и «Заливка» (стиль колец), низ — четыре чипа колец.
@@ -351,6 +381,7 @@ namespace SupremeNuclear
 
             _blips.Clear();
             _airbaseBlips.Clear();
+            _ghostBlips.Clear();
             // Новое окно — вся карта (зум между сценами/картами не переносим),
             // рельеф пересчитывается для новой карты.
             _viewMin = Vector2.zero;
@@ -388,7 +419,6 @@ namespace SupremeNuclear
         private void UpdateBlips(Vector2 min, Vector2 max)
         {
             GameApi.TryGetLocalHQ(out FactionHQ hq);
-            float now = Time.timeSinceLevelLoad;
             bool missileBlink = Mathf.Repeat(Time.unscaledTime * 2.5f, 1f) < 0.7f;
             // Иконки растут с зумом миникарты (на всей карте — базовый размер).
             float iconScale = Mathf.Clamp(1f / _viewSize.x, 1f, IconScaleMax);
@@ -406,6 +436,7 @@ namespace SupremeNuclear
                 Color color;
                 float sizePx;
                 bool diamond = false;
+                bool anon = false; // безымянная радар-отметка: без спрайта/типа (v0.147)
                 // Свои/нейтралы — живая позиция; чужие — последняя известная разведке
                 // (как в IMGUI-иконках: живая позиция невидимого врага = чит).
                 Vector3 blipPos = unit.transform.position;
@@ -445,12 +476,24 @@ namespace SupremeNuclear
                     }
                     else
                     {
+                        // Чужой экстрактор — здание: контакт есть (с момента разведки);
+                        // радар-ONLY (не опознан оптикой) — безымянная точка.
                         TrackingInfo info = hq != null ? hq.GetTrackingData(unit.persistentID) : null;
-                        if (info == null || now - info.lastSpottedTime > Settings.StaleContactSec)
+                        var blip = ClassifyHostileBlip(unit, info, isBuilding: true);
+                        if (blip == Util.ContactBlip.None)
                             continue;
                         blipPos = info.GetPosition().ToLocalPosition();
-                        color = Hostile;
-                        sizePx = 8f;
+                        if (blip == Util.ContactBlip.Anonymous)
+                        {
+                            color = Anonymous;
+                            sizePx = 6f;
+                            anon = true;
+                        }
+                        else
+                        {
+                            color = Hostile;
+                            sizePx = 8f;
+                        }
                     }
                 }
                 else if (friendly)
@@ -460,29 +503,46 @@ namespace SupremeNuclear
                 }
                 else if (unit is Building)
                 {
-                    // Чужие здания — только по разведке (как подвижные).
+                    // Чужие здания — с момента разведки до гибели (туман войны:
+                    // статика помнится); радар-ONLY — безымянная точка (v0.147).
                     TrackingInfo info = hq != null ? hq.GetTrackingData(unit.persistentID) : null;
-                    if (info == null || now - info.lastSpottedTime > Settings.StaleContactSec)
+                    var blip = ClassifyHostileBlip(unit, info, isBuilding: true);
+                    if (blip == Util.ContactBlip.None)
                         continue;
                     blipPos = info.GetPosition().ToLocalPosition();
-                    color = Hostile;
-                    sizePx = 8f;
+                    if (blip == Util.ContactBlip.Anonymous)
+                    {
+                        color = Anonymous;
+                        sizePx = 6f;
+                        anon = true;
+                    }
+                    else
+                    {
+                        color = Hostile;
+                        sizePx = 8f;
+                    }
                 }
                 else
                 {
-                    // Чужие подвижные — только по разведке (как в IMGUI-иконках).
+                    // Чужие подвижные — только ЖИВОЙ контакт (бинарно, как в
+                    // IMGUI-иконках); опознанная сигнатура — полный блип,
+                    // радар-ONLY — безымянная точка (v0.147).
                     TrackingInfo info = hq != null ? hq.GetTrackingData(unit.persistentID) : null;
-                    if (info == null)
+                    var blip = ClassifyHostileBlip(unit, info, isBuilding: false);
+                    if (blip == Util.ContactBlip.None)
                         continue;
-                    float age = now - info.lastSpottedTime;
-                    if (age > Settings.StaleContactSec)
-                        continue;
-                    bool live = age < 4f;
                     blipPos = info.GetPosition().ToLocalPosition();
-                    color = live
-                        ? Hostile
-                        : new Color(0.75f, 0.75f, 0.75f, Mathf.Lerp(0.7f, 0.25f, age / Settings.StaleContactSec));
-                    sizePx = unit is Ship ? 9f : 7f;
+                    if (blip == Util.ContactBlip.Anonymous)
+                    {
+                        color = Anonymous;
+                        sizePx = 6f;
+                        anon = true;
+                    }
+                    else
+                    {
+                        color = Hostile;
+                        sizePx = unit is Ship ? 9f : 7f;
+                    }
                 }
 
                 if (used.Count >= 600)
@@ -492,10 +552,11 @@ namespace SupremeNuclear
                 // силуэт mapIcon (миникарта фиксирована «север вверх», поэтому угол —
                 // чистый курс, без поворота в кадр камеры; знак минус: uGUI вращает
                 // против часовой, IMGUI-вариант — по часовой), прочие — визор-маркеры
-                // friendly/hostileIcon. Без спрайта (ракеты, месторождения) — квадрат/ромб.
+                // friendly/hostileIcon. Без спрайта (ракеты, месторождения, безымянные
+                // радар-отметки) — квадрат/ромб.
                 Sprite sprite = null;
                 float angle = 0f;
-                if (!diamond && !(unit is Missile))
+                if (!diamond && !anon && !(unit is Missile))
                 {
                     if (unit is Aircraft && unit.definition != null &&
                         unit.definition.mapOrient && unit.definition.mapIcon != null)
@@ -531,6 +592,66 @@ namespace SupremeNuclear
                 if (_blips.TryGetValue(u, out Image img) && img != null)
                     Destroy(img.gameObject);
                 _blips.Remove(u);
+            }
+
+            UpdateGhostBlips(min, max, hq);
+        }
+
+        // Призраки разведанных зданий (SupCom-память тумана войны): погибло вне
+        // наблюдения — статичный блип на последней позиции, пока сенсоры не
+        // переразведают точку. Отдельный реестр — у призрака нет живого Unit.
+        private readonly Dictionary<PersistentID, Image> _ghostBlips =
+            new Dictionary<PersistentID, Image>();
+        private readonly List<PersistentID> _staleGhostBlips = new List<PersistentID>();
+        private static readonly Color GhostHostile = new Color(0.85f, 0.45f, 0.4f, 0.85f);
+
+        private void UpdateGhostBlips(Vector2 min, Vector2 max, FactionHQ hq)
+        {
+            if (FogOfWarService.BuildingGhosts.Count == 0)
+            {
+                foreach (KeyValuePair<PersistentID, Image> kv in _ghostBlips)
+                    if (kv.Value != null)
+                        Destroy(kv.Value.gameObject);
+                _ghostBlips.Clear();
+                return;
+            }
+            float iconScale = Mathf.Clamp(1f / _viewSize.x, 1f, IconScaleMax);
+            foreach (KeyValuePair<PersistentID, FogOfWarService.BuildingGhost> kv in FogOfWarService.BuildingGhosts)
+            {
+                FogOfWarService.BuildingGhost g = kv.Value;
+                if (g == null || g.Hq == hq)
+                    continue; // своё (захвачено) — не призрак
+                Vector3 pos = g.Position.ToLocalPosition();
+                Vector2 local = WorldToLocal(pos, min, max);
+                if (!_ghostBlips.TryGetValue(kv.Key, out Image img) || img == null)
+                {
+                    var go = new GameObject("ghostBlip", typeof(RectTransform), typeof(Image));
+                    img = go.GetComponent<Image>();
+                    img.raycastTarget = false;
+                    ((RectTransform)go.transform).SetParent(_iconsRoot, false);
+                    _ghostBlips[kv.Key] = img;
+                }
+                img.gameObject.SetActive(true);
+                img.color = GhostHostile;
+                img.sprite = g.Definition != null
+                    ? (g.Definition.hostileIcon != null ? g.Definition.hostileIcon : g.Definition.friendlyIcon)
+                    : null;
+                var rt = (RectTransform)img.transform;
+                float sizePx = 8f * iconScale;
+                rt.sizeDelta = new Vector2(sizePx, sizePx);
+                rt.localPosition = new Vector3(local.x, local.y, 0f);
+                rt.localRotation = Quaternion.Euler(0f, 0f, 45f);
+            }
+            _staleGhostBlips.Clear();
+            foreach (KeyValuePair<PersistentID, Image> kv in _ghostBlips)
+                if (!FogOfWarService.BuildingGhosts.ContainsKey(kv.Key) ||
+                    FogOfWarService.BuildingGhosts[kv.Key].Hq == hq)
+                    _staleGhostBlips.Add(kv.Key);
+            foreach (PersistentID id in _staleGhostBlips)
+            {
+                if (_ghostBlips.TryGetValue(id, out Image img) && img != null)
+                    Destroy(img.gameObject);
+                _ghostBlips.Remove(id);
             }
         }
 
@@ -757,11 +878,13 @@ namespace SupremeNuclear
 
         /// <summary>Выбор фона миникарты и его под-прямоугольник: рельеф (своя текстура
         /// на всю карту) → спрайт карты (uvRect в UV текстуры, спрайт может быть её
-        /// частью) → фолбэк-заливка. Зум показывается под-прямоугольником через uvRect.</summary>
+        /// частью) → фолбэк-заливка. Зум показывается под-прямоугольником через uvRect.
+        /// Вуаль тумана следует окну зума (сетка знания на всю карту).</summary>
         private void ApplyViewUv()
         {
             if (_mapRaw == null)
                 return;
+            UpdateFogVeil();
             if (Settings.MinimapRelief && _reliefTexture != null)
             {
                 if (_mapRaw.texture != _reliefTexture)
@@ -787,6 +910,26 @@ namespace SupremeNuclear
             _mapRaw.texture = Texture2D.whiteTexture;
             _mapRaw.color = new Color(0.09f, 0.12f, 0.10f, 1f);
             _mapRaw.uvRect = new Rect(0f, 0f, 1f, 1f);
+        }
+
+        /// <summary>Вуаль тумана войны над фоном карты (под блипами): текстура
+        /// сетки знания FogOverlay на всю карту, uvRect — текущее окно зума.
+        /// Ориентация совпадает с рельефом (строки юг→север, z растёт вверх).</summary>
+        private void UpdateFogVeil()
+        {
+            if (_fogRaw == null)
+                return;
+            Texture2D fog = FogOverlay.Texture;
+            if (!Settings.FogDimming || fog == null)
+            {
+                _fogRaw.gameObject.SetActive(false);
+                return;
+            }
+            if (_fogRaw.texture != fog)
+                _fogRaw.texture = fog;
+            _fogRaw.color = Color.white;
+            _fogRaw.uvRect = new Rect(_viewMin.x, _viewMin.y, _viewSize.x, _viewSize.y);
+            _fogRaw.gameObject.SetActive(true);
         }
 
         // ---------- рельеф (высоты + горизонтали) ----------

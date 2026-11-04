@@ -547,14 +547,19 @@ namespace SupremeNuclear
                     hq.factionFunds, NextTierMassOf(depot),
                     Engineers.Count, _profile.engineersMin))
             {
-                ProductionTasks.EnqueueUpgrade(depot);
-                Log.Info("AI-событие: фабрика — апгрейд до T" + (depotTier + 1) + " в очереди");
+                // HQ-модель (канон FAF): ПЕРВЫЙ апгрейд тира фракции — ШТАБ
+                // (иначе дешёвые фабрики без HQ строят только инженеров),
+                // последующие — дешёвые версии.
+                bool asHq = !FactoryTierService.AnyHq(hq, depotTier + 1);
+                ProductionTasks.EnqueueUpgrade(depot, asHq);
+                Log.Info("AI-событие: фабрика — апгрейд до T" + (depotTier + 1) +
+                         (asHq ? " ШТАБ" : "") + " в очереди");
             }
         }
 
         /// <summary>Цена массы следующего тира фабрики (0 — максимум).</summary>
         private static float NextTierMassOf(object factory) =>
-            FactoryTierService.NextCost(FactoryTierService.TierOf(factory),
+            FactoryTierService.NextCost(FactoryTierService.TierOf(factory), true,
                 out float mass, out _, out _) ? mass : 0f;
 
         /// <summary>Решение «развитие»: тир фабрики не максимальный, налива нет,
