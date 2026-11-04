@@ -150,6 +150,20 @@ def main():
                 if name.endswith(".json"):
                     shutil.copy2(os.path.join(WORKTREE, "locales", name),
                                  os.path.join(stage, "Locales", name))
+            # Сплат-шейдер рельефа (v0.144): без бандла — фолбэк на гибрид;
+            # бандл лежит в репо (splatshader/splat.bundle, пересборка — CLI
+            # Unity 2022.3.62, см. splatshader/README). MapGen-пресеты: 4 стиля
+            # сразу (без них у игрока один образец после первого Ctrl+G).
+            bundle = os.path.join(WORKTREE, "splatshader", "splat.bundle")
+            if os.path.exists(bundle):
+                shutil.copy2(bundle, os.path.join(stage, "splat.bundle"))
+            presets = os.path.join(WORKTREE, "mapgen")
+            if os.path.isdir(presets):
+                os.makedirs(os.path.join(stage, "MapGen"), exist_ok=True)
+                for name in os.listdir(presets):
+                    if name.endswith(".json"):
+                        shutil.copy2(os.path.join(presets, name),
+                                     os.path.join(stage, "MapGen", name))
             zip_path = os.path.join(DIST, "SupremeNuclear-v%s.zip" % version)
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
                 for base, _, files in os.walk(stage):
