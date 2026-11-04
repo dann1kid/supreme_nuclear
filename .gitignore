@@ -24,3 +24,5 @@ image.png
 
 # Релизные артефакты
 dist/
+decompiled/
+GroundControlRts/
