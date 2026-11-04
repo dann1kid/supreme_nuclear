@@ -107,8 +107,10 @@ namespace SupremeNuclear
         // Заголовок меняется только тумблером режима — строится один раз на
         // состояние (Loc.F+конкат на КАЖДОМ OnGUI-событии, включая Layout-проходы,
         // аллоцировали ~6 строк 2-4 раза за кадр бесконечно).
+        // Смена языка «на лету» (v0.153) бампит Loc.Version — кэш сбрасывается.
         private static string _headerActive;
         private static string _headerIdle;
+        private static int _headerLocVersion = -1;
 
         private static string BuildHeader(bool active) =>
             $"SUPREME NUCLEAR v{PluginInfo.Version}  |  " + Loc.F("Режим командира: {0}  |  {1} — переключить",
@@ -121,6 +123,13 @@ namespace SupremeNuclear
                 return;
 
             EnsureStyles();
+
+            if (_headerLocVersion != Loc.Version) // живая смена языка — сброс кэша заголовка
+            {
+                _headerLocVersion = Loc.Version;
+                _headerActive = null;
+                _headerIdle = null;
+            }
 
             var controller = CommanderModeController.Instance;
             bool active = controller != null && controller.IsActive;
@@ -358,7 +367,10 @@ namespace SupremeNuclear
             if (cam == null || !GameApi.TryGetLocalHQ(out FactionHQ hq))
                 return;
 
-            float px = Settings.IconSizePx * (Screen.height / 1440f);
+            // База от ВЫСОТЫ ЭКРАНА (пропорция FHD/1440p/4K одинакова) × множитель
+            // WorldIconScale: FA-иконки несут ~30% полей в клетке, канон FA —
+            // иконка ~32px на FHD при полном отдалении (юзер: «вопросики» на 20px).
+            float px = Settings.IconSizePx * (Screen.height / 1440f) * Settings.WorldIconScale;
             var selected = IconSelected; // без new HashSet на каждый Repaint
             selected.Clear();
             selected.UnionWith(controller.Selection.Selected);
@@ -381,8 +393,14 @@ namespace SupremeNuclear
                 bool isSelected = selected.Contains(unit);
                 float size = unit is Ship ? px * 1.4f : (unit is Building ? px * 1.3f : (unit is Aircraft ? px * 1.15f : px));
 
-                // Ориентированные силуэты — только авиация; наземка/флот/здания — маркеры визора.
-                if (unit is Aircraft && unit.definition != null && unit.definition.mapOrient && unit.definition.mapIcon != null)
+                // Стратегическая иконка SupCom FA (канон мира, v0.153) — одна на
+                // все типы; фолбэки: 3D-превью → плоский спрайт; авиация без
+                // иконок — ориентированный силуэт mapIcon (виден курс).
+                Sprite strategic = unit.definition != null
+                    ? (StrategicIcons.Of(unit) ?? UnitPreview.PreviewOf(unit.definition))
+                    : null;
+                if (strategic == null && unit is Aircraft && unit.definition != null &&
+                    unit.definition.mapOrient && unit.definition.mapIcon != null)
                 {
                     float ang = HeadingScreenAngle(unit, cam);
                     Color tint = isSelected ? new Color(0.7f, 1f, 0.7f, 1f) : new Color(0.45f, 0.9f, 0.5f, 1f);
@@ -394,9 +412,9 @@ namespace SupremeNuclear
                     continue;
                 }
 
-                Sprite sprite = unit.definition != null
-                    ? (unit.definition.friendlyIcon != null ? unit.definition.friendlyIcon : unit.definition.mapIcon)
-                    : null;
+                Sprite sprite = strategic ?? (unit.definition != null
+                    ? (unit.definition.friendlyIcon ?? unit.definition.mapIcon)
+                    : null);
                 Color friendTint = isSelected ? new Color(0.7f, 1f, 0.7f, 1f) : new Color(0.45f, 0.9f, 0.5f, 1f);
                 DrawUnitSprite(new Vector2(sp.x, guiY), size, sprite, friendTint, true);
                 // ТИР-чип инженеров (юзер-канон 2026-11-04 «в SupCom это разные
@@ -555,8 +573,13 @@ namespace SupremeNuclear
                     ? new Color(1f, 0.35f, 0.3f, 1f)
                     : new Color(1f, 0.35f, 0.3f, 0.75f);
 
-                if (unit is Aircraft && unit.definition != null && unit.definition.mapOrient && unit.definition.mapIcon != null)
+                Sprite strategic = unit.definition != null
+                    ? (StrategicIcons.Of(unit) ?? UnitPreview.PreviewOf(unit.definition))
+                    : null;
+                if (strategic == null && unit is Aircraft && unit.definition != null &&
+                    unit.definition.mapOrient && unit.definition.mapIcon != null)
                 {
+                    // Фолбэк авиации без иконок: ориентированный силуэт (виден курс).
                     float ang = HeadingScreenAngle(unit, cam);
                     DrawOrientedSprite(new Vector2(sp.x + 1.5f, guiY + 1.5f), size, unit.definition.mapIcon, new Color(0f, 0f, 0f, 0.5f), ang);
                     DrawOrientedSprite(new Vector2(sp.x, guiY), size, unit.definition.mapIcon, tint, ang);
@@ -564,9 +587,9 @@ namespace SupremeNuclear
                     continue;
                 }
 
-                Sprite sprite = unit.definition != null
-                    ? (unit.definition.hostileIcon != null ? unit.definition.hostileIcon : unit.definition.friendlyIcon)
-                    : null;
+                Sprite sprite = strategic ?? (unit.definition != null
+                    ? (unit.definition.hostileIcon ?? unit.definition.friendlyIcon)
+                    : null);
                 DrawUnitSprite(new Vector2(sp.x, guiY), size, sprite, tint, true);
                 drawn++;
             }
@@ -596,7 +619,8 @@ namespace SupremeNuclear
                 if (UnderMinimapWindow(new Vector2(sp.x, guiY)))
                     continue;
                 Sprite sprite = g.Definition != null
-                    ? (g.Definition.hostileIcon != null ? g.Definition.hostileIcon : g.Definition.friendlyIcon)
+                    ? (StrategicIcons.OfDef(g.Definition) ?? UnitPreview.PreviewOf(g.Definition)
+                        ?? g.Definition.hostileIcon ?? g.Definition.friendlyIcon)
                     : null;
                 DrawUnitSprite(new Vector2(sp.x, guiY), size, sprite, tint, true);
                 DrawCross(new Vector2(sp.x, guiY + size * 0.7f), size * 0.5f, tint);

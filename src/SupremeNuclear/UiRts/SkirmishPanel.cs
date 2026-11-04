@@ -25,6 +25,9 @@ namespace SupremeNuclear
         private Canvas _canvas;
         private Font _font;
         private RectTransform _root;
+        /// <summary>Локаль, под которую собрана панель: смена языка «на лету» (Loc.Version) —
+        /// пересборка на Show (панель DontDestroyOnLoad, надписи встроены один раз).</summary>
+        private int _builtLocVersion = -1;
         private RectTransform _backdrop; // модальный фон: глотает клики под панелью
         private readonly List<Button> _styleButtons = new List<Button>();
         private readonly List<string> _styleTemplates = new List<string>();
@@ -40,6 +43,8 @@ namespace SupremeNuclear
         private bool _starting;     // «В БОЙ» уже нажат: генерация синхронна, повтор не нужен
         private bool _startNextFrame;
         private Button _menuButton; // клон в меню (живёт в сцене меню, чистится Unity-нуллом)
+        private Button _langButton; // свитчер языка под кнопкой Скримиш (тоже ребёнок сцены)
+        private int _menuLabelsLocVersion = -1; // локаль, под которую подписаны кнопки меню
         private float _nextScanAt;
         private float _nextErrorLogAt = -10f;
         private static TMP_FontAsset _tmpCyrillicFont; // динамический TMP-шрифт с кириллицей
@@ -68,6 +73,7 @@ namespace SupremeNuclear
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
             _menuButton = null; // кнопка — ребёнок старой сцены, мертва
+            _langButton = null;
             if (_root != null && _root.gameObject.activeSelf)
                 Hide();
         }
@@ -129,6 +135,15 @@ namespace SupremeNuclear
             if (menu == null)
                 return; // меню нет (не загрузилось/ушли) — просто не инъектируем
             InjectMenuButton(menu);
+            // Смена языка «на лету» (свитчер или менеджер конфига): подписи кнопок
+            // меню встраиваются при инъекции и живых рефрешей не имеют — перечитываем
+            // по Loc.Version (§7), не чаще скана меню (0.5 с).
+            if (_menuLabelsLocVersion != Loc.Version &&
+                (_menuButton != null || _langButton != null))
+            {
+                _menuLabelsLocVersion = Loc.Version;
+                RefreshMenuLabels();
+            }
         }
 
         // ---------- кнопка в главном меню ----------
@@ -189,6 +204,7 @@ namespace SupremeNuclear
                 }
                 _menuButton = clone;
                 Log.Info("Skirmish: кнопка меню добавлена");
+                InjectLanguageButton(source);
             }
             catch (System.Exception e)
             {
@@ -196,8 +212,120 @@ namespace SupremeNuclear
             }
         }
 
+        /// <summary>Свитчер языка ПОД кнопкой «Скримиш» (юзер-решение 2026-11-04: у игры
+        /// своего переключения языка нет, лезть в конфиг игрок не обязан). Второй клон
+        /// missionsButton. Клик — цикл ru ↔ en с применением на лету (Settings.SetLanguage →
+        /// Loc.Bootstrap → пересборка UI по Loc.Version). Подпись латиницей без
+        /// Loc.Tr — TMP-шрифт меню кириллицы не имеет (§12-63), а назначение кнопки
+        /// понятно в любом языке.</summary>
+        private void InjectLanguageButton(Button source)
+        {
+            if (_langButton != null)
+                return; // уже стоит (умерший экземпляр чистит Unity-нуллом)
+            try
+            {
+                var clone = UnityEngine.Object.Instantiate(source, source.transform.parent);
+                clone.name = "SN_LanguageButton";
+                clone.onClick = new Button.ButtonClickedEvent(); // срез персистентных слушателей (как у Скримиша)
+                clone.onClick.AddListener(CycleLanguage);
+                var tmp = clone.GetComponentInChildren<TextMeshProUGUI>();
+                if (tmp != null)
+                {
+                    tmp.text = LanguageLabel(); // латиница: шрифт меню не трогаем (см. LanguageLabel)
+                    // Подпись длиннее «МИССИИ» — автоподгон, иначе текст вылезает
+                    // за края кнопки (артефакты плейтеста 2026-11-04).
+                    tmp.enableAutoSizing = true;
+                    tmp.fontSizeMin = 12f;
+                    tmp.fontSizeMax = Mathf.Max(12f, tmp.fontSize);
+                    tmp.ForceMeshUpdate(); // сразу чистая сетка — без хвостов старого текста
+                }
+                // Страховка наложения: без лейаут-группы у родителя клон ложится
+                // ровно на Скримиш (второй артефакт того же плейтеста).
+                var parentRt = source.transform.parent as RectTransform;
+                bool laidOut = parentRt != null &&
+                    (parentRt.GetComponent<VerticalLayoutGroup>() != null ||
+                     parentRt.GetComponent<HorizontalLayoutGroup>() != null ||
+                     parentRt.GetComponent<GridLayoutGroup>() != null);
+                if (!laidOut)
+                {
+                    var rt = (RectTransform)clone.transform;
+                    var menuRt = (RectTransform)source.transform;
+                    rt.anchoredPosition = menuRt.anchoredPosition +
+                        new Vector2(0f, -menuRt.rect.height - 8f);
+                }
+                _langButton = clone;
+                _menuLabelsLocVersion = Loc.Version;
+                Log.Info("Skirmish: свитчер языка добавлен (" + Settings.Language +
+                         ", лейаут родителя: " + (laidOut ? "есть" : "НЕТ — позиция вручную") + ")");
+            }
+            catch (System.Exception e)
+            {
+                Log.Error("Skirmish: свитчер языка не встал — " + e.Message);
+            }
+        }
+
+        /// <summary>Подпись свитчера — ТОЛЬКО латиница («Language: ru»): TMP-шрифт меню
+        /// Brass Mono кириллицы не имеет, а динамический ассет с ней не создаётся
+        /// (CreateFontAsset вернул null молча, §12-63) — двуязычная подпись давала
+        /// тофу □□□□ (плейтест 2026-11-04). auto/файл локали показываем разрешённым
+        /// значением — по нему цикл и кликает.</summary>
+        private static string LanguageLabel()
+        {
+            string v = Settings.Language == "ru" || Settings.Language == "en"
+                ? Settings.Language
+                : Loc.Language;
+            return "Language: " + v;
+        }
+
+        /// <summary>Клик свитчера: ru ↔ en, живое применение, подпись сразу.
+        /// Цикл по ЭФФЕКТИВНОМУ языку (Loc.Language), не по настройке: у англоязычного
+        /// игрока настройка auto уже разрешена в en — клик обязан дать видимую смену.</summary>
+        private void CycleLanguage()
+        {
+            string next = Loc.Language == "ru" ? "en" : "ru";
+            Settings.SetLanguage(next);
+            _menuLabelsLocVersion = Loc.Version;
+            RefreshMenuLabels();
+            Log.Info("Skirmish: язык — " + Settings.Language + " (таблицы: " + Loc.Language + ")");
+        }
+
+        /// <summary>Перечитать подписи обеих кнопок меню (инъекция ставит их один раз;
+        /// живая смена языка — через этот путь). ForceMeshUpdate — без хвоста
+        /// прежнего текста в тот же кадр.</summary>
+        private void RefreshMenuLabels()
+        {
+            if (_menuButton != null) // Unity fake-null
+            {
+                var tmp = _menuButton.GetComponentInChildren<TextMeshProUGUI>();
+                if (tmp != null)
+                {
+                    var font = CyrillicTmpFont();
+                    if (font != null)
+                    {
+                        tmp.font = font;
+                        tmp.text = Loc.Tr("Скримиш");
+                    }
+                    else
+                        tmp.text = "Skirmish";
+                    tmp.ForceMeshUpdate();
+                }
+            }
+            if (_langButton != null)
+            {
+                var tmp = _langButton.GetComponentInChildren<TextMeshProUGUI>();
+                if (tmp != null)
+                {
+                    tmp.text = LanguageLabel();
+                    tmp.ForceMeshUpdate();
+                }
+            }
+        }
+
         /// <summary>Динамический TMP_FontAsset из LegacyRuntime.ttf (кэш): у шрифта
-        /// меню нет кириллицы, динамический ассет рендерит любые глифы исходного Font.</summary>
+        /// меню нет кириллицы, динамический ассет рендерит любые глифы исходного Font.
+        /// CreateFontAsset может вернуть null БЕЗ исключения (плейтест 2026-11-04:
+        /// ни одного предупреждения в логе, «Скримиш» латиницей) — тогда кнопки
+        /// меню молча уходят в латинские фолбэки (§12-63).</summary>
         private static TMP_FontAsset CyrillicTmpFont()
         {
             if (_tmpCyrillicFont != null)
@@ -208,6 +336,9 @@ namespace SupremeNuclear
                     ? SupcomUi.Instance.UiFont
                     : Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
                 _tmpCyrillicFont = TMP_FontAsset.CreateFontAsset(source);
+                if (_tmpCyrillicFont == null)
+                    Log.Warn("Skirmish: CreateFontAsset вернул null без исключения — " +
+                             "кнопки меню латиницей, кириллицы в шрифте меню нет (§12-63)");
             }
             catch (System.Exception e)
             {
@@ -221,6 +352,15 @@ namespace SupremeNuclear
 
         public void Show()
         {
+            // Смена языка «на лету» (v0.153): панель DontDestroyOnLoad — надписи
+            // встроены один раз, при смене локали пересобираем с нуля.
+            if (_canvas != null && _builtLocVersion != Loc.Version)
+            {
+                Destroy(_canvas.gameObject);
+                _canvas = null;
+                _root = null;
+                _backdrop = null;
+            }
             EnsureBuilt();
             if (_root == null)
                 return;
@@ -302,10 +442,12 @@ namespace SupremeNuclear
             scaler.matchWidthOrHeight = 0.5f;
 
             BuildPanel();
+            _builtLocVersion = Loc.Version; // панель построена под текущую локаль
         }
 
         private void BuildPanel()
         {
+            _clickables.Clear(); // пересборка (смена локали) — старые прямоугольники умерли
             // МОДАЛЬНЫЙ ФОН: полупрозрачная полноэкранная заглушка ПОД панелью
             // (создана раньше — ниже по порядку отрисовки). Image.raycastTarget
             // глотает ВСЕ клики, пока панель открыта — фантомные устройства

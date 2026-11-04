@@ -328,6 +328,15 @@ namespace SupremeNuclear
             // выкат — плиткой из панели аэродрома (нативный спавн из ангара).
             if (seg.Serviced && plan.Count == 1)
             {
+                // Подвешенные БЧ возвращаем на склад базы (нативный ReturnWeapons
+                // делает это на ReturnToInventory; резерв мода деспавнит DisableUnit
+                // напрямую — без возврата ЯЗ испарились бы вместе с бортом)
+                int hung = 0;
+                foreach (WeaponStation st in aircraft.weaponStations)
+                    if (st != null && !st.Cargo && st.WeaponInfo != null && st.WeaponInfo.nuclear)
+                        hung += st.Ammo;
+                if (hung > 0 && seg.Base != null)
+                    seg.Base.AddWarheads(hung);
                 AirbaseReserve.Add(seg.Base, aircraft.definition as AircraftDefinition);
                 AircraftOrders.Forget(aircraft);
                 aircraft.DisableUnit();
@@ -512,13 +521,35 @@ namespace SupremeNuclear
                 return; // ждём денег: таймер стоит, попробуем в следующем тике
 
             var stations = new int[aircraft.weaponStations.Count];
+            // ЯЗ — со склада БЧ ближайшего аэродрома (нативная модель «накопитель —
+            // шахта», DESIGN §2.14 слой 3): прямой RpcRearm склад не проверяет и не
+            // списывает (учёт живёт только в Rearmer/SpawnWeapons) — бюджет здесь.
+            Airbase warheadStore = hq.GetNearestAirbase(aircraft.transform.position);
+            int warheadBudget = warheadStore != null ? warheadStore.GetWarheads() : 0;
+            int warheadSpent = 0;
+            bool warheadShort = false;
             for (int i = 0; i < stations.Length; i++)
             {
                 WeaponStation st = aircraft.weaponStations[i];
-                stations[i] = st == null || st.Cargo
-                    ? 0
-                    : Mathf.Max(st.FullAmmo - st.GetAmmoTotal(), 0);
+                if (st == null || st.Cargo)
+                    continue;
+                int need = Mathf.Max(st.FullAmmo - st.GetAmmoTotal(), 0);
+                if (st.WeaponInfo != null && st.WeaponInfo.nuclear)
+                {
+                    int fill = Mathf.Min(need, warheadBudget);
+                    warheadBudget -= fill;
+                    warheadSpent += fill;
+                    stations[i] = fill;
+                    warheadShort |= fill < need;
+                }
+                else
+                    stations[i] = need;
             }
+            if (warheadSpent > 0)
+                warheadStore.RemoveWarheads(warheadSpent);
+            if (warheadShort)
+                CommanderHud.Notice(Loc.F("{0}: на складе не хватает БЧ — ядерные станции дозаряжены не полностью",
+                    aircraft.definition.unitName));
             hq.AddFunds(-cost);
             aircraft.RpcRearm(new RearmEventArgs { Rearmer = null, Stations = stations });
             aircraft.Refuel(null);

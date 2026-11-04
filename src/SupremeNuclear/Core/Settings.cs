@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using BepInEx.Configuration;
 using UnityEngine;
@@ -37,9 +38,14 @@ namespace SupremeNuclear
         public static float EdgeSpeed = 1.2f;           // скоростей: высот вида в секунду
 
         // Иконки юнитов на стратегическом зуме
+        public static bool StrategicIcons = true;       // мир/миникарта — стратегические иконки SupCom FA (v0.153, выкл — превью/плоские)
+        // НОВЫЙ КЛЮЧ (заменил StrategicScale 1.5): старое значение сохранилось
+        // в конфигах юзеров — BepInEx дефолт в старый ключ не переносит.
+        public static float WorldIconScale = 2.5f;      // множитель размера МИРОВЫХ иконок (FA-иконки несут ~30% полей; канон FA ~32px на FHD при полном отдалении)
+        public static bool UnitPreviewIcons = true;     // плитки панелей — 3D-превью модели юнита (v0.153, выкл — плоские спрайты игры)
         public static bool IconsAlwaysOn = true;        // иконки не выключаются никогда (эксперимент)
         public static float IconMinPx = 6f;             // мельче этого видимого размера — рисуем иконку (если IconsAlwaysOn=false)
-        public static float IconSizePx = 18f;           // базовый размер иконки при 1440p
+        public static float IconSizePx = 18f;           // базовый размер иконки при 1440p (до множителя WorldIconScale)
         public static int IconMaxUnits = 500;
 
         // Туман войны (DESIGN §2.14): бинарная видимость по разведке (канон SupCom)
@@ -163,6 +169,7 @@ namespace SupremeNuclear
         private static ConfigEntry<bool> _rangeWeapons;
         private static ConfigEntry<string> _mapGenTemplate;
         private static ConfigEntry<int> _mapGenSeed;
+        private static ConfigEntry<string> _language; // удержанная запись — живая смена языка (свитчер в меню)
 
         /// <summary>Выбор панели Скримиша (шаблон-пресет + сид): пишем и статические
         /// поля, и записи конфига — общий источник с входом Ctrl+G (один сид = одна
@@ -195,19 +202,52 @@ namespace SupremeNuclear
             _rangeWeapons.Value = on;
         }
 
+        /// <summary>Смена языка (свитчер в главном меню): запись в конфиг + Loc.Bootstrap.
+        /// SettingChanged записи ( BindLanguage) делает живое переключение — UI
+        /// перестраивается по Loc.Version без перезапуска; конфиг сохраняем сразу.</summary>
+        public static void SetLanguage(string lang)
+        {
+            Language = lang;
+            if (_language != null && _language.Value != lang)
+            {
+                _language.Value = lang; // SettingChanged → Loc.Bootstrap
+                SaveConfig();
+            }
+            else
+                Loc.Bootstrap(lang); // записи нет или значение уже то — таблицы перестроим напрямую
+        }
+
         /// <summary>Раннее чтение языка — ДО основного Bind и ДО загрузки таблиц локалей
-        /// в Awake: описания остальных настроек локализуются через Loc.Tr.</summary>
+        /// в Awake: описания остальных настроек локализуются через Loc.Tr.
+        /// Смена значения в менеджере конфига применяется на лету: SettingChanged →
+        /// Loc.Bootstrap + бамп Loc.Version — UI перестраивается без перезапуска
+        /// (описания настроек, застывшие в Bind, сменятся при следующем старте).</summary>
         public static string BindLanguage(ConfigFile config)
         {
             var options = new List<string> { "auto", "ru", "en" };
             foreach (string locale in Loc.Available())
                 if (!options.Contains(locale))
                     options.Add(locale);
-            Language = config.Bind("General", "Language", "auto",
+            var entry = config.Bind("General", "Language", "auto",
                 new ConfigDescription("Language · Язык интерфейса мода. auto — язык системы " +
                     "(русский → ru, прочие → en); принудительно: ru, en или имя файла из " +
-                    "BepInEx/plugins/SupremeNuclear/Locales/. Применяется при запуске",
-                    new AcceptableValueList<string>(options.ToArray()))).Value;
+                    "BepInEx/plugins/SupremeNuclear/Locales/. Смена применяется на лету",
+                    new AcceptableValueList<string>(options.ToArray())));
+            _language = entry;
+            Language = entry.Value;
+            entry.SettingChanged += (s, e) =>
+            {
+                try
+                {
+                    Language = entry.Value;
+                    Loc.Bootstrap(Language);
+                    Log.Info("Settings: язык переключён на лету — " + Loc.Language);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("Settings: сбой живой смены языка: " + ex.Message);
+                }
+            };
             return Language;
         }
 
@@ -249,6 +289,12 @@ namespace SupremeNuclear
             EdgeSpeed = config.Bind("Camera", "EdgeSpeed", 1.2f,
                 Loc.Tr("Скорость у края: сколько высот вида в секунду")).Value;
 
+            StrategicIcons = config.Bind("Icons", "StrategicIcons", true,
+                Loc.Tr("Иконки мира/миникарты — стратегические иконки SupCom (выкл — 3D-превью)")).Value;
+            WorldIconScale = Mathf.Clamp(config.Bind("Icons", "WorldIconScale", 2.5f,
+                Loc.Tr("Множитель размера мировых иконок (1 — прежний размер)")).Value, 0.5f, 4f);
+            UnitPreviewIcons = config.Bind("Icons", "UnitPreviewIcons", true,
+                Loc.Tr("Иконки юнитов — 3D-превью модели (выкл — плоские спрайты игры)")).Value;
             IconsAlwaysOn = config.Bind("Icons", "IconsAlwaysOn", true, Loc.Tr("Никогда не скрывать иконки (эксперимент)")).Value;
             IconMinPx = config.Bind("Icons", "IconMinApparentPx", 6f,
                 Loc.Tr("Видимый размер юнита (px), мельче которого рисуется 2D-иконка вместо 3D-модели")).Value;

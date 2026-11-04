@@ -36,6 +36,7 @@
     <Reference Include="UnityEngine.UIModule"><HintPath>$(ManagedDir)\UnityEngine.UIModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.UI"><HintPath>$(ManagedDir)\UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.AssetBundleModule"><HintPath>$(ManagedDir)\UnityEngine.AssetBundleModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.ImageConversionModule"><HintPath>$(ManagedDir)\UnityEngine.ImageConversionModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Unity.TextMeshPro"><HintPath>$(ManagedDir)\Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
@@ -45,6 +46,11 @@
     <!-- Пресеты генератора карт (стили land/coast/seas/islands):
          репозиторий mapgen/ -> игра BepInEx/plugins/SupremeNuclear/MapGen/ -->
     <MapGenTemplates Include="..\..\mapgen\*.json" />
+    <!-- Стратегические иконки юнитов (импорт из SupCom FA, tools/import_supcom_icons.py):
+         репозиторий icons/supcom/ -> игра BepInEx/plugins/SupremeNuclear/Icons/supcom/ -->
+    <IconPngs Include="..\..\icons\supcom\*.png" />
+    <!-- Персональный маппинг иконок (code/имя → stem): icons/overrides.json -> Icons/ -->
+    <IconOverrides Include="..\..\icons\overrides.json" />
   </ItemGroup>
 
   <Target Name="DeployToGame" AfterTargets="Build" Condition="'$(Deploy)' != 'false'">
@@ -52,6 +58,8 @@
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\" />
     <Copy SourceFiles="@(LocaleJsons)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\Locales\" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(MapGenTemplates)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\MapGen\" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(IconPngs)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\Icons\supcom\" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(IconOverrides)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\Icons\" SkipUnchangedFiles="true" />
   </Target>
 
 </Project>

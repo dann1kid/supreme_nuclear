@@ -22,6 +22,10 @@ GAME_LOCALES = r"C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\Be
 REPO_LOCALES = os.path.join(ROOT, "locales")
 GAME_MAPGEN = r"C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\BepInEx\plugins\SupremeNuclear\MapGen"
 REPO_MAPGEN = os.path.join(ROOT, "mapgen")
+GAME_ICONS = r"C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\BepInEx\plugins\SupremeNuclear\Icons\supcom"
+REPO_ICONS = os.path.join(ROOT, "icons", "supcom")
+GAME_ICON_OVERRIDES = r"C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\BepInEx\plugins\SupremeNuclear\Icons\overrides.json"
+REPO_ICON_OVERRIDES = os.path.join(ROOT, "icons", "overrides.json")
 
 failures = []
 
@@ -126,6 +130,19 @@ def main():
                         presets_ok = False
                         break
         step("Деплой: пресеты MapGen в игре идентичны репозиторию", presets_ok)
+        icons_ok = os.path.isdir(GAME_ICONS) and len(os.listdir(REPO_ICONS)) > 0
+        if icons_ok:
+            for name in os.listdir(REPO_ICONS):
+                if name.endswith(".png"):
+                    game_png = os.path.join(GAME_ICONS, name)
+                    repo_png = os.path.join(REPO_ICONS, name)
+                    if not os.path.exists(game_png) or open(game_png, "rb").read() != open(repo_png, "rb").read():
+                        icons_ok = False
+                        break
+        step("Деплой: стратегические иконки в игре идентичны репозиторию", icons_ok)
+        overrides_ok = os.path.exists(GAME_ICON_OVERRIDES) and \
+            open(GAME_ICON_OVERRIDES, "rb").read() == open(REPO_ICON_OVERRIDES, "rb").read()
+        step("Деплой: overrides иконок в игре идентичны репозиторию", overrides_ok)
     else:
         step("Игровой DLL существует", False, GAME_DLL)
 

@@ -205,6 +205,9 @@
   "Низко": "Low",
   "Низко 150м": "Low 150m",
   "Никогда не скрывать иконки (эксперимент)": "Never hide icons (experimental)",
+  "Иконки юнитов — 3D-превью модели (выкл — плоские спрайты игры)": "Unit icons — 3D model previews (off — flat game sprites)",
+  "Иконки мира/миникарты — стратегические иконки SupCom (выкл — 3D-превью)": "World/minimap icons — SupCom strategic icons (off — 3D previews)",
+  "Множитель размера мировых иконок (1 — прежний размер)": "World icon size multiplier (1 — previous size)",
   "Нужен инженер (грузовик) в выделении": "Need an engineer (truck) in selection",
   "ОПИСАНИЕ": "DESCRIPTION",
   "ОСНАЩЕНИЕ": "LOADOUT",
@@ -604,5 +607,6 @@
   "Ремонт завершён: {0}": "Repair complete: {0}",
   "Сбор обломка: {0}": "Salvage wreck: {0}",
   "Морской инженер T2": "Marine Engineer T2",
-  "Морской инженер T3": "Marine Engineer T3"
+  "Морской инженер T3": "Marine Engineer T3",
+  "{0}: на складе не хватает БЧ — ядерные станции дозаряжены не полностью": "{0}: warhead storage is short — nuclear stations rearmed only partially"
 }

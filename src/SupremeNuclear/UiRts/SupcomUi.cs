@@ -27,6 +27,11 @@ namespace SupremeNuclear
         internal static readonly Color WarnYellow = new Color(0.85f, 0.75f, 0.25f, 1f);
 
         private Canvas _canvas;
+        /// <summary>Локаль, под которую построен канвас: смена General.Language «на лету»
+        /// (SettingChanged → Loc.Bootstrap) бампит Loc.Version — канвас целиком
+        /// пересобирается (однажды встроенные надписи живых рефрешей не имеют),
+        /// MinimapPanel подхватывает новый канвас сама (canvas != _builtOnCanvas).</summary>
+        private int _canvasLocVersion = -1;
         private Font _font;
 
         /// <summary>Канвас для внешних панелей (миникарта); пересобирается по сценам.</summary>
@@ -211,6 +216,7 @@ namespace SupremeNuclear
             BuildSafe("defdesc", BuildDefDesc);
             BuildSafe("commandcard", BuildCommandCard);
             BuildSafe("tabs", BuildTabPanel);
+            _canvasLocVersion = Loc.Version; // построено под текущую локаль
             Log.Info("SupcomUi: построен, canvas=" + (_canvas != null));
         }
 
@@ -248,6 +254,15 @@ namespace SupremeNuclear
         {
             RtsInput.WheelConsumedByUi = false;   // одноразовые флаги кадра (камера)
             RtsInput.MiddleConsumedByUi = false;
+            if (_canvas != null && _canvasLocVersion != Loc.Version)
+            {
+                // Смена языка «на лету» (v0.153): сносим канвас — EnsureUi ниже
+                // пересоберёт его со всеми надписями в новой локали (§7: смена
+                // через Version-счётчик, не таймер/флаг).
+                _canvasLocVersion = Loc.Version;
+                Destroy(_canvas.gameObject);
+                _canvas = null;
+            }
             EnsureUi(); // канвас мог быть уничтожен сменой сцены — пересобираем лениво
             if (_canvas == null)
                 return;
@@ -316,6 +331,8 @@ namespace SupremeNuclear
             _contextHash = -1;
             _infoHash = -1;
             _inspHash = -1;
+            _queueHash = -1; // сцена/локаль могла не измениться — иначе строка очереди осталась бы пустой
+            _loVersion = -1;
             _loggedActiveOnce = false;
             _fundsText = null;
             _incomeText = null;
@@ -333,6 +350,7 @@ namespace SupremeNuclear
             BuildSafe("defdesc", BuildDefDesc);
             BuildSafe("commandcard", BuildCommandCard);
             BuildSafe("tabs", BuildTabPanel);
+            _canvasLocVersion = Loc.Version; // построено под текущую локаль
             Log.Info("SupcomUi: (re)built, canvas=" + (_canvas != null));
         }
 
@@ -2653,7 +2671,7 @@ step = "arrows";
             BuildTasks.Task task = t;
             Tile(content, new TileSpec
             {
-                Icon = t.Definition != null ? t.Definition.friendlyIcon : null,
+                Icon = IconOf(t.Definition),
                 Caption = t.IsRunway || t.IsDock
                     ? t.Label // спец-площадки подписаны собой («ВПП»/«Верфь»)
                     : t.Definition != null
@@ -2704,6 +2722,8 @@ step = "arrows";
             le.preferredHeight = 48f;
 
             var iconImg = Icon(go.transform, spec.Icon, new Vector2(30f, 30f));
+            if (spec.Def != null && spec.Icon != null)
+                UnitPreview.Bind(iconImg, spec.Def); // плитка не пересобралась сама — превью подменится по готовности
             ((RectTransform)iconImg.transform).anchorMin = ((RectTransform)iconImg.transform).anchorMax =
                 new Vector2(0.5f, 1f);
             ((RectTransform)iconImg.transform).anchoredPosition = new Vector2(0f, -18f);
@@ -2792,12 +2812,15 @@ step = "arrows";
             return new Color(0.72f, 0.76f, 0.72f, 1f);
         }
 
-        /// <summary>Иконка плитки: авиация — индивидуальный силуэт mapIcon (как на
-        /// макрокамере/миникарте), прочее — визорный маркер friendlyIcon.</summary>
+        /// <summary>Иконка плитки (v0.153): 3D-превью модели (UnitPreview, пока рендерится —
+        /// фолбэк); без модели — авиация силуэт mapIcon, прочее — визорный friendlyIcon.</summary>
         private static Sprite IconOf(UnitDefinition def)
         {
             if (def == null)
                 return null;
+            Sprite preview = UnitPreview.PreviewOf(def);
+            if (preview != null)
+                return preview;
             if (def is AircraftDefinition && def.mapIcon != null)
                 return def.mapIcon;
             return def.friendlyIcon != null ? def.friendlyIcon : def.mapIcon;
@@ -3084,7 +3107,7 @@ step = "arrows";
                     t.Definition != null ? t.Definition.unitName : "?", t.Progress01.ToString("P0"));
             BuildTasks.Task task = t;
             AddItemButton(_strip1Content,
-                t.Definition != null ? t.Definition.friendlyIcon : null,
+                IconOf(t.Definition),
                 Loc.Tr("Снести площадку (без возврата)"),
                 () =>
                 {
@@ -3259,15 +3282,15 @@ step = "arrows";
             if (Encyclopedia.i.buildings != null)
                 foreach (BuildingDefinition b in Encyclopedia.i.buildings)
                     if (b != null && b.jsonKey == t.iconKey)
-                        return b.friendlyIcon;
+                        return IconOf(b);
             if (Encyclopedia.i.vehicles != null)
                 foreach (VehicleDefinition v in Encyclopedia.i.vehicles)
                     if (v != null && v.jsonKey == t.iconKey)
-                        return v.friendlyIcon;
+                        return IconOf(v);
             if (Encyclopedia.i.aircraft != null)
                 foreach (AircraftDefinition a in Encyclopedia.i.aircraft)
                     if (a != null && a.jsonKey == t.iconKey)
-                        return a.friendlyIcon;
+                        return IconOf(a);
             return null;
         }
 
@@ -3281,7 +3304,7 @@ step = "arrows";
                 UnitDefinition def = u.definition;
                 Tile(_strip2Content, new TileSpec
                 {
-                    Icon = def != null ? def.friendlyIcon : null,
+                    Icon = IconOf(def),
                     Caption = def != null ? Catalog.ShortLabel(def.code, def.unitName) : null,
                     OnRight = () =>
                     {
@@ -3444,7 +3467,7 @@ step = "arrows";
                     BuildingDefinition d = def;
                     Tile(_strip1Content, new TileSpec
                     {
-                        Icon = def.friendlyIcon != null ? def.friendlyIcon : def.mapIcon,
+                        Icon = IconOf(def),
                         Caption = Catalog.ShortLabel(def.code, def.unitName),
                         TypeBadge = BuildTasks.IsHangarDefinition(d) ? Loc.Tr("АНГ") : null,
                         TierBadge = "T" + UnitRoster.BuildingTierOf(def),
@@ -3790,9 +3813,9 @@ step = "arrows";
             ClearChildren(_loWin.Content);
             var content = _loWin.Content;
 
-            // Шапка: силуэт + имя/класс + масса пустого борта
-            var icon = Icon(content, def.mapIcon != null ? def.mapIcon : def.friendlyIcon,
-                new Vector2(84f, 84f));
+            // Шапка: превью борта + имя/класс + масса пустого борта
+            var icon = Icon(content, IconOf(def), new Vector2(84f, 84f));
+            UnitPreview.Bind(icon, def); // 84px портрет живёт дольше цикла рефрешей
             var irt = (RectTransform)icon.transform;
             irt.anchorMin = irt.anchorMax = new Vector2(0f, 1f);
             irt.pivot = new Vector2(0f, 1f);

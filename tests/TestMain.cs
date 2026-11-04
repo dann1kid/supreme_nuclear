@@ -1105,6 +1105,7 @@ namespace SupremeNuclear.Tests
                 Util.RuPlural(112, "тип", "типа", "типов") == "типов");
 
             // ---------- Loc: локализация (gettext: ключ = русская исходная строка) ----------
+            int locVersion;
             Loc.Install("ru", "{\"носитель\": \"carrier\"}", null);
             Check("Loc: ru — тождество даже при наличии en-таблицы (фолбэк не включается)",
                 Loc.Tr("патруль") == "патруль" && Loc.Tr("носитель") == "носитель" &&
@@ -1129,9 +1130,12 @@ namespace SupremeNuclear.Tests
             Check("Loc: третья локаль — своя таблица, фолбэк en, глубже — исходник",
                 Loc.Tr("движение") == "mouvement" && Loc.Tr("залп") == "salve" &&
                 Loc.Tr("стоп") == "стоп");
+            locVersion = Loc.Version;
             Loc.Install("ru", null, null);
             Check("Loc: сброс в ru — состояние тестов не течёт",
                 Loc.Tr("движение") == "движение" && Loc.Language == "ru");
+            Check("Loc: Install бампит Version — живая смена языка перестраивает UI (v0.153)",
+                Loc.Version == locVersion + 1);
 
             // ---------- FitLine: однострочная подгонка под ширину панели ----------
             Check("FitLine: короткая строка без изменений",
@@ -2199,6 +2203,18 @@ namespace SupremeNuclear.Tests
                 }
                 }
             }
+
+            // ---------- StrategicIcons.StemCandidates: стемы стратегических иконок FA ----------
+            var stemT1 = StrategicIcons.StemCandidates("land_directfire", 1);
+            Check("StemCandidates: tiered первым, plain вторым",
+                stemT1.Length == 2 && stemT1[0] == "land1_directfire" && stemT1[1] == "land_directfire");
+            var stemT3 = StrategicIcons.StemCandidates("land_engineer", 3);
+            Check("StemCandidates: тир 3 в стеме", stemT3[0] == "land3_engineer");
+            var stemClamp = StrategicIcons.StemCandidates("structure_mass", 7);
+            Check("StemCandidates: тир клампится 1..3", stemClamp[0] == "structure3_mass");
+            Check("StemCandidates: без роли — один plain-стем",
+                StrategicIcons.StemCandidates("commander", 2).Length == 1 &&
+                StrategicIcons.StemCandidates("commander", 2)[0] == "commander");
 
             Console.WriteLine(_failed == 0 ? "ВСЕ ТЕСТЫ ПРОЙДЕНЫ" : "ПРОВАЛОВ: " + _failed);
             return _failed == 0 ? 0 : 1;

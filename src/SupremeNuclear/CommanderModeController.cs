@@ -86,6 +86,7 @@ namespace SupremeNuclear
 
             GameApi.TickOriginShiftMonitor();
             GameApi.TickHpCache();
+            UnitPreview.Tick(); // конвейер 3D-превью юнитов: 1 рендер/кадр (иконки мира/плиток/миникарты)
             UnitRoster.EnsureApplied(); // ростер юнитов/зданий (тиры/цены/имена) — ДО всех потребителей
             BuildingPool.EnsureCreated(); // пул строений по ролям — после ростера (каталог стройки = только пул)
             EngineerService.EnsureCreated(); // клоны инженеров T2/T3 — после ростера (host-агностично)

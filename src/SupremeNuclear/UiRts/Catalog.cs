@@ -103,8 +103,9 @@ namespace SupremeNuclear
         };
 
         /// <summary>Ключ роли авиации — нелокализуемые метки: по ним же switch
-        /// полного имени ниже, поэтому сами через Tr не проходят.</summary>
-        private static string RoleKey(RoleIdentity role, TypeIdentity type)
+        /// полного имени ниже и маппинг стратегических иконок (StrategicIcons),
+        /// поэтому сами через Tr не проходят.</summary>
+        internal static string RoleKey(RoleIdentity role, TypeIdentity type)
         {
             float aa = role.antiAir, asu = role.antiSurface;
             if (aa < 0.25f && asu < 0.25f)

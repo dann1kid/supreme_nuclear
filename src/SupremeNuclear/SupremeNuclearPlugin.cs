@@ -63,6 +63,7 @@ namespace SupremeNuclear
                 WarheadService.Reset(); // заряды БЧ/точки пуска умерли вместе со сценой
                 SelectionService.ResetGroups();
                 RangeRings.Reset(); // кольца дальности: круги/буферы сцены
+                UnitPreview.Reset(); // превью-иконки: очередь/бинды/RT/кэш умершей сцены
                 TaxiSurface.Reset(); // плиты дорисованных рулёжек умершей сцены
                 RouteRibbonMesh.Destroy(); // меши/материалы от донора умершей сцены
                 CommanderAudio.Restore(); // страховка: вернуть доплер источникам, если вышли без Deactivate

@@ -22,6 +22,7 @@ namespace SupremeNuclear
         private Vector2 _viewSize = Vector2.one;
         private const float ZoomPerNotch = 1.25f; // шаг зума на щелчок колеса
         private const float IconScaleMax = 4f;    // предел роста иконок при зуме (×)
+        private const float BlipIconScale = 1.5f; // спрайт-блипы крупнее точек (FA-иконка несёт ~30% полей; независим от WorldIconScale — юзер: «миникарта ни при чём»)
 
         /// <summary>Экранный прямоугольник окна миникарты в GUI-координатах (IMGUI:
         /// y сверху вниз, как в OnGUI). CommanderHud гасит под ним мировые точечные
@@ -558,9 +559,17 @@ namespace SupremeNuclear
                 float angle = 0f;
                 if (!diamond && !anon && !(unit is Missile))
                 {
-                    if (unit is Aircraft && unit.definition != null &&
+                    // v0.153: стратегическая иконка SupCom FA (канон миникарты) →
+                    // 3D-превью (пока рендерится — фолбэк на плоский спрайт);
+                    // переприсвоение каждый проход само подменяет картинку по готовности.
+                    if (unit.definition != null)
+                        sprite = StrategicIcons.Of(unit) ?? UnitPreview.PreviewOf(unit.definition);
+                    if (sprite == null && unit is Aircraft && unit.definition != null &&
                         unit.definition.mapOrient && unit.definition.mapIcon != null)
                     {
+                        // Фолбэк авиации без иконок: ориентированный силуэт
+                        // (миникарта «север вверх», знак минус: uGUI вращает
+                        // против часовой, IMGUI-вариант — по часовой).
                         sprite = unit.definition.mapIcon;
                         Vector3 fwd = unit.transform.forward;
                         fwd.y = 0f;
@@ -570,7 +579,7 @@ namespace SupremeNuclear
                             angle = -Mathf.Atan2(fwd.x, fwd.z) * Mathf.Rad2Deg;
                         }
                     }
-                    else if (unit.definition != null)
+                    else if (sprite == null && unit.definition != null)
                     {
                         sprite = friendly
                             ? (unit.definition.friendlyIcon != null
@@ -579,7 +588,11 @@ namespace SupremeNuclear
                                 ? unit.definition.hostileIcon : unit.definition.friendlyIcon);
                     }
                 }
-                PlaceBlip(unit, used, blipPos, min, max, color, sizePx * iconScale, diamond, sprite, angle);
+                // Спрайт-блипы (стратегические иконки) крупнее — BlipIconScale;
+                // точечные/ромбовидные отметки остаются прежними.
+                PlaceBlip(unit, used, blipPos, min, max, color,
+                    sizePx * iconScale * (sprite != null ? BlipIconScale : 1f),
+                    diamond, sprite, angle);
             }
 
             // Убираем блипы, не попавшие в этот проход.
@@ -633,14 +646,21 @@ namespace SupremeNuclear
                 }
                 img.gameObject.SetActive(true);
                 img.color = GhostHostile;
-                img.sprite = g.Definition != null
-                    ? (g.Definition.hostileIcon != null ? g.Definition.hostileIcon : g.Definition.friendlyIcon)
+                // Стратегическая иконка призрака (как у живых зданий); без иконки —
+                // прежний ромб с плоским спрайтом игры.
+                Sprite sprite = g.Definition != null
+                    ? (StrategicIcons.OfDef(g.Definition) ?? g.Definition.hostileIcon
+                        ?? g.Definition.friendlyIcon)
                     : null;
+                img.sprite = sprite;
+                img.preserveAspect = sprite != null;
                 var rt = (RectTransform)img.transform;
-                float sizePx = 8f * iconScale;
+                float sizePx = 8f * iconScale * (sprite != null ? BlipIconScale : 1f);
                 rt.sizeDelta = new Vector2(sizePx, sizePx);
                 rt.localPosition = new Vector3(local.x, local.y, 0f);
-                rt.localRotation = Quaternion.Euler(0f, 0f, 45f);
+                rt.localRotation = sprite != null
+                    ? Quaternion.identity
+                    : Quaternion.Euler(0f, 0f, 45f);
             }
             _staleGhostBlips.Clear();
             foreach (KeyValuePair<PersistentID, Image> kv in _ghostBlips)

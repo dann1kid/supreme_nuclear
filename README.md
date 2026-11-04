@@ -43,15 +43,20 @@ Controls/UX feedback is welcome — GitHub Issues (feedback template).
 
 ## Языки / Languages
 
-Интерфейс мода локализован: **русский** (основной) и **английский** — настройка
-`General.Language` в `BepInEx/config/com.supremenuclear.rts.cfg` (`auto` — язык системы,
-принудительно `ru`/`en`; применяется при запуске). Добавить свой язык — один файл
-`BepInEx/plugins/SupremeNuclear/Locales/<язык>.json` по образцу `en.json` (см. AGENTS
-«Правила локализации»). Диагностика (логи, SelfCheck, F11) — только по-русски.
+Интерфейс мода локализован: **русский** (основной) и **английский**. Переключение —
+кнопка **«Language»** в главном меню под «Скримиш» (цикл `ru` ↔ `en`,
+применяется на лету) или настройка `General.Language` в
+`BepInEx/config/com.supremenuclear.rts.cfg` (`auto` — язык системы; принудительно
+`ru`/`en` или имя файла из `BepInEx/plugins/SupremeNuclear/Locales/`). Добавить свой
+язык — один файл `Locales/<язык>.json` по образцу `en.json` (см. AGENTS «Правила
+локализации»). Диагностика (логи, SelfCheck, F11) — только по-русски.
 
-The mod UI ships in **Russian** (source language) and **English** — set
-`General.Language` in the BepInEx config (`auto` follows your OS language). New locales
-are a single JSON file; untranslated entries fall back to English, then Russian.
+The mod UI ships in **Russian** (source language) and **English**. Switch it with the
+**Language** button in the main menu (under Skirmish; toggles `ru`/`en`,
+applies instantly) or via the `General.Language` entry in the BepInEx config
+(`auto` follows your OS language; other locale files go to
+`BepInEx/plugins/SupremeNuclear/Locales/`). Untranslated entries fall back to English,
+then Russian.
 
 ---
 
@@ -293,7 +298,9 @@ overHorizon-ракет.
 энергию); войска ничего не захватывают, только сносят. **Апгрейд экстрактора** —
 наливом, отменяется с возвратом. **Салваж**: инженер, стоящий рядом с обломком,
 разбирает его (+ масса; несколько инженеров быстрее). **Сервис вылета** дорожает
-с уроном борта. Баланс — `BepInEx/plugins/SupremeNuclear/Economy/<Profile>.json`.
+с уроном борта; ядерные подвески доналиваются **со склада БЧ аэродрома**
+(не хватает зарядов — ядерные станции остаются пустыми; уход борта в резерв
+возвращает подвешенные ЯЗ на склад). Баланс — `BepInEx/plugins/SupremeNuclear/Economy/<Profile>.json`.
 
 ### Покупки
 

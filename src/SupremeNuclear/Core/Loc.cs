@@ -23,6 +23,10 @@ namespace SupremeNuclear
         /// <summary>Текущий язык: "ru", "en" или имя файла локали без расширения.</summary>
         public static string Language = "ru";
 
+        /// <summary>Счётчик смены таблиц (Install — в т.ч. живое переключение языка).
+        /// UI-владельцы кэшей/пересборок сверяются с ним, не таймерами (§7).</summary>
+        public static int Version;
+
         private static readonly Dictionary<string, string> Empty = new Dictionary<string, string>();
         private static Dictionary<string, string> _table = Empty; // выбранная локаль
         private static Dictionary<string, string> _en = Empty;    // таблица фолбэка en
@@ -32,7 +36,8 @@ namespace SupremeNuclear
 
         /// <summary>Загрузка таблиц по настройке языка ("auto" = язык системы:
         /// русский → ru, прочие → en). Вызывается в Awake ДО Settings.Bind —
-        /// описания остальных настроек тоже проходят через Tr.</summary>
+        /// описания остальных настроек тоже проходят через Tr; повторно — при
+        /// живой смене General.Language (SettingChanged, v0.153).</summary>
         public static void Bootstrap(string preferred)
         {
             string auto = Application.systemLanguage == SystemLanguage.Russian ? "ru" : "en";
@@ -112,6 +117,7 @@ namespace SupremeNuclear
                 }
             }
             Language = language;
+            Version++;
         }
 
         /// <summary>Перевод строки: локаль → en → исходник; null/пустое — как есть.

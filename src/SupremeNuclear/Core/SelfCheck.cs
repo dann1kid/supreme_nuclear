@@ -161,6 +161,16 @@ namespace SupremeNuclear
                 if (HarmonyLib.AccessTools.Field(typeof(UnitDefinition), "unitPrefab") == null)
                     throw new System.Exception("UnitDefinition.unitPrefab не найден");
             });
+            Check("UnitPreview: unitPrefab + слой 16 (3D-превью иконок)", () =>
+            {
+                if (HarmonyLib.AccessTools.Field(typeof(UnitDefinition), "unitPrefab") == null)
+                    throw new System.Exception("UnitDefinition.unitPrefab не найден — превью-иконки не соберутся");
+                // Слой рендера превью предполагается СВОБОДНЫМ: камера рисует на нём
+                // только свои меши; занятый игрой слой подхватит чужую геометрию.
+                string layerName = LayerMask.LayerToName(UnitPreview.PreviewLayer);
+                if (!string.IsNullOrEmpty(layerName))
+                    Log.Warn($"SelfCheck: слой {UnitPreview.PreviewLayer} занят игрой ('{layerName}') — превью-иконки могут рисоваться с мусором");
+            });
             Check("VehicleDepot.spawnTransform (стрелка выхода депо)", () =>
             {
                 if (HarmonyLib.AccessTools.Field(typeof(VehicleDepot), "spawnTransform") == null)
