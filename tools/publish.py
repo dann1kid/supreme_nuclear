@@ -1,19 +1,20 @@
-"""Автопубликация Supreme Nuclear на GitHub: снимок master → ветка main → пуш →
-релиз со свежим zip. Одна команда после коммита = игроки качают актуальный билд.
+"""Автопубликация Supreme Nuclear на GitHub: пуш master → релиз со свежим
+zip. Одна команда после коммита = игроки качают актуальный билд.
 
-Запуск:  python tools/publish.py                # синк main + пуш + релиз v<версия>
+Запуск:  python tools/publish.py                # пуш master + релиз v<версия>
          python tools/publish.py --no-push      # упаковка без пуша/релиза (проверка)
-         python tools/publish.py --no-release   # пуш main без релиза (правки доков)
+         python tools/publish.py --no-release   # пуш master без релиза (правки доков)
 
 Почему так: GitHub Actions не соберёт мод (reference-сборки берутся из
 установленной игры), поэтому релиз делает эта машина. Артефакт собирается
-в ОТДЕЛЬНОМ git-worktree от main — общий bin делится с параллельными
-сессиями, и однажды zip уже получал чужой WIP-бинарь (2026-10-28).
+в ОТДЕЛЬНОМ git-worktree от ЗАКОММИЧЕННОГО master — общий bin делится с
+параллельными сессиями, и однажды zip уже получал чужой WIP-бинарь
+(2026-10-28).
 
-Ветка main — только чистые снимки master: decompiled/, GroundControlRts/
-и .zcode/ в неё не попадают никогда (в истории master их пушить нельзя).
-Конвейер на общем дереве (tools/build.py) publish не запускает — он гоняет
-те же проверки там, где реально собирается артефакт: в worktree.
+Одна ветка master (2026-11-04, юзер-выбор): прежде публиковались орфан-
+снимки в main — теперь декомпил/reference вырезаны из истории (filter-repo)
+и закрыты .gitignore, снимки потеряли смысл, а баннер Compare&PR и
+несравнимые ветки — ушли. Релиз-тег вешается на коммит master.
 
 Требует: git, gh (gh auth login — один раз), установленную игру (GameDir).
 """
@@ -76,56 +77,28 @@ def main():
     if failures:
         sys.exit(1)
 
-    # ---------- 1. Снимок master → main (без checkout: индекс во временном файле) ----------
+    # ---------- 1. Гигиена master: запрещённые пути не в индексе ----------
     code, master_sha = run(["git", "-C", ROOT, "rev-parse", "master"])
     master_sha = master_sha.strip()
     step("master найден", code == 0, master_sha[:9])
-
-    index = os.path.join(ROOT, ".git", "tmp-publish-index")
-    env = dict(os.environ, GIT_INDEX_FILE=index)
-    subprocess.run(["git", "-C", ROOT, "read-tree", "master"], env=env, check=True)
-    for path in EXCLUDED:  # пути может уже не быть в индексе — это не ошибка
-        subprocess.run(["git", "-C", ROOT, "rm", "-r", "-q", "--cached", path],
-                       env=env, capture_output=True)
     p = subprocess.run(["git", "-C", ROOT, "ls-files", "--"] +
-                       [path + "/" for path in EXCLUDED], env=env, capture_output=True)
+                       [path + "/" for path in EXCLUDED], capture_output=True)
     leftover = p.stdout.decode().strip()
-    step("Исключаемые пути убраны из снимка", leftover == "",
-         leftover.splitlines()[0] if leftover else ", ".join(EXCLUDED))
-    tree = subprocess.run(["git", "-C", ROOT, "write-tree"], env=env,
-                          check=True, capture_output=True).stdout.decode().strip()
-    os.remove(index)
-
-    code, prev = run(["git", "-C", ROOT, "rev-parse", "--verify", "main"])
-    parents = ["-p", prev.strip()] if code == 0 else []
-    reuse = False
-    if parents:
-        code, prev_tree = run(["git", "-C", ROOT, "rev-parse", "main^{tree}"])
-        reuse = code == 0 and prev_tree.strip() == tree
-    code, subject = run(["git", "-C", ROOT, "log", "-1", "--format=%s", "master"])
-    if reuse:
-        new_main = prev.strip()
-    else:
-        msg = "Supreme Nuclear v%s — публикация\n\n%s" % (version, subject.strip())
-        new_main = subprocess.run(
-            ["git", "-C", ROOT, "commit-tree", tree] + parents + ["-m", msg],
-            check=True, capture_output=True).stdout.decode().strip()
-    subprocess.run(["git", "-C", ROOT, "branch", "-f", "main", new_main], check=True)
-    step("Снимок main создан", True, "%s (%s)"
-         % (new_main[:9], "дерево не менялось" if reuse else "новый снимок"))
+    step("Запрещённые пути вне индекса master", leftover == "",
+         leftover.splitlines()[0] if leftover else ", ".join(EXCLUDED) + " — gitignore")
 
     # ---------- 2. Сборка артефакта в изолированном worktree ----------
     run(["git", "-C", ROOT, "worktree", "remove", "--force", WORKTREE])
     if os.path.exists(WORKTREE):
         shutil.rmtree(WORKTREE, ignore_errors=True)
-    code, out = run(["git", "-C", ROOT, "worktree", "add", "--detach", WORKTREE, "main"])
+    code, out = run(["git", "-C", ROOT, "worktree", "add", "--detach", WORKTREE, "master"])
     step("Worktree создан", code == 0, WORKTREE)
 
     if not failures:
         try:
             code, out = run(["dotnet", "build", os.path.join("src", "SupremeNuclear",
                         "SupremeNuclear.csproj"), "-c", "Release", "-p:Deploy=false"], cwd=WORKTREE)
-            step("Сборка main 0 ошибок", code == 0 and ("Ошибок: 0" in out or "0 Error" in out),
+            step("Сборка master 0 ошибок", code == 0 and ("Ошибок: 0" in out or "0 Error" in out),
                  out[-300:] if code else "")
             dll = os.path.join(WORKTREE, "src", "SupremeNuclear", "bin", "Release",
                                "SupremeNuclear.dll")
@@ -138,7 +111,7 @@ def main():
             p = subprocess.run([exe], capture_output=True)
             step("Тесты чистой логики", p.returncode == 0)
             code, out = run(["python", os.path.join("tools", "check_locales.py")], cwd=WORKTREE)
-            step("Локали снимка", code == 0)
+            step("Локали", code == 0)
 
             # ---------- 3. Zip ----------
             if os.path.exists(DIST):
@@ -183,11 +156,11 @@ def main():
     if no_push:
         print("\nСУХОЙ ПРОГОН ЗЕЛЁНЫЙ (v%s) — пуш/релиз пропущены (--no-push)" % version)
         return
-    code, out = run(["git", "-C", ROOT, "push", "-u", "origin", "main"])
-    step("Пуш main", code == 0, out[-200:] if code else "")
+    code, out = run(["git", "-C", ROOT, "push", "origin", "master"])
+    step("Пуш master", code == 0, out[-200:] if code else "")
     if will_release:
         notes = "Автопубликация из master: %s" % subject.strip()
-        code, out = run(["gh", "release", "create", "v" + version, "--target", "main",
+        code, out = run(["gh", "release", "create", "v" + version, "--target", "master",
                          zip_path, "--title", "v" + version, "--notes", notes], cwd=ROOT)
         step("Релиз создан", code == 0, out[-200:] if code else "releases/tag/v" + version)
     if failures:
