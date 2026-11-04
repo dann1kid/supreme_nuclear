@@ -156,6 +156,9 @@ def main():
     if no_push:
         print("\nСУХОЙ ПРОГОН ЗЕЛЁНЫЙ (v%s) — пуш/релиз пропущены (--no-push)" % version)
         return
+    code, subject = run(["git", "-C", ROOT, "log", "-1", "--format=%s", "master"])
+    if code != 0:
+        subject = "Supreme Nuclear v%s" % version
     code, out = run(["git", "-C", ROOT, "push", "origin", "master"])
     step("Пуш master", code == 0, out[-200:] if code else "")
     if will_release:
@@ -166,7 +169,7 @@ def main():
     if failures:
         print("\nПУШ/РЕЛИЗ ПРОВАЛЕН: " + ", ".join(failures))
         sys.exit(1)
-    print("\nОПУБЛИКОВАНО: main обновлён%s" % (
+    print("\nОПУБЛИКОВАНО: master запушен%s" % (
         ", релиз v%s — игроки качают из releases/latest" % version if will_release else " (без релиза)"))
 
 
