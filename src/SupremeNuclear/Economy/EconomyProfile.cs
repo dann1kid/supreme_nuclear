@@ -69,6 +69,12 @@ namespace SupremeNuclear
         public float salvageSeconds = 8f;   // база: один инженер; несколько — пропорционально быстрее
         public float salvageRadiusM = 120f;
 
+        // Ремонт инженером (v0.149, 4-я функция сьюта SupCom build/repair/reclaim/capture):
+        // ПКМ по раненой технике/зданию; налив HP пропорционален фактору мощи инженеров.
+        public float repairCostFactor = 0.5f; // полное восстановление = 50% цены юнита (масса)
+        public float repairHpPerSecond = 4f;  // агрегатный %HP/с на фактор мощи 1 (инженеры суммируются)
+        public float repairRadiusM = 60f;     // радиус налива от цели (за вычетом габарита цели)
+
         // Снабжение v1 (§2.14): слой 1 — обычные БК наземки/флота/турелей бесконечны
         // (событийный ресток патчем №13); слой 2 — ракетный пуск стоит массу+энергию.
         public bool freeAmmoForGround = true;

@@ -36,6 +36,9 @@ namespace SupremeNuclear
                 GameApi.ResetSceneCache();
                 EconomyService.Reset();
                 SalvageService.Reset(); // прогресс разбора обломков привязан к сцене
+                RepairService.Reset(); // налив ремонта и снятые патрули привязаны к сцене
+                EngineerService.ResetScene(); // задекорированные клоны умерли вместе со сценой
+                PauseService.Reset(); // паузы юнитов умерли вместе со сценой
                 ShipPadService.Reset(); // палубы умерли вместе со сценой
                 CaptureService.Reset(); // прогресс инженерного захвата привязан к сцене
                 AiCommanderService.Reset(); // планы AI-фракций привязаны к юнитам сцены

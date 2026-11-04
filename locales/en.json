@@ -592,5 +592,17 @@
   "Производство стоит: нет энергии — постройте генераторы": "Production stalled: no energy — build generators",
   "ШТАБ": "HQ",
   "Штаб-фабрика → T{0}": "HQ factory → T{0}",
-  "Не строится без живого ШТАБ T{0} — постройте HQ": "Cannot build without a living T{0} HQ — build one first"
+  "Не строится без живого ШТАБ T{0} — постройте HQ": "Cannot build without a living T{0} HQ — build one first",
+  "Авиация": "Air",
+  "Вертолёты": "Helos",
+  "Танки": "Tanks",
+  "Флот": "Navy",
+  "Апгрейд: {0} ×{1}": "Upgrade: {0} ×{1}",
+  "Фабрика T{0} напрямую: нужен живой ШТАБ T{0} этого типа": "Direct T{0} factory: needs a living T{0} HQ of this type",
+  "Ремонт: {0} → {1}": "Repair: {0} → {1}",
+  "Ремонт не ставится в очередь — выдай без Shift": "Repair is not queued — issue without Shift",
+  "Ремонт завершён: {0}": "Repair complete: {0}",
+  "Сбор обломка: {0}": "Salvage wreck: {0}",
+  "Морской инженер T2": "Marine Engineer T2",
+  "Морской инженер T3": "Marine Engineer T3"
 }

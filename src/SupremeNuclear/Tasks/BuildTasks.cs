@@ -48,6 +48,13 @@ namespace SupremeNuclear
             /// (юниты едут) — полусекундной свежести достаточно (§12-перф).</summary>
             public Unit ZoneBlockerCache;
             public float NextZoneScanAt;
+            public Unit FootprintCache;   // кто стоит/ехал ВНУТРИ футпринта (наливы стоят)
+            public float NextFootprintScanAt;
+
+            /// <summary>Зона занята для МАРКЕРА/налива: внешний блокер (радиус) ИЛИ
+            /// кто-то внутри футпринта (дисциплина площадки, v0.152: стройка не
+            /// капает, пока футпринт не пуст — инженеры выстраиваются на кольце).</summary>
+            public bool ZoneBusy => ZoneBlocked || FootprintCache != null;
             public float Progress01 => Cost > 0f ? Mathf.Clamp01(PaidMass / Cost) : 0f;
             public string Label => IsRunway ? Loc.Tr("ВПП") : IsDock ? Loc.Tr("Верфь") : Definition?.unitName;
         }
@@ -848,6 +855,23 @@ namespace SupremeNuclear
                 return false;
             }
 
+            // Пул-вариант «фабрика T2/T3 напрямую» (юзер-канон 2026-11-04):
+            // инженер тира хватает (гейт выше), нужен ещё ЖИВОЙ HQ типа этого
+            // тира — зеркало гейта дешёвого апгрейда.
+            PoolSpec pspec = BuildingPool.SpecOf(def);
+            if (pspec != null && pspec.factory && pspec.tier > 1)
+            {
+                // Вид фабрики по донору роли (def — клон-определение, не юнит):
+                // депо → land, ангары/площадки → air (канон KindOfKey).
+                string kind = pspec.donor == "VehicleDepot1" ? "land" : "air";
+                if (!FactoryTierService.AnyHq(hq, pspec.tier, kind))
+                {
+                    if (notice)
+                        CommanderHud.Notice(Loc.F("Фабрика T{0} напрямую: нужен живой ШТАБ T{0} этого типа", pspec.tier));
+                    return false;
+                }
+            }
+
             // Наклон под рельеф — только сухопутное депо: ангар встаёт на плоский
             // апрон (TaxiSurface.Pad), верфь — на платформу у уровня моря (TryPlaceDock).
             float pitch = 0f, roll = 0f;
@@ -916,10 +940,19 @@ namespace SupremeNuclear
 
         /// <summary>СБРОС всей очереди инженера (прямой приказ без Shift, постановка
         /// площадки/шаблона без Shift — семантика SupCom «новая очередь»): уходит из
-        /// всех задач, хвост движений чистится. САМИ площадки остаются (SupCom-канон,
-        /// возвращён плейтестом v0.83.2 — недострой живёт до достройки/явного сноса,
-        /// инженеры переключаются между заданиями свободно; снос безхозных в v0.80.2
-        /// отменён). Достройка — ПКМ по недострою (TryResume).</summary>
+        /// всех задач, хвост движений чистится. САМИ площадки остаются, ПОКА стоят
+        /// хоть в одной очереди (юзер-канон 2026-11-04: площадка-СИРОТА — нет
+        /// строителей И нет записей ни в одной очереди — отменяется в тике
+        /// CancelOrphans; прежний «вечный недострой» v0.83.2 давил призраками
+        /// после ПКМ-переключения инженеров). Достройка — ПКМ по недострою
+        /// (TryResume) — действует, пока сирота не снята тиком.
+        /// ФИКС 2026-11-04 «здание встало в очередь мувпоинтом без Shift»:
+        /// доктрина «хвост движений чистится» не выполнялась буквально —
+        /// живая цепочка GroundOrders (ПКМ-приказ) пережила сброс: авансер
+        /// AdoptChainTail до неё дотягивался и она шла ПЕРЕД новой площадкой
+        /// (выглядело как «площадка дописана в очередь»). Теперь: цепочка
+        /// чистится + стоп-приказ «на свою позицию» гасит нативный
+        /// commandedDestination (паттерн активации AI).</summary>
         public static void ClearFor(Unit builder)
         {
             if (builder == null)
@@ -931,7 +964,10 @@ namespace SupremeNuclear
                     versionBump = true;
                     DetachRoute(builder, t); // отцепиться маршрутом от площадки
                 }
+            GroundOrders.Clear(builder); // хвост движений — ЧИСТИТЬ (доктрина)
             Sequences.Remove(builder);
+            builder.GetComponent<UnitCommand>()?.SetDestination(
+                builder.transform.position.ToGlobalPosition(), false); // стоп нативу
             if (builder is Ship sea)
                 sea.SetHoldPosition(false); // морской инженер уходит — с якоря
             if (versionBump)
@@ -943,12 +979,12 @@ namespace SupremeNuclear
         /// минимума (мелкие постройки). Чистая — тестируется (Util.BuildApproachRingM).</summary>
         private const float MinApproachRingM = 25f;
 
-        private static float RingM(Task t)
+        /// <summary>Полудиагональ футпринта площадки (габарит будущего здания;
+        /// верфь — платформа, ВПП — полуширина полосы).</summary>
+        private static float FootprintHalfM(Task t)
         {
-            float cap = Settings.BuildSiteRadiusM * 0.85f;
             if (t.IsRunway)
-                return Util.BuildApproachRingM(Settings.RunwayWidthM * 0.5f,
-                    Settings.BuildApproachMarginM, MinApproachRingM, cap);
+                return Settings.RunwayWidthM * 0.5f;
             float half = 30f;
             if (t.Definition != null)
             {
@@ -961,7 +997,22 @@ namespace SupremeNuclear
                 }
                 half = 0.5f * Mathf.Sqrt(w * w + l * l);
             }
-            return Util.BuildApproachRingM(half, Settings.BuildApproachMarginM, MinApproachRingM, cap);
+            return half;
+        }
+
+        private static float RingM(Task t)
+        {
+            float cap = Settings.BuildSiteRadiusM * 0.85f;
+            float ring = Util.BuildApproachRingM(FootprintHalfM(t),
+                Settings.BuildApproachMarginM, MinApproachRingM, cap);
+            // Дисциплина площадки (v0.152, плейтест «толкаются у площадки»):
+            // дуга кольца на строителя ≥ шаг формации — много инженеров не
+            // слипаются в одну точку веера. Потолок 0.9·радиуса оплаты:
+            // кольцо дальше радиуса = «стоит на кольце и не строит».
+            float perBuilder = Mathf.Min(
+                t.Builders.Count * Settings.FormationSpacing / (2f * Mathf.PI),
+                Settings.BuildSiteRadiusM * 0.9f);
+            return Mathf.Max(ring, perBuilder);
         }
 
         /// <summary>Веер строителей вокруг площадки (SupCom «окружают призрак»):
@@ -1204,6 +1255,12 @@ namespace SupremeNuclear
         public static bool HasSequence(Unit builder) =>
             Sequences.TryGetValue(builder, out List<SeqEntry> seq) && seq.Count > 0;
 
+        /// <summary>Инженер занят стройкой: очередь кликов непуста ИЛИ стоит в
+        /// строителях живой задачи (запрос извне — фильтр занятости патруль-подхвата
+        /// ремонта RepairService; зеркало внутреннего фильтра TickPatrolAssist).</summary>
+        public static bool IsBuilderBusy(Unit builder) =>
+            HasSequence(builder) || HasActiveTask(builder);
+
         // == DISPERSE СТРОЙКИ (v0.108): скретчи раздачи (хоткей, не OnGUI).
         private static readonly List<Unit> DisperseBuilders = new List<Unit>();
         private static readonly List<Task> DispersePool = new List<Task>();
@@ -1429,6 +1486,17 @@ namespace SupremeNuclear
                         return true;
                     continue;
                 }
+                if (u is Building b && !EconomyService.IsSiteMarker(b))
+                {
+                    // ГОТОВОЕ здание — блокер «не расчищено» на дистанции
+                    // СПЕЙСИНГА (не 150 м зоны: ангарам положено стоять у своей
+                    // базы/друг друга): ставить поверх — стек (юзер 2026-11-04).
+                    Vector3 bp = u.transform.position;
+                    float sp = Settings.BuildSiteSpacingM;
+                    if (new Vector2(bp.x - site.x, bp.z - site.z).sqrMagnitude < sp * sp)
+                        return true;
+                    continue;
+                }
                 if (!(u is GroundVehicle || u is Ship))
                     continue;
                 if (GameApi.IsEngineer(u))
@@ -1443,6 +1511,118 @@ namespace SupremeNuclear
         private static bool IsIdleFriendly(Unit u, FactionHQ hq) =>
             u.NetworkHQ == hq && GroundOrders.IsIdle(u); // атака/очередь целей — не простой:
         // пуш из зоны стройки (GroundOrders.Set) порвал бы приказ
+
+        /// <summary>Первый живой МОБИЛЬНЫЙ юнит внутри ФУТПРИНТА площадки (любой
+        /// фракции, включая инженеров-строителей — их место на кольце; авиация
+        /// летает над, здания/маркеры исключены). null — футпринт чист.</summary>
+        private static Unit FootprintOccupant(Task t)
+        {
+            float half = FootprintHalfM(t) + 3f;
+            float rSq = half * half;
+            Vector3 probe = default;
+            foreach (Unit u in UnitRegistry.allUnits)
+            {
+                if (u == null || u.disabled || !(u is GroundVehicle || u is Ship))
+                    continue;
+                Vector3 p = u.transform.position;
+                if (FootprintDistSqLocal(t, p, ref probe) < rSq)
+                    return u;
+            }
+            return null;
+        }
+
+        /// <summary>Квадрат дистанции до ФУТПРИНТА + БЛИЖАЙШАЯ точка футпринта
+        /// (не-ВПП — центр; ВПП — проекция на ось полосы: барьер толкает
+        /// перпендикуляром от полосы). Буфер переиспользуется.</summary>
+        private static float FootprintDistSqLocal(Task t, Vector3 p, ref Vector3 nearest)
+        {
+            Vector3 a = t.Site.ToLocalPosition();
+            if (!t.IsRunway)
+            {
+                nearest = a;
+                return new Vector2(p.x - a.x, p.z - a.z).sqrMagnitude;
+            }
+            Vector3 b = t.RunwayEnd.ToLocalPosition();
+            Vector2 ab = new Vector2(b.x - a.x, b.z - a.z);
+            float abSq = ab.sqrMagnitude;
+            float u = abSq < 1f
+                ? 0f
+                : Mathf.Clamp01(Vector2.Dot(new Vector2(p.x - a.x, p.z - a.z), ab) / abSq);
+            Vector2 proj = new Vector2(a.x, a.z) + ab * u;
+            nearest = new Vector3(proj.x, a.y, proj.y);
+            return (proj - new Vector2(p.x, p.z)).sqrMagnitude;
+        }
+
+        // == ОДНОПОЛОСНЫЙ БАРЬЕР ФУТПРИНТА (v0.152, плейтест «нет невидимого
+        // хитбокса: въезжают внутрь и строятся поверх себя»). Канон SupCom:
+        // сквозь площадку не ездят — но ВЫЕХАТЬ можно всегда. Хост-физика
+        // (паттерн EngineerService.WaterTick): мобильному юниту ВНУТРИ футпринта
+        // активной площадки гасится скорость К центру + мягкий толчок наружу;
+        // стоящего внутри — выдавливает (инженеры «выстраиваются на кольце» до
+        // первой капли). Троттл 0.1 с, try/catch по юниту.
+
+        private static float _nextBarrierTick;
+        private static readonly List<Task> BarrierTasks = new List<Task>();
+
+        private static void TickFootprintBarrier()
+        {
+            if (Time.unscaledTime < _nextBarrierTick)
+                return;
+            _nextBarrierTick = Time.unscaledTime + 0.1f;
+            BarrierTasks.Clear();
+            foreach (Task t in Active)
+                if (t != null && t.Faction != null)
+                    BarrierTasks.Add(t);
+            if (BarrierTasks.Count == 0)
+                return;
+            foreach (Unit u in UnitRegistry.allUnits)
+            {
+                if (u == null || u.disabled || !(u is GroundVehicle || u is Ship))
+                    continue;
+                try
+                {
+                    Rigidbody rb = u.GetComponent<Rigidbody>();
+                    if (rb == null)
+                        continue;
+                    Vector3 p = rb.position;
+                    Vector3 probe = default;
+                    foreach (Task t in BarrierTasks)
+                    {
+                        float half = FootprintHalfM(t) + u.maxRadius + 4f;
+                        if (FootprintDistSqLocal(t, p, ref probe) > half * half)
+                            continue;
+                        // Радиаль наружу от ближайшей точки футпринта (ВПП — от
+                        // проекции на ось: толкает перпендикуляром от полосы).
+                        Vector2 out2 = new Vector2(p.x - probe.x, p.z - probe.z);
+                        if (out2.sqrMagnitude < 0.01f)
+                            out2 = Vector2.up;
+                        out2.Normalize();
+                        Vector3 outDir = new Vector3(out2.x, 0f, out2.y);
+                        Vector3 v = rb.velocity;
+                        float inward = -(v.x * outDir.x + v.z * outDir.z); // >0 едет внутрь
+                        if (inward > 0.3f)
+                        {
+                            // ОДНОПОЛОСНОСТЬ: въезд гасим (радиальную внутрь — в ноль),
+                            // выезд свободен; плюс мягкий толчок наружу.
+                            Vector3 acc = outDir * (6f + Mathf.Min(inward, 8f));
+                            acc.x += v.x * -1.5f; // лёгкое общее торможение на въезде
+                            acc.z += v.z * -1.5f;
+                            rb.AddForce(acc, ForceMode.Acceleration);
+                        }
+                        else if (new Vector2(v.x, v.z).sqrMagnitude < 0.25f)
+                        {
+                            // Стоит внутри — выдавливаем (не рвём приказы: чистая физика).
+                            rb.AddForce(outDir * 3f, ForceMode.Acceleration);
+                        }
+                        break; // одна площадка хватит (ближайшую не ищем — редкий случай)
+                    }
+                }
+                catch (System.Exception e)
+                {
+                    Log.Warn("Build.Barrier: " + e.Message);
+                }
+            }
+        }
 
         /// <summary>Выпихнуть пассивного юнита из зоны (раз в 3 с на юнита).</summary>
         private static bool TryPushOutOfZone(Unit u, Task t)
@@ -1878,6 +2058,7 @@ namespace SupremeNuclear
             BuildGhosts.Sync(); // призраки следуют за площадками и умирают с задачами
             if (!GameApi.InMission || !IsHost)
                 return;
+            TickFootprintBarrier(); // однополосный барьер площадок (host-физика, троттл 0.1 с)
             TickPatrolAssist(); // до Active.Count-гарда: возврат патрулей и на пустом списке
             TickEscortAssist(); // возврат сопровождений — тоже не зависит от Active.Count
             if (Active.Count == 0)
@@ -1885,6 +2066,7 @@ namespace SupremeNuclear
             float dt = Time.deltaTime;
             var focus = FocusMap; // Clear — при пересборке ниже (первая задача всегда собирает)
             bool focusBuilt = false;
+            HashSet<Task> seqTasks = null; // лениво: площадки, стоящие в чьих-то очередях
             for (int i = Active.Count - 1; i >= 0; i--)
             {
                 Task t = Active[i];
@@ -1894,6 +2076,28 @@ namespace SupremeNuclear
                         t.ApproachBearings.Remove(t.Builders[b]);
                         t.Builders.RemoveAt(b);
                     }
+                // СИРОТА (юзер-канон 2026-11-04): строителей нет и ни в одной
+                // очереди записей с площадкой — призрак висит вечно после
+                // ПКМ-переключения инженеров. Отменяем (ghost гасит Cancel).
+                if (t.Builders.Count == 0)
+                {
+                    if (seqTasks == null)
+                    {
+                        seqTasks = new HashSet<Task>();
+                        foreach (List<SeqEntry> sq in Sequences.Values)
+                            foreach (SeqEntry e in sq)
+                                if (e.Task != null)
+                                    seqTasks.Add(e.Task);
+                    }
+                    if (!seqTasks.Contains(t))
+                    {
+                        Cancel(t); // снимет призрак/маркер и Version++
+                        Log.Info("Build: площадка-сирота снята (без строителей и очередей) — " +
+                                 (t.Definition != null ? t.Definition.unitName : "ВПП"));
+                        continue;
+                    }
+                }
+
                 focusBuilt = false; // состав меняется по ходу — пересобираем фокус каждый тик
 
                 // Мёртвая задача = нет фракции; ВПП-задача БЕЗ определения (Definition
@@ -1938,6 +2142,8 @@ namespace SupremeNuclear
                 {
                     if (!focus.TryGetValue(b, out Task bFocus) || bFocus != t)
                         continue; // инженер сфокусирован на другой площадке
+                    if (PauseService.IsPaused(b))
+                        continue; // пауза юнита: числится строителем, но не наливает
                     // SupCom: сначала ОСТАНОВИЛСЯ в радиусе, потом строит — на ходу не капает.
                     // Морской инженер (катер) НЕ умеет стоять сам — «стоп» корабля это
                     // циркуляция: в радиусе площадки ставим на якорь (нативный
@@ -1968,7 +2174,18 @@ namespace SupremeNuclear
                     TryPushOutOfZone(blocker, t))
                     t.ZoneBlocked = false; // выпихнули — следующим тиком можно строить
 
-                if (onSite > 0 && !t.ZoneBlocked)
+                // ДИСЦИПЛИНА ПЛОЩАДКИ (v0.152, плейтест «въезжают внутрь, строятся
+                // поверх себя»): футпринт занят ЛЮБЫМ мобильным (включая инженеров —
+                // их место на кольце) — налив стоит, ждём пока выйдет (барьер
+                // FootprintBarrier мягко выдавливает). Маркер «зона не расчищена»
+                // показывается по ZoneBusy.
+                if (Time.unscaledTime >= t.NextFootprintScanAt)
+                {
+                    t.NextFootprintScanAt = Time.unscaledTime + ZoneScanIntervalSec;
+                    t.FootprintCache = FootprintOccupant(t);
+                }
+
+                if (onSite > 0 && !t.ZoneBusy)
                 {
                     // Мощь стройки = сумма факторов инженеров на площадке: T1-грузовик 1,
                     // T2 ×2, T3 ×4 (SupCom: старший инженер строит быстрее).
@@ -2038,7 +2255,7 @@ namespace SupremeNuclear
         private static Vector3 EnforceSpacing(Vector3 point)
         {
             float min = Settings.BuildSiteSpacingM;
-            if (min <= 0f || Active.Count == 0)
+            if (min <= 0f || Active.Count == 0 && UnitRegistry.allUnits.Count == 0)
                 return point;
             for (int iter = 0; iter < 6; iter++)
             {
@@ -2048,6 +2265,24 @@ namespace SupremeNuclear
                 {
                     Vector3 s = t.Site.ToLocalPosition();
                     Vector2 d = new Vector2(point.x - s.x, point.z - s.z);
+                    float dist = d.magnitude;
+                    if (dist >= min)
+                        continue;
+                    conflict = true;
+                    Vector2 dir = dist < 1f ? Vector2.up : d / dist;
+                    push += new Vector3(dir.x, 0f, dir.y) * (min - dist);
+                }
+                // ГОТОВЫЕ здания тоже расталкивают (юзер-плейтест 2026-11-04
+                // «AI настроил стек зданий»): задача исчезает из Active при
+                // достройке, быстрый AI ставил следующую площадку в ту же точку
+                // (GroundY давал КРЫШУ готового — здания росли стеком вверх).
+                foreach (Unit u in UnitRegistry.allUnits)
+                {
+                    if (!(u is Building) || u == null || u.disabled ||
+                        EconomyService.IsSiteMarker(u))
+                        continue; // маркеры-«недра» живут на точках — их не трогаем
+                    Vector3 p = u.transform.position;
+                    Vector2 d = new Vector2(point.x - p.x, point.z - p.z);
                     float dist = d.magnitude;
                     if (dist >= min)
                         continue;
@@ -2143,6 +2378,8 @@ namespace SupremeNuclear
                          (heliport ? "ВЕРТОЛЁТНАЯ площадка, без рулёжки" : "рулёжка строится"));
                 if (!heliport)
                     ConnectTaxiway(airbase, hangar, padY);
+                FactoryTierService.SpawnedAs(hangar.GetComponent<Hangar>(),
+                    BuildingPool.SpecOf(t.Definition)?.tier ?? 1);
                 CommanderHud.Notice(Loc.F("Построено: {0} → {1}", t.Definition.unitName, airbase.name));
                 Log.Info($"Build: ангар {t.Definition.unitName} пристыкован к {airbase.name} " +
                          $"на ({local.x:F0},{local.z:F0}), поворот {t.YawDeg:F0}°, " +
@@ -2224,6 +2461,8 @@ namespace SupremeNuclear
             }
             else if (t.CoalDeposit != null)
                 EconomyService.TakeSite(t.CoalDeposit);
+            FactoryTierService.SpawnedAs(unit,
+                BuildingPool.SpecOf(t.Definition)?.tier ?? 1);
             CommanderHud.Notice(Loc.F("Построено: {0}", t.Definition.unitName));
             Log.Info($"Build: готово {t.Definition.unitName} на ({local.x:F0},{local.z:F0}) за {t.PaidMass:F0}");
             return unit;

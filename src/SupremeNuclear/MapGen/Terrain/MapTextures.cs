@@ -43,7 +43,7 @@ namespace SupremeNuclear
             // Потолок текстур GPU (у части карт 8192): создание сверх него —
             // мусор в сэмплах, «размазанная» текстура.
             res = Mathf.Min(res, SystemInfo.maxTextureSize);
-            Color32[] macro = RenderPixels(hm, t, AlbedoMacroRes);
+            Color32[] macro = RenderPixels(hm, t, AlbedoMacroRes, seabed: true);
             var tex = new Texture2D(res, res, TextureFormat.RGBA32, true, true);
             tex.wrapMode = TextureWrapMode.Clamp;
             tex.anisoLevel = 16; // наклонный RTS-ракурс без анизотропы мылит вдоль взгляда
@@ -279,9 +279,10 @@ namespace SupremeNuclear
 
         /// <summary>Пиксели зонной окраски (без создания текстуры). Параллельно
         /// по строкам (пиксели независимы — детерминизм сохранён).</summary>
-        private static Color32[] RenderPixels(Heightmap hm, ScenarioTemplate.TerrainSettings t, int res)
+        private static Color32[] RenderPixels(Heightmap hm, ScenarioTemplate.TerrainSettings t, int res,
+            bool seabed = false)
         {
-            if (res == MacroRes && _macroCache != null)
+            if (res == MacroRes && _macroCache != null && !seabed)
                 return _macroCache;
             float[,] distToWater = DistToWaterM(hm);
             ZonePalette pal = ZonePalette.Of(t);
@@ -294,10 +295,10 @@ namespace SupremeNuclear
                 {
                     float x = (i + 0.5f) / res * size - size * 0.5f;
                     float z = (j + 0.5f) / res * size - size * 0.5f;
-                    px[j * res + i] = ZoneColor(hm, t, pal, distToWater, x, z);
+                    px[j * res + i] = ZoneColor(hm, t, pal, distToWater, x, z, seabed);
                 }
             });
-            if (res == MacroRes)
+            if (res == MacroRes && !seabed)
                 _macroCache = px;
             return px;
         }
@@ -329,9 +330,15 @@ namespace SupremeNuclear
 
         /// <summary>Цвет мировой точки: зоны (дно/мель/пляж/грунт/скалы/снег) +
         /// макро-пятна «провинций» + затенение по крутизне. Высота — треугольной
-        /// выборкой по мешу (SampleHeight): границы воды совпадают с рельефом.</summary>
+        /// выборкой по мешу (SampleHeight): границы воды совпадают с рельефом.
+        /// seabed=true — окраска РЕЛЬЕФА (альбедо/вершины): подводная часть —
+        /// ДНО (песчаный шельф → тёмная глубина), не цвет поверхности воды;
+        /// поверх дна воду красит свой шейдер. Иначе (карта/миникарта) —
+        /// подводная часть синяя, как вид сверху (плейтест 2026-11-04:
+        /// «на морских картах вся поверхность голубоватая» — дно красилось
+        /// водой и накладывалось на воду второй раз).</summary>
         private static Color ZoneColor(Heightmap hm, ScenarioTemplate.TerrainSettings t,
-            ZonePalette pal, float[,] distToWater, float x, float z)
+            ZonePalette pal, float[,] distToWater, float x, float z, bool seabed = false)
         {
             float h = hm.SampleHeight(x, z);
             int ci = Clamp((int)(x / hm.Step + hm.W * 0.5f), 0, hm.W - 1);
@@ -339,8 +346,16 @@ namespace SupremeNuclear
 
             if (h < hm.SeaLevel)
             {
-                // Вода: мель у кромки светлее, глубина — темнее базового.
                 float depth = hm.SeaLevel - h;
+                if (seabed)
+                {
+                    // ДНО для альбедо рельефа: песчаный шельф темнеет с глубиной
+                    // (сплат-маска под водой тоже песок — согласовано).
+                    Color shelf = pal.Beach * 0.92f;
+                    Color deep = pal.Beach * 0.38f;
+                    return Color.Lerp(shelf, deep, Mathf.Clamp01(depth / 90f));
+                }
+                // Вода (карта/миникарта, вид сверху): мель светлее, глубина темнее.
                 Color c = Color.Lerp(pal.Shallow, pal.Water,
                     Mathf.Clamp01(depth / 30f));
                 c *= 1f - 0.25f * Mathf.Clamp01((depth - 60f) / 500f);
@@ -390,44 +405,11 @@ namespace SupremeNuclear
         }
 
         /// <summary>Дистанция до ближайшей воды (метры, по клеткам) — поле для
-        /// пляжной полосы. Двухпроходный chamfer 3-4 (приближение евклида).</summary>
-        private static float[,] DistToWaterM(Heightmap hm)
-        {
-            const float inf = 1e9f;
-            var d = new float[hm.W, hm.H];
-            for (int j = 0; j < hm.H; j++)
-                for (int i = 0; i < hm.W; i++)
-                    d[i, j] = hm.Water[i, j] ? 0f : inf;
-
-            for (int j = 0; j < hm.H; j++)
-                for (int i = 0; i < hm.W; i++)
-                    Relax(d, hm, i, j,
-                        Math.Min(i > 0 ? d[i - 1, j] + 1f : inf,
-                                 j > 0 ? d[i, j - 1] + 1f : inf),
-                        Math.Min(i > 0 && j > 0 ? d[i - 1, j - 1] + 1.4142f : inf,
-                                 i < hm.W - 1 && j > 0 ? d[i + 1, j - 1] + 1.4142f : inf));
-            for (int j = hm.H - 1; j >= 0; j--)
-                for (int i = hm.W - 1; i >= 0; i--)
-                    Relax(d, hm, i, j,
-                        Math.Min(i < hm.W - 1 ? d[i + 1, j] + 1f : inf,
-                                 j < hm.H - 1 ? d[i, j + 1] + 1f : inf),
-                        Math.Min(i < hm.W - 1 && j < hm.H - 1 ? d[i + 1, j + 1] + 1.4142f : inf,
-                                 i > 0 && j < hm.H - 1 ? d[i - 1, j + 1] + 1.4142f : inf));
-            for (int j = 0; j < hm.H; j++)
-                for (int i = 0; i < hm.W; i++)
-                    if (d[i, j] >= inf)
-                        d[i, j] = hm.W * hm.Step; // воды нет вообще — «далеко»
-                    else
-                        d[i, j] *= hm.Step;
-            return d;
-        }
-
-        private static void Relax(float[,] d, Heightmap hm, int i, int j, float ortho, float diag)
-        {
-            float m = Math.Min(ortho, diag);
-            if (m < d[i, j])
-                d[i, j] = m;
-        }
+        /// пляжной полосы. Общий chamfer живёт в Heightmap.DistToWaterM — вода
+        /// там ровно «ниже уровня моря» (семантика маски Water из RebuildMasks);
+        /// им же пользуется берег-жим генератора.</summary>
+        private static float[,] DistToWaterM(Heightmap hm) =>
+            Heightmap.DistToWaterM(hm.Height, hm.W, hm.Step, hm.SeaLevel);
 
         /// <summary>Множитель цвета клетки: 1 на равнине, темнее на склоне
         /// (градиент высоты к соседям), ±шум для детализации.</summary>
@@ -538,7 +520,7 @@ namespace SupremeNuclear
                 _distCache = DistToWaterM(hm);
                 _distHm = hm;
             }
-            Color c = ZoneColor(hm, t, _palCache, _distCache, x, z);
+            Color c = ZoneColor(hm, t, _palCache, _distCache, x, z, seabed: true);
             return Color.Lerp(Color.white, c, 0.8f);
         }
 

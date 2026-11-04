@@ -776,7 +776,12 @@ step = "arrows";
             ctxLayout.childForceExpandHeight = false;
             _pauseBtn = Button_(ctxGo.transform, "pause", Loc.Tr("Пауза"), () =>
             {
+                // Один тумблер на ВСЁ подходящее выделение (v0.151): фабрики
+                // (очереди) + инженеры (налив). Все на паузе ↔ все сняты —
+                // унификация состояния v0.100, общая для обоих семейств.
+                bool all = AllPausedUnified();
                 ProductionTasks.TogglePauseAll(PauseCycleTargets());
+                PauseService.SetPaused(SelectedEngineers(), !all);
             }, 10);
             ((RectTransform)_pauseBtn.transform).sizeDelta = new Vector2(60f, 22f);
             _pauseBtn.gameObject.AddComponent<LayoutElement>().minHeight = 22f;
@@ -876,6 +881,33 @@ step = "arrows";
             return _ctxFactories;
         }
 
+        private readonly List<Unit> _ctxEngineers = new List<Unit>();
+
+        /// <summary>Инженеры выделения — второй адресат кнопки «Пауза» (v0.151,
+        /// юзер-канон «на всех юнитах выборки, к которым подходит»): пауза их
+        /// налива (стройка/ремонт/сбор/захват), см. PauseService.</summary>
+        private List<Unit> SelectedEngineers()
+        {
+            _ctxEngineers.Clear();
+            var controller = CommanderModeController.Instance;
+            if (controller == null)
+                return _ctxEngineers;
+            foreach (Unit unit in controller.Selection.Selected)
+                if (unit != null && !unit.disabled && GameApi.IsEngineer(unit))
+                    _ctxEngineers.Add(unit);
+            return _ctxEngineers;
+        }
+
+        /// <summary>Единое состояние кнопки «Пауза» (v0.151): фабрики И инженеры
+        /// выделения — все на паузе? (унификация v0.100, распространённая на
+        /// юнитов; TogglePauseAll фабрик согласован этой же парой).</summary>
+        private bool AllPausedUnified()
+        {
+            List<Unit> engs = SelectedEngineers();
+            return ProductionTasks.AllPaused(PauseCycleTargets()) &&
+                   (engs.Count == 0 || PauseService.AllPaused(engs));
+        }
+
         /// <summary>Плитки «переход на тир» в каталоге фабрики (канон SupCom,
         /// v0.136): ПЕРВОЙ в списке СВОЕГО тира; клик ставит апгрейд в очередь.
         /// HQ-модель (канон FAF, юзер 2026-11-03): T1-фабрика БЕЗ ветки видит ДВЕ
@@ -926,6 +958,68 @@ step = "arrows";
                     TileUp(true, hqMass);
             }
         }
+
+        /// <summary>ГРУППОВЫЕ плитки апгрейда субтипа (юзер-канон 2026-11-04):
+        /// мультивыделение/контекст базы — по ПАРЕ плиток на каждый ТИП фабрик
+        /// («Танки», «Авиация», «Вертолёты», «Флот»): клик ставит апгрейд КАЖДОЙ
+        /// фабрике группы выбранной веткой (EnqueueUpgrade сам зажмёт ветку к
+        /// выбранной ранее). Умный выбор по субгруппе: дешёвая плитка есть только
+        /// при живом HQ целевого тира СВОЕГО типа; нет HQ — только ШТАБ. Шаг —
+        /// свой следующий у каждой (T1-е →T2, T2-е →T3), подпись/цена — по
+        /// минимальному пендящему тиру группы.</summary>
+        private void UpgradeOrderTilesForGroup(IReadOnlyList<object> factories, string typeLabel)
+        {
+            if (factories == null || factories.Count == 0)
+                return;
+            // Минимальный пендящий тир группы (плитки в списке СВОЕГО тира)
+            int from = 3;
+            object lead = null;
+            foreach (object f in factories)
+            {
+                int p = ProductionTasks.PendingTierOf(f);
+                if (p < from)
+                {
+                    from = p;
+                    lead = f;
+                }
+            }
+            if (from >= 3 || lead == null)
+                return;
+            if (_prodTier > 0 && _prodTier != from)
+                return; // плитка в списке СВОЕГО тира: T1-список → «→T2»
+            bool cheapOk = FactoryTierService.CheapUpgradeAvailable(lead, from + 1);
+            void TileUp(bool asHq, float price)
+            {
+                Tile(_strip1Content, new TileSpec
+                {
+                    Caption = typeLabel + " T" + from + "→T" + (from + 1) +
+                        (asHq ? " " + Loc.Tr("ШТАБ") : ""),
+                    TypeBadge = Loc.Tr("АПГРЕЙД"),
+                    Badge = price.ToString("F0"),
+                    OnLeft = () =>
+                    {
+                        int n = 0;
+                        foreach (object f in factories)
+                            if (ProductionTasks.PendingTierOf(f) < 3 &&
+                                ProductionTasks.EnqueueUpgrade(f, asHq))
+                                n++;
+                        if (n > 0)
+                            CommanderHud.Notice(Loc.F("Апгрейд: {0} ×{1}", typeLabel, n));
+                    },
+                });
+            }
+            if (cheapOk && FactoryTierService.NextCost(from, false, out float sup, out _, out _))
+                TileUp(false, sup);
+            if (FactoryTierService.NextCost(from, true, out float hqMass, out _, out _))
+                TileUp(true, hqMass);
+        }
+
+        /// <summary>Ангар — вертолётная площадка (флаг роли пула определения).</summary>
+        private static bool HangarIsHeli(Hangar hangar) =>
+            hangar != null && BuildingPool.SpecOf(
+                hangar.attachedUnit != null
+                    ? hangar.attachedUnit.definition as BuildingDefinition
+                    : null)?.heliport == true;
 
         /// <summary>Позиции апгрейда в строке очереди (по плитке на звено цепочки,
         /// порядок очереди): у наливаемого — полоса, ПКМ — отмена с возвратом.</summary>
@@ -2425,18 +2519,22 @@ step = "arrows";
             {
                 bool ctxOnFactory = _activeTab == TabProduction && _ctxFactories.Count > 0;
                 bool ctxOnAirbase = _activeTab == TabProduction && _ctxAirbase != null;
-                ctx.gameObject.SetActive(ctxOnFactory || ctxOnAirbase || _activeTab == TabTemplates);
+                // Инженеры выделения — тоже контекст «Пауза» (v0.151): кнопка одна,
+                // действует на фабрики И инженеров; Цикл — только фабрикам.
+                bool ctxOnEngineers = _activeTab == TabProduction && hasEngineer;
+                ctx.gameObject.SetActive(ctxOnFactory || ctxOnAirbase ||
+                                         ctxOnEngineers || _activeTab == TabTemplates);
                 // Пауза/Цикл — и контексту БАЗЫ (вышка/ромб/авианосец): группа —
                 // все ангарные фабрики базы (PauseCycleTargets), v0.108.
                 if (_pauseBtn != null)
-                    _pauseBtn.gameObject.SetActive(ctxOnFactory || ctxOnAirbase);
+                    _pauseBtn.gameObject.SetActive(ctxOnFactory || ctxOnAirbase || ctxOnEngineers);
                 if (_cycleBtn != null)
                     _cycleBtn.gameObject.SetActive(ctxOnFactory || ctxOnAirbase);
                 if (_tplBtn != null)
                     _tplBtn.gameObject.SetActive(ctxOnFactory || _activeTab == TabTemplates);
                 Image pi = _pauseBtn != null ? _pauseBtn.GetComponent<Image>() : null;
                 if (pi != null)
-                    pi.color = ProductionTasks.AllPaused(PauseCycleTargets()) ? BtnActive : BtnBg;
+                    pi.color = AllPausedUnified() ? BtnActive : BtnBg;
                 Image ci = _cycleBtn != null ? _cycleBtn.GetComponent<Image>() : null;
                 if (ci != null)
                     ci.color = ProductionTasks.AllCycling(PauseCycleTargets()) ? BtnActive : BtnBg;
@@ -3010,6 +3108,11 @@ step = "arrows";
                         def.unitPrefab.GetComponent<Ship>() != null && def.IsAllowed(false) &&
                         !UnitRoster.IsHidden(def))
                         defs.Add(def);
+                foreach (ShipDefinition sea in EngineerService.SeaClones) // морские инженеры T2/T3
+                    if (sea != null && sea.unitPrefab != null &&
+                        sea.unitPrefab.GetComponent<Ship>() != null && sea.IsAllowed(false) &&
+                        !UnitRoster.IsHidden(sea))
+                        defs.Add(sea);
                 Catalog.TierFilterByTier(defs, UnitRoster.TierOf, _prodTier, siteTier);
                 foreach (ShipDefinition def in defs)
                 {
@@ -3195,6 +3298,11 @@ step = "arrows";
         /// полоса тиров сверху фильтрует пул по цене (терцили каталога). Инженер в
         /// выделении → здания (стройка где угодно), иначе депо/аэродром. Нижняя лента —
         /// задел под очередь фабрики (этап B).</summary>
+        // Буферы субгрупп апгрейда ангаров (без аллокаций на перестройку каталога)
+        private readonly List<object> _upgradePlanes = new List<object>();
+        private readonly List<object> _upgradeHelos = new List<object>();
+        private readonly List<object> _upgradeDocks = new List<object>();
+
         private void FillProductionTab(FactionHQ hq, VehicleDepot depot, Building navalDock,
             Airbase airbase, bool hasEngineer, List<Hangar> hangars = null)
         {
@@ -3209,7 +3317,22 @@ step = "arrows";
                 _contextTitle.text = hangars.Count == 1
                     ? Loc.Tr("Ангар — авиация (клик: в очередь)") + tierName
                     : Loc.F("Ангары ×{0} — клик: +1 каждому умеющему", hangars.Count) + tierName;
-                UpgradeOrderTile(hangars[0]); // «→T2/→T3» — своей веткой (фабрики разделены)
+                // Групповые плитки апгрейда ПО СУБТИПАМ (юзер-канон 2026-11-04):
+                // самолётные и вертолётные — свои пары HQ/клон; одиночный ангар —
+                // тоже через группу из одного (та же умная логика веток).
+                _upgradePlanes.Clear();
+                _upgradeHelos.Clear();
+                foreach (Hangar hangar in hangars)
+                {
+                    if (hangar == null)
+                        continue;
+                    if (HangarIsHeli(hangar))
+                        _upgradeHelos.Add(hangar);
+                    else
+                        _upgradePlanes.Add(hangar);
+                }
+                UpgradeOrderTilesForGroup(_upgradePlanes, Loc.Tr("Авиация"));
+                UpgradeOrderTilesForGroup(_upgradeHelos, Loc.Tr("Вертолёты"));
                 var defs = new List<AircraftDefinition>();
                 foreach (Hangar hangar in hangars)
                     foreach (AircraftDefinition a in hangar.GetAvailableAircraft())
@@ -3249,13 +3372,20 @@ step = "arrows";
             if (navalDock != null && Encyclopedia.i != null && Encyclopedia.i.ships != null)
             {
                 _contextTitle.text = Loc.Tr("Верфь — флот (клик: в очередь)") + tierName;
-                UpgradeOrderTile(navalDock);
+                _upgradeDocks.Clear();
+                _upgradeDocks.Add(navalDock);
+                UpgradeOrderTilesForGroup(_upgradeDocks, Loc.Tr("Флот"));
                 var defs = new List<ShipDefinition>();
                 foreach (ShipDefinition def in Encyclopedia.i.ships)
                     if (def != null && def.unitPrefab != null &&
                         def.unitPrefab.GetComponent<Ship>() != null && def.IsAllowed(false) &&
                         !UnitRoster.IsHidden(def))
                         defs.Add(def);
+                foreach (ShipDefinition sea in EngineerService.SeaClones) // морские инженеры T2/T3 (клоны LC)
+                    if (sea != null && sea.unitPrefab != null &&
+                        sea.unitPrefab.GetComponent<Ship>() != null && sea.IsAllowed(false) &&
+                        !UnitRoster.IsHidden(sea))
+                        defs.Add(sea);
                 Catalog.TierFilterByTier(defs, UnitRoster.TierOf, _prodTier, _ctxTier);
                 foreach (ShipDefinition def in defs)
                 {
@@ -3329,7 +3459,14 @@ step = "arrows";
             if (depot != null && PurchaseService.Catalog != null)
             {
                 _contextTitle.text = Loc.Tr("Фабрика — техника (клик: в очередь)") + tierName;
-                UpgradeOrderTile(depot);
+                // Группа — все выделенные депо (мультивыделение: плитка «Танки»
+                // ставит апгрейд каждому своей веткой; юзер-канон 2026-11-04).
+                _upgradeDocks.Clear();
+                _upgradeDocks.Add(depot);
+                foreach (object f in _ctxFactories)
+                    if (f is VehicleDepot d && d != depot && !_upgradeDocks.Contains(d))
+                        _upgradeDocks.Add(d);
+                UpgradeOrderTilesForGroup(_upgradeDocks, Loc.Tr("Танки"));
                 var defs = new List<VehicleDefinition>();
                 foreach (VehicleDefinition def in PurchaseService.Catalog)
                     if (def != null && def.IsAllowed(false) && !UnitRoster.IsHidden(def))
@@ -3364,12 +3501,8 @@ step = "arrows";
                 _contextTitle.text = (airbase.AttachedAirbase
                     ? Loc.Tr("Авианосец — авиация (клик: в очередь; РЕЗ — выкат)")
                     : Loc.Tr("Аэродром — авиация (клик: в очередь; РЕЗ — выкат)")) + tierName;
-                // Плитки апгрейда — ПЕР-АНГАРНЫЕ (фабрики разделены): по первой
-                // плитке каждого ангара базы (у каждого — свой тир/ветка).
-                if (airbase.hangars != null)
-                    foreach (Hangar hangar in airbase.hangars)
-                        if (hangar != null)
-                            UpgradeOrderTile(hangar);
+                // Плиток апгрейда в контексте ВЫШКИ НЕТ (юзер-канон 2026-11-04):
+                // апгрейд — только при выделении конкретных ангаров/групп.
                 // Резерв ангаров (вернувшиеся «на базу» борта): выкат бесплатный,
                 // плитки ПЕРЕД каталогом, бейдж РЕЗ + счётчик.
                 var reserve = AirbaseReserve.Of(airbase);

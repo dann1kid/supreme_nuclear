@@ -74,6 +74,8 @@ namespace SupremeNuclear
             {
                 if (unit == null || unit.disabled || !GameApi.IsEngineer(unit))
                     continue;
+                if (PauseService.IsPaused(unit))
+                    continue; // пауза юнита — не разбирает
                 if (Mathf.Abs(unit.speed) > 1f)
                     continue; // едет мимо — не собирает
                 FactionHQ hq = unit.NetworkHQ;
@@ -118,6 +120,27 @@ namespace SupremeNuclear
             }
 
             SnapshotMarkers();
+        }
+
+        /// <summary>Инженер стоит у обломка с АКТИВНЫМ сбором? (фильтр занятости:
+        /// патруль-подхват ремонта не должен уводить сборщика от недособранного
+        /// обломка — маркеры и есть снимок активных сборов).</summary>
+        public static bool IsCollectingNear(Unit engineer)
+        {
+            if (engineer == null || MarkerWrecks.Count == 0)
+                return false;
+            EconomyProfile profile = EconomyService.Profile;
+            float radius = profile != null ? Mathf.Max(10f, profile.salvageRadiusM) : 120f;
+            Vector3 p = engineer.transform.position;
+            foreach (Wreckage wreck in MarkerWrecks)
+            {
+                if (wreck == null)
+                    continue;
+                Vector3 q = wreck.transform.position;
+                if (new Vector2(q.x - p.x, q.z - p.z).sqrMagnitude < radius * radius)
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>Перезаполнение буферов маркеров (раз в скан; HUD читает их каждый кадр).</summary>

@@ -89,9 +89,11 @@ namespace SupremeNuclear
             UnitRoster.EnsureApplied(); // ростер юнитов/зданий (тиры/цены/имена) — ДО всех потребителей
             BuildingPool.EnsureCreated(); // пул строений по ролям — после ростера (каталог стройки = только пул)
             EngineerService.EnsureCreated(); // клоны инженеров T2/T3 — после ростера (host-агностично)
+            EngineerService.WaterTick(UnityEngine.Time.deltaTime); // амфибии: инженеры на плаву (host)
             EconomyService.Tick();
             WarheadService.Tick(UnityEngine.Time.deltaTime); // ЯО: налив зарядов/складов + пуски (host)
             SalvageService.Tick(); // салваж обломков — та же экономика (масса инженерам)
+            RepairService.Tick(UnityEngine.Time.deltaTime); // ремонт инженером: налив HP за массу (host)
             ShipPadService.Tick(); // вертолётные палубы кораблей без Airbase (host)
             CaptureService.Tick(); // инженерный захват построек (энергия, v3)
             FactoryTierService.Tick(UnityEngine.Time.deltaTime); // налив апгрейдов фабрик (host)

@@ -22,7 +22,12 @@ namespace SupremeNuclear
         /// следование за целью СВОИМ сектором (веер группы), рядом с целью —
         /// защита как атака-движение (stop-and-fire, флот дерётся на ходу).
         /// Инженеры в сопровождении ассистят стройкам цели (BuildTasks).</summary>
-        Escort
+        Escort,
+        /// <summary>Ремонт союзного юнита/здания (v0.149, канон SupCom — 4-я функция
+        /// инженерного сьюта): инженер следует к цели и стоит в радиусе налива
+        /// (EconomyProfile.repairRadiusM); HP льёт RepairService (host). Как
+        /// сопровождение — стоящий приказ: в очередь точек не кладётся.</summary>
+        Repair
     }
 
     /// <summary>Цепочки вейпоинтов для наземки/флота: SetDestination выдаёт следующую точку,
@@ -95,6 +100,9 @@ namespace SupremeNuclear
             /// <summary>Escort: цель сопровождения (живёт в цепочке отдельно от
             /// Target атаки — смешанная очередь атак не должна её терять).</summary>
             public Unit EscortTarget;
+            /// <summary>Repair: цель ремонта (отдельно от EscortTarget по той же
+            /// причине — вид приказа живёт в цепочке, а не в точках).</summary>
+            public Unit RepairTarget;
         }
 
         private static readonly Dictionary<Unit, Chain> Chains = new Dictionary<Unit, Chain>();
@@ -119,14 +127,18 @@ namespace SupremeNuclear
         public static Unit EscortTargetOf(Unit unit) =>
             Chains.TryGetValue(unit, out Chain ch) && ch.Kind == GroundOrderKind.Escort ? ch.EscortTarget : null;
 
+        /// <summary>Цель ремонта юнита (налив/отрисовка/завершение), иначе null.</summary>
+        public static Unit RepairTargetOf(Unit unit) =>
+            Chains.TryGetValue(unit, out Chain ch) && ch.Kind == GroundOrderKind.Repair ? ch.RepairTarget : null;
+
         /// <summary>Юнит без активных приказов: непройденных точек нет И целей нет.
         /// Атака/очередь целей — занят даже при пустой цепочке точек (раньше атаку
         /// «занятой» делала производная точка подхода — её больше нет).
-        /// Сопровождение — стоящий приказ: занят всегда (выталкивание из зоны
-        /// стройки не должно рвать связь).</summary>
+        /// Сопровождение и ремонт — стоящие приказы: занят всегда (выталкивание из
+        /// зоны стройки не должно рвать связь).</summary>
         public static bool IsIdle(Unit unit) =>
             !Chains.TryGetValue(unit, out Chain ch) ||
-            (ch.Kind != GroundOrderKind.Escort &&
+            (ch.Kind != GroundOrderKind.Escort && ch.Kind != GroundOrderKind.Repair &&
              ch.Index >= ch.Points.Count && ch.TargetQueue.Count == 0);
 
         /// <summary>Цель дозрела: точки ДО её позиции серии пройдены. Удаления точек
@@ -453,6 +465,111 @@ namespace SupremeNuclear
             return drop.Count;
         }
 
+        // == РЕМОНТ (v0.149, канон SupCom — 4-я функция инженерного сьюта):
+        // стоящий приказ «инженер → раненая техника/здание»: следование к цели,
+        // в радиусе налива (EconomyProfile.repairRadiusM) — останов; HP льёт
+        // RepairService (host). Зеркален сопровождению, без веера/следа.
+
+        /// <summary>Приказ ремонта (перезапись текущего, как любой приказ без
+        /// Shift; вызывающий обязан сам снять очередь стройки — BuildTasks.ClearFor).</summary>
+        public static void SetRepair(Unit unit, Unit target)
+        {
+            Version++;
+            var ch = new Chain
+            {
+                Kind = GroundOrderKind.Repair,
+                RepairTarget = target
+            };
+            Chains[unit] = ch;
+            IssueRepairFollow(unit, ch, force: true);
+        }
+
+        /// <summary>Снапшот ремонта (патруль-подхват снимает связь и возвращает
+        /// после восстановления).</summary>
+        public static bool TryGetRepairSnapshot(Unit unit, out Unit target)
+        {
+            target = null;
+            if (!Chains.TryGetValue(unit, out Chain ch) ||
+                ch.Kind != GroundOrderKind.Repair || ch.RepairTarget == null)
+                return false;
+            target = ch.RepairTarget;
+            return true;
+        }
+
+        /// <summary>Живые связи ремонта: пары «инженер → цель» (налив RepairService,
+        /// отрисовка). only — фильтр своей фракции (AI-инженеры делят тот же реестр).</summary>
+        public static void CollectRepairs(List<Unit> units, List<Unit> targets, FactionHQ only = null)
+        {
+            units.Clear();
+            targets.Clear();
+            foreach (KeyValuePair<Unit, Chain> kv in Chains)
+            {
+                if (kv.Key == null || kv.Key.disabled ||
+                    kv.Value.Kind != GroundOrderKind.Repair || kv.Value.RepairTarget == null)
+                    continue;
+                if (only != null && !GameApi.IsFriendlyUnit(kv.Key, only))
+                    continue;
+                units.Add(kv.Key);
+                targets.Add(kv.Value.RepairTarget);
+            }
+        }
+
+        /// <summary>Радиус налива ремонта из профиля экономики (фолбэк 60 м —
+        /// профиль ещё не заведён, ремонт без EconomyService недоступен в UI).</summary>
+        internal static float RepairRadiusM
+        {
+            get
+            {
+                EconomyProfile p = EconomyService.Profile;
+                return p != null ? Mathf.Max(10f, p.repairRadiusM) : 60f;
+            }
+        }
+
+        /// <summary>Точка подхода ремонта: на луче цель→инженер у ВНУТРЕННЕЙ кромки
+        /// радиуса налива (не вплотную к габариту — у больших зданий иначе «не доезжает»).</summary>
+        private static void IssueRepairFollow(Unit unit, Chain ch, bool force)
+        {
+            if (ch.RepairTarget == null)
+                return;
+            Unit target = ch.RepairTarget;
+            Vector3 tp = target.transform.position;
+            Vector3 up = unit.transform.position;
+            float stand = target.maxRadius + RepairRadiusM * 0.7f;
+            Vector2 d2 = new Vector2(up.x - tp.x, up.z - tp.z);
+            if (d2.sqrMagnitude < 1f)
+                d2 = new Vector2(1f, 0f);
+            d2.Normalize();
+            Vector3 follow = new Vector3(tp.x + d2.x * stand, 0f, tp.z + d2.y * stand);
+            follow.y = GameApi.GroundY(follow.x, follow.z);
+            GlobalPosition point = follow.ToGlobalPosition();
+            Vector3 last = ch.LastPoint.ToLocalPosition();
+            if (!force && new Vector2(last.x - follow.x, last.z - follow.z).magnitude < EscortReissueM)
+                return;
+            ch.LastPoint = point;
+            unit.GetComponent<UnitCommand>()?.SetDestination(point, playerCommand: true);
+        }
+
+        /// <summary>Тик ремонта: цель жива — следовать; в радиусе — стоять (наливает
+        /// RepairService, здесь только ведение). Полное здоровье НЕ завершает цепь —
+        /// завершение ведёт RepairService (он возвращает патруль/шлёт Notice);
+        /// исключение — цель погибла. true = цепочка завершена.</summary>
+        private static bool TickRepair(Unit unit, Chain ch, float now)
+        {
+            if (ch.RepairTarget == null || ch.RepairTarget.disabled)
+                return true;
+            if (now < ch.NextScanAt)
+                return false;
+            ch.NextScanAt = now + ScanIntervalSec;
+            Unit target = ch.RepairTarget;
+            Vector3 tp = target.transform.position;
+            Vector3 up = unit.transform.position;
+            float dist = new Vector2(up.x - tp.x, up.z - tp.z).magnitude - target.maxRadius;
+            if (dist <= RepairRadiusM)
+                return false; // на месте: стоим, RepairService наливает
+            IssueRepairFollow(unit, ch, force: false);
+            return false;
+        }
+
         /// <summary>Точка следования: якорь скользит ПО СЛЕДУ ЦЕЛИ (Catmull-Rom по
         /// breadcrumbs) — колонна идёт по траектории цели плавно, без рывков между
         /// перевыдачами; деградации в кольцо вокруг текущей позиции — следа нет,
@@ -677,6 +794,12 @@ namespace SupremeNuclear
                 if (ch.Kind == GroundOrderKind.Escort)
                 {
                     if (TickEscort(unit, ch, now))
+                        (done ??= new List<Unit>()).Add(unit);
+                    continue;
+                }
+                if (ch.Kind == GroundOrderKind.Repair)
+                {
+                    if (TickRepair(unit, ch, now))
                         (done ??= new List<Unit>()).Add(unit);
                     continue;
                 }

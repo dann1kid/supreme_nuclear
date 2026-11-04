@@ -543,6 +543,48 @@ namespace SupremeNuclear.Tests
             Check("ServiceCost: hp01 клампится сверху",
                 Math.Abs(EcoFlow.ServiceCost(150f, 2f, 500f, 0.25f) - 150f) < 1e-4f);
 
+            // ---------- EcoFlow.RepairCost: масса за ремонт (канон SupCom, v0.149) ----------
+            Check("RepairCost: полное восстановление = фактор × цену",
+                Math.Abs(EcoFlow.RepairCost(400f, 0f, 1f, 0.5f) - 200f) < 1e-4f);
+            Check("RepairCost: половина урона",
+                Math.Abs(EcoFlow.RepairCost(400f, 0.5f, 1f, 0.5f) - 100f) < 1e-4f);
+            Check("RepairCost: целый — ноль",
+                EcoFlow.RepairCost(400f, 1f, 1f, 0.5f) == 0f);
+            Check("RepairCost: отрицательная доля — ноль",
+                EcoFlow.RepairCost(400f, 0.8f, 0.5f, 0.5f) == 0f);
+            Check("RepairCost: кламп to01 сверху",
+                Math.Abs(EcoFlow.RepairCost(400f, 0f, 1.5f, 0.5f) - 200f) < 1e-4f);
+            Check("RepairCost: ценность ≤ 0 — базис 1",
+                Math.Abs(EcoFlow.RepairCost(0f, 0f, 1f, 0.5f) - 0.5f) < 1e-4f);
+            Check("RepairCost: нулевой фактор — бесплатно",
+                EcoFlow.RepairCost(400f, 0f, 1f, 0f) == 0f);
+
+            // ---------- EngineerService: спеки канона v2 (FAF 5/13/32.5, юзер 2026-11-04) ----------
+            var eng2 = new EngineerService.TierSpec();
+            var eng3 = new EngineerService.TierSpec { priceRatio = 6f, factor = 6.5f, hpRatio = 5.33f, code = "ИНЖ3" };
+            Check("Инженеры v2: T2 отношения канона",
+                Math.Abs(eng2.priceRatio - 2.5f) < 1e-4f && Math.Abs(eng2.factor - 2.6f) < 1e-4f &&
+                Math.Abs(eng2.hpRatio - 2.67f) < 1e-4f);
+            Check("Инженеры v2: T3 отношения канона",
+                Math.Abs(eng3.priceRatio - 6f) < 1e-4f && Math.Abs(eng3.factor - 6.5f) < 1e-4f &&
+                Math.Abs(eng3.hpRatio - 5.33f) < 1e-4f);
+            Check("Инженеры v2: цены от базы 180 = 450/1080",
+                Math.Abs(180f * eng2.priceRatio - 450f) < 1e-4f &&
+                Math.Abs(180f * eng3.priceRatio - 1080f) < 1e-4f);
+
+            // ---------- EngineerService.LegacyCustomized: детектор конфига v1 ----------
+            const string legacyDefault = "{\"tier2\":{\"price\":450.0,\"factor\":2.0,\"code\":\"ИНЖ2\"}," +
+                                         "\"tier3\":{\"price\":1100.0,\"factor\":4.0,\"code\":\"ИНЖ3\"}}";
+            const string legacyCustom = "{\"tier2\":{\"price\":500.0,\"factor\":3.0,\"code\":\"ИНЖ2\"}," +
+                                        "\"tier3\":{\"price\":1100.0,\"factor\":4.0,\"code\":\"ИНЖ3\"}}";
+            const string v2Config = "{\"version\":2,\"tier2\":{\"priceRatio\":2.5,\"factor\":2.6}}";
+            Check("Инженеры: дефолтный v1 — не кастомный",
+                !EngineerService.LegacyCustomized(legacyDefault));
+            Check("Инженеры: кастомный v1 — детект",
+                EngineerService.LegacyCustomized(legacyCustom));
+            Check("Инженеры: v2 и мусор — не кастомные",
+                !EngineerService.LegacyCustomized(v2Config) && !EngineerService.LegacyCustomized("{не json"));
+
             // ---------- EconomyProfile v2: потоки в секунду, апгрейды наливом ----------
             var profile = new EconomyProfile();
             Check("Rate v2: T1/T2/T3 в секунду",
@@ -658,7 +700,10 @@ namespace SupremeNuclear.Tests
             // k=stepM/32 (мировой инвариант, 2026-11-03) на 80 даёт то же 2.5,
             // что и прежнее 200/stepM — террасный тест в исходном масштабе
             // (при 200 формулы расходятся в 6 раз, плоских клеток 17% вместо 30+).
-            var terrainParams = new ScenarioTemplate.TerrainSettings { sizeM = 16000f, stepM = 80f, edgeM = 2000f };
+            // Берег-жим выключен: террасный инвариант «плоских ≥15%» калиброван
+            // без пляжной полосы (сам жим — отдельной генерацией ниже).
+            var terrainParams = new ScenarioTemplate.TerrainSettings
+            { sizeM = 16000f, stepM = 80f, edgeM = 2000f, coastFlatM = 0f };
             var hm = HeightmapGen.Generate(terrainParams, 1234);
             var hm2 = HeightmapGen.Generate(terrainParams, 1234);
             int expectCells = (int)(terrainParams.sizeM / terrainParams.stepM);
@@ -724,15 +769,18 @@ namespace SupremeNuclear.Tests
             // заметно больше — «плоскости и плато» вместо сплошных склонов. Считаем
             // только сушу ЗА кромкой: край карты утоплен в океан полосой ~5% стороны
             // (реалии NO, 2026-11-02) — переходный спад и подводные склоны не обязаны
-            // быть плато.
+            // быть плато. Берег-жим (v0.150.1) — тоже: полоса coastFlatM от уреза —
+            // НАМЕРЕННЫЙ пологий спуск к воде, не плато.
             {
                 int rim = (int)Math.Max(2f, Math.Min(hm.W * 0.05f,
                     terrainParams.edgeM * 2f / hm.Step)) + 2;
+                float[,] flatDist = Heightmap.DistToWaterM(hm.Height, hm.W, hm.Step, hm.SeaLevel);
+                float flatBandM = terrainParams.coastFlatM; // полоса жима этого шаблона (0 = берега нет)
                 int flat = 0, total = 0;
                 for (int j = rim; j < hm.H - rim; j += 3)
                     for (int i = rim; i < hm.W - rim; i += 3)
                     {
-                        if (hm.Water[i, j])
+                        if (hm.Water[i, j] || flatDist[i, j] < flatBandM)
                             continue;
                         total++;
                         float dh = Math.Abs(hm.Height[i, j] - hm.Height[i + 1, j]) +
@@ -765,6 +813,123 @@ namespace SupremeNuclear.Tests
                     if (Math.Abs(probe[0, i] - expect[i]) > 0.5f)
                         plateausOk = false;
                 Check("Heightmap: плато террас на ±35+70k, уровня моря нет", plateausOk);
+
+            // ---------- Берег-жим (v0.150.1): пологий низкий берег ----------
+            // chamfer: колонка воды слева → дистанции по строке (сетка квадратная w×w)
+            var shoreGrid = new float[4, 4];
+            for (int sj = 0; sj < 4; sj++)
+                for (int si = 0; si < 4; si++)
+                    shoreGrid[si, sj] = si == 0 ? -10f : 50f;
+            float[,] shoreDist = Heightmap.DistToWaterM(shoreGrid, 4, 100f, 0f);
+            Check("Берег: chamfer — вода 0, суша по клеткам 100/200/300",
+                shoreDist[0, 0] == 0f && Math.Abs(shoreDist[1, 0] - 100f) < 0.01f &&
+                Math.Abs(shoreDist[2, 0] - 200f) < 0.01f && Math.Abs(shoreDist[3, 0] - 300f) < 0.01f);
+            // диагональ к одинокой воде: ~141.42
+            var lonelyGrid = new float[3, 3];
+            for (int lj = 0; lj < 3; lj++)
+                for (int li = 0; li < 3; li++)
+                    lonelyGrid[li, lj] = 50f;
+            lonelyGrid[0, 0] = -10f;
+            float[,] lonelyDist = Heightmap.DistToWaterM(lonelyGrid, 3, 100f, 0f);
+            Check("Берег: chamfer — диагональ ~141",
+                Math.Abs(lonelyDist[1, 1] - 141.42f) < 0.5f && lonelyDist[2, 2] > lonelyDist[1, 1]);
+
+            // жим: холм 100 м в 100 м от уреза → рампа 3 м (уклон 0.03)
+            Check("Берег: холм у уреза срезается рампой",
+                Math.Abs(HeightmapGen.ShoreClamp(100f, 0f, 100f, 900f, 0.03f) - 3f) < 1e-3f);
+            Check("Берег: низкая суша не трогается",
+                HeightmapGen.ShoreClamp(2f, 0f, 100f, 900f, 0.03f) == 2f);
+            Check("Берег: подводная клетка не трогается",
+                HeightmapGen.ShoreClamp(-5f, 0f, 0f, 900f, 0.03f) == -5f);
+            Check("Берег: за полосой — без изменений",
+                HeightmapGen.ShoreClamp(100f, 0f, 900f, 900f, 0.03f) == 100f);
+            Check("Берег: выкл (flatM 0) — без изменений",
+                HeightmapGen.ShoreClamp(100f, 0f, 100f, 0f, 0.03f) == 100f);
+            float shoreMid = HeightmapGen.ShoreClamp(100f, 0f, 650f, 900f, 0.03f);
+            float shoreMidCap = 0.03f * 650f;
+            Check("Берег: середина полосы — бленд между рампой и исходной",
+                shoreMid > shoreMidCap && shoreMid < 100f);
+
+            // Интеграция берег-жима (генерация с берегом): точная симметрия цела
+            // (дистанции симметризуются) и в ближней зоне уреза суша не выше рампы.
+            var shoreTpl = new ScenarioTemplate.TerrainSettings
+            { sizeM = 16000f, stepM = 80f, edgeM = 2000f, style = "seas", waterAmount = 0.6f }; // широкие внутренние моря — вода шире двойной аппарели (узкие озёра land всей кромкой уже 700 м)
+            var shoreMap = HeightmapGen.Generate(shoreTpl, 4321);
+            bool shoreSymOk = true;
+            for (int sj2 = 0; sj2 < shoreMap.H; sj2++)
+                for (int si2 = 0; si2 < shoreMap.W; si2++)
+                    if (shoreMap.Height[si2, sj2] != shoreMap.Height[shoreMap.W - 1 - si2, sj2])
+                        shoreSymOk = false;
+            Check("Берег: карта с жимом — точная симметрия цела", shoreSymOk);
+            float[,] shoreField = Heightmap.DistToWaterM(
+                shoreMap.Height, shoreMap.W, shoreMap.Step, shoreMap.SeaLevel);
+            float nearZone = 240f; // 3 клетки: вес бленда здесь ≈ 0 — жёсткая рампа
+            float nearCap = shoreMap.SeaLevel + shoreTpl.shoreSlope * nearZone;
+            bool nearOk = true;
+            for (int sj3 = 0; sj3 < shoreMap.H; sj3 += 2)
+                for (int si3 = 0; si3 < shoreMap.W; si3 += 2)
+                    if (!shoreMap.Water[si3, sj3] && shoreField[si3, sj3] < nearZone &&
+                        shoreMap.Height[si3, sj3] > nearCap + 0.5f)
+                        nearOk = false;
+            Check("Берег: ближняя зона уреза — суша не выше рампы", nearOk);
+
+            // Глубинный жим (чистая NavDepthClamp)
+            Check("Глубина: мель за аппарелью углубляется до navDepth",
+                Math.Abs(HeightmapGen.NavDepthClamp(-3f, 0f, 900f, 350f, 12f) - (-12f)) < 1e-3f);
+            Check("Глубина: аппарель не трогается",
+                HeightmapGen.NavDepthClamp(-3f, 0f, 100f, 350f, 12f) == -3f);
+            Check("Глубина: глубокая вода не трогается",
+                HeightmapGen.NavDepthClamp(-40f, 0f, 900f, 350f, 12f) == -40f);
+            Check("Глубина: суша не трогается",
+                HeightmapGen.NavDepthClamp(5f, 0f, 900f, 350f, 12f) == 5f);
+            float navBlend = HeightmapGen.NavDepthClamp(-3f, 0f, 525f, 350f, 12f);
+            Check("Глубина: вход в полосу — бленд между мелью и navDepth",
+                navBlend < -3f && navBlend > -12f);
+            Check("Глубина: выкл (0) — без изменений",
+                HeightmapGen.NavDepthClamp(-3f, 0f, 900f, 350f, 0f) == -3f);
+
+            // Интеграция глубинного жима: за двойной аппарелью ОТ БЕРЕГА мели нет
+            // (дистанция для воды — до суши: DistToWaterM даёт воде ноль!)
+            float[,] navField = Heightmap.DistToLandM(
+                shoreMap.Height, shoreMap.W, shoreMap.Step, shoreMap.SeaLevel);
+            bool navOk = true;
+            int navCells = 0, waterTotal = 0;
+            for (int sj4 = 0; sj4 < shoreMap.H; sj4 += 2)
+                for (int si4 = 0; si4 < shoreMap.W; si4 += 2)
+                {
+                    if (!shoreMap.Water[si4, sj4])
+                        continue;
+                    waterTotal++;
+                    if (navField[si4, sj4] <= shoreTpl.seaRampM * 2f)
+                        continue;
+                    navCells++;
+                    if (shoreMap.SeaLevel - shoreMap.Height[si4, sj4] < shoreTpl.navDepthM - 0.5f)
+                        navOk = false;
+                }
+            Check("Берег: за аппарелью вода судоходна (≥ navDepthM)", navOk && navCells > 0,
+                "клеток " + navCells + " из воды " + waterTotal);
+
+            // ---------- Морские трассы (v0.152.1): решётка рёбер над судоходной водой ----------
+            // 3×3 узла (шаг 1000): всё судоходно — 12 рёбер (6 верт + 6 гориз)
+            float DeepAll(float x, float z) => 30f;
+            var laneAll = SeaLanesGen.BuildEdges(DeepAll, 0f, 0f, 2000f, 2000f, 1000f, 10f);
+            Check("SeaLanes: полная решётка 3×3 — 12 рёбер", laneAll.Count == 12,
+                "рёбер " + laneAll.Count);
+            // Центральный столбец узлов — суша: живы только вертикали по краям (2+2)
+            float WithLand(float x, float z) => Math.Abs(x - 1000f) < 300f ? -5f : 30f;
+            var laneDetour = SeaLanesGen.BuildEdges(WithLand, 0f, 0f, 2000f, 2000f, 1000f, 10f);
+            Check("SeaLanes: суша в центре — 4 ребра по краям, сквозь столбец нет",
+                laneDetour.Count == 4 &&
+                !laneDetour.Exists(e => Math.Abs(e.A.x - 1000f) < 1f && Math.Abs(e.B.x - 1000f) < 1f),
+                "рёбер " + laneDetour.Count);
+            // Мель ровно в центре ребра (500,1000) — узлы глубоки, ребро отрезано
+            float ShoalMid(float x, float z) => Math.Abs(x - 500f) < 100f && Math.Abs(z - 1000f) < 100f ? 2f : 30f;
+            var laneShoal = SeaLanesGen.BuildEdges(ShoalMid, 0f, 0f, 2000f, 2000f, 1000f, 10f);
+            Check("SeaLanes: мель в центре ребра — одно ребро отрезано",
+                laneShoal.Count == 11, "рёбер " + laneShoal.Count);
+            // Открытый океан (промах рейкаста) — судоходен: сетка 2×2 без единого отреза
+            Check("SeaLanes: промах (океан) судоходен",
+                SeaLanesGen.BuildEdges((x, z) => float.MaxValue, 0f, 0f, 1000f, 1000f, 1000f, 10f).Count == 4);
 
             // ---------- PassGraph: кластеры террас (Moho path_clusters) ----------
             {
@@ -1592,12 +1757,19 @@ namespace SupremeNuclear.Tests
                     specs.Count + " ролей");
                 var roles = new HashSet<string>();
                 var donors = new HashSet<string>();
+                var defenseRoles = new HashSet<string> {
+                    "mg", "atgm", "manpads", "aaa", "pillbox", "gabion", "tower" };
                 bool unique = true, tiersOk = true, economy = false, heliOnce = false;
                 foreach (PoolSpec s in specs)
                 {
+                    // Роли уникальны ВСЕ; доноры — вне обороны (мелкие доноры
+                    // кончились: мекс делит gabionBunker1 с обороной — визуально
+                    // два маленьких бокса с разными именами/иконками, 2026-11-04)
+                    bool donorUnique = donors.Add(s.donor);
                     if (string.IsNullOrEmpty(s.role) || string.IsNullOrEmpty(s.donor) ||
-                        !roles.Add(s.role) || !donors.Add(s.donor))
-                        unique = false; // роли и доноры — ВСЕ уникальны (1 донор = 1 роль)
+                        !roles.Add(s.role) ||
+                        !donorUnique && !defenseRoles.Contains(s.role))
+                        unique = false;
                     if (s.tier < 1 || s.tier > 3)
                         tiersOk = false;
                     if (s.role == "mes" || s.role == "hyd" || s.role == "gen")
@@ -1610,7 +1782,7 @@ namespace SupremeNuclear.Tests
                 Check("Пул: эконом-роли mes/hyd/gen есть", economy);
                 Check("Пул: heliport-флаг только у вертолётной роли", !heliOnce);
                 Check("Пул: доноры мекс/гидро — МЕЛКИЕ (storageTank/ammoDump)",
-                    specs.Find(s => s.role == "mes").donor == "storageTank" &&
+                    specs.Find(s => s.role == "mes").donor == "gabionBunker1" &&
                     specs.Find(s => s.role == "hyd").donor == "ammoDump");
                 Check("Пул: крупные/мусорные НЕ в пуле",
                     specs.Find(s => s.donor.Contains("factory_") ||

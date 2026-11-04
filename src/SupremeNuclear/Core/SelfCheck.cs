@@ -75,6 +75,18 @@ namespace SupremeNuclear
                     throw new System.Exception(
                         "Hangar.availableAircraft не найден — каталог очереди недостроя ангара пуст");
             });
+            Check("MissionManager.listWrecks (адресный сальвиж)", () =>
+            {
+                if (HarmonyLib.AccessTools.Field(typeof(MissionManager), nameof(MissionManager.listWrecks)) == null)
+                    throw new System.Exception("listWrecks не найден — ПКМ-сбор обломков мёртв");
+            });
+            Check("UnitPart.hitPoints (модовый ремонт)", () =>
+            {
+                if (HarmonyLib.AccessTools.Field(typeof(UnitPart), nameof(UnitPart.hitPoints)) == null)
+                    throw new System.Exception("UnitPart.hitPoints не найден — налив HP ремонта мёртв");
+                if (HarmonyLib.AccessTools.Method(typeof(Building), nameof(Building.Repair)) == null)
+                    throw new System.Exception("Building.Repair не найден — нативные «леса» недоступны (долг §12)");
+            });
             Check("FactionHQ.AnyNearAirbase (руление к ближней полосе)", () =>
             {
                 if (HarmonyLib.AccessTools.Method(typeof(FactionHQ), nameof(FactionHQ.AnyNearAirbase)) == null)

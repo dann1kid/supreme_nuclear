@@ -45,6 +45,11 @@ namespace SupremeNuclear
             // Нативная GPU-трава: наш рельеф — в реестр высот СЦЕНОВОГО
             // TerrainHeightMap (чей реестр DetailRenderer и запекает).
             TerrainGrass.Register(mapSettings);
+            // Морские трассы (v0.152.1, плейтест «морские юниты не слушаются»):
+            // ShipAI ищет путь ТОЛЬКО по LevelInfo.seaLanes — сток несёт граф
+            // ассетом, наш MapSettings его не имеет → пустая сеть → NoNetwork →
+            // корабль без вейпоинтов. Строим решётку трасс над судоходной водой.
+            SeaLanesGen.Install(mapSettings);
             // Диагностика «юниты проваливаются» (плейтест 2026-10-29): физика должна
             // видеть Statics-коллайдеры клона; рейкаст — в точке базовой зоны.
             var colliders = mapSettings.GetComponentsInChildren<UnityEngine.MeshCollider>();

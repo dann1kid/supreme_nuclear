@@ -744,15 +744,15 @@ namespace SupremeNuclear
         /// наливаются раньше него (у депо/верфи поток один и он линейный); юниты
         /// ПОСЛЕ — честно ждут своей очереди (тир-гейт оплаты в Tick). Цепочка
         /// стакается: цель — от «пендящего» тира (PendingTierOf).</summary>
-        public static void EnqueueUpgrade(object factory, bool hq = false)
+        public static bool EnqueueUpgrade(object factory, bool hq = false)
         {
             if (!IsHost)
-                return;
+                return false;
             object key = FactoryTierService.KeyOfFactory(factory);
             if (key == null || key is UnityEngine.Object u && u == null)
-                return;
+                return false;
             if (key is Airbase ab && !AirbaseAlive(ab))
-                return;
+                return false;
             int from = PendingTierOf(key);
             // Ветка выбрана (тир ≥2 или апгрейд уже стоит) — следующие переходы
             // ТОЛЬКО её ветки (юзер-канон 2026-11-03): ШТАБ→ШТАБ, дешёвая→дешёвая.
@@ -765,11 +765,11 @@ namespace SupremeNuclear
             {
                 Log.Info("FactoryTier: дешёвый апгрейд отклонён — нет живого HQ T" +
                          (from + 1) + " нужного типа");
-                return;
+                return false;
             }
             if (from >= 3 ||
                 !FactoryTierService.NextCost(from, hq, out float mass, out float energy, out float seconds))
-                return;
+                return false;
             Queue.Add(new QueueItem
             {
                 IsUpgrade = true,
@@ -786,6 +786,7 @@ namespace SupremeNuclear
             Version++;
             Log.Info("FactoryTier: апгрейд до T" + (from + 1) + (hq ? " ШТАБ" : "") +
                      " в очередь фабрики (" + (key is Airbase ? "аэродром" : "фабрика") + ")");
+            return true;
         }
 
         /// <summary>Стоящая в очереди позиция апгрейда этой фабрики (ангар
@@ -1420,9 +1421,15 @@ namespace SupremeNuclear
                         Queue.RemoveAt(i);
                         Version++;
                         if (item.Depot != null)
+                        {
+                            EngineerService.OnVehicleSpawned(item.Depot, item.GroundDef); // HP-канон/тинт клонов тиров
                             DispatchByRally(item.Depot, item.GroundDef);
+                        }
                         else if (launched != null)
+                        {
+                            EngineerService.OnShipSpawned(item.NavalDef, launched); // морские клоны LC: HP-канон/тинт/пропсы
                             DispatchShipByRally(item.Dock, launched);
+                        }
                         OnQueueAdvanced(factory);
                         continue; // на этом месте уже следующая позиция
                     }

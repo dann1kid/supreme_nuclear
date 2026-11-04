@@ -145,6 +145,16 @@ namespace SupremeNuclear
                         GameApi.MainCam, _controller.Selection.Selected, RtsInput.Shift))
                     return;
 
+                // ПКМ по РАНЕНОЙ своей технике/зданию выделенными инженерами — РЕМОНТ
+                // (v0.149, канон SupCom: 4-я функция сьюта; полный HP — эскорт ниже).
+                if (TryIssueRepairOrders(localHq))
+                    return;
+
+                // ПКМ по обломку выделенными инженерами — адресный сбор (v0.149,
+                // долг §12-46г): точка очереди у обломка, дальше работает автосбор.
+                if (TryIssueSalvageOrder())
+                    return;
+
                 // ПКМ по СОЮЗНОМУ мобильному юниту = СОПРОВОЖДЕНИЕ/АССИСТ (v0.97,
                 // канон SupCom: ПКМ по своему — assist/escort): боевые следуют за
                 // целью и защищают её, инженеры вливаются в её стройки, авиация
@@ -820,6 +830,133 @@ namespace SupremeNuclear
                 {
                     bestDist = d;
                     best = unit;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>ПКМ инженерами по РАНЕНОЙ своей технике/зданию = РЕМОНТ (v0.149,
+        /// канон SupCom): стоящая связь Repair (как сопровождение — в очередь точек
+        /// не кладётся), ведение к цели и налив HP — GroundOrders/RepairService.
+        /// Целый юнит не пикнется — его подберёт сопровождение ниже. true — клик
+        /// съеден (в выделении были инженеры).</summary>
+        private bool TryIssueRepairOrders(FactionHQ localHq)
+        {
+            Unit target = TryPickRepairTargetAt(localHq);
+            if (target == null)
+                return false;
+            int issued = 0, skippedShift = 0;
+            foreach (Unit unit in _controller.Selection.Selected)
+            {
+                if (unit == null || unit == target || !GameApi.IsEngineer(unit))
+                    continue;
+                if (RtsInput.Shift)
+                {
+                    // Ремонт — стоящий приказ (как сопровождение): в очередь не кладётся.
+                    skippedShift++;
+                    continue;
+                }
+                BuildTasks.ClearFor(unit); // новая связь = новая очередь (канон)
+                GroundOrders.SetRepair(unit, target);
+                issued++;
+            }
+            if (issued == 0 && skippedShift == 0)
+                return false; // инженеров в выделении нет — пусть клик идёт дальше (эскорт/движение)
+            if (issued > 0)
+                CommanderHud.Notice(Loc.F("Ремонт: {0} → {1}", issued,
+                    target.definition != null ? target.definition.unitName : "?"));
+            if (skippedShift > 0)
+                CommanderHud.Notice(Loc.Tr("Ремонт не ставится в очередь — выдай без Shift"));
+            return true;
+        }
+
+        /// <summary>РАНЕНЫЙ свой юнит/здание под курсором — экранный пик для ремонта
+        /// (техника/флот/здания; авиацию чинит аэродромный сервис — §3-10).
+        /// Расширение TryPickFriendlyAt: здания включены, раненость обязательна.</summary>
+        private Unit TryPickRepairTargetAt(FactionHQ localHq)
+        {
+            float radiusPx = Settings.EnemyPickRadiusPx;
+            Camera cam = GameApi.MainCam;
+            if (cam == null || localHq == null)
+                return null;
+            Unit best = null;
+            float bestDist = float.MaxValue;
+            Vector2 mouse = new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y);
+            foreach (Unit unit in UnitRegistry.allUnits)
+            {
+                if (unit == null || unit.disabled || unit.NetworkHQ == null || unit.NetworkHQ != localHq)
+                    continue;
+                if (!(unit is GroundVehicle || unit is Ship || unit is Building))
+                    continue;
+                if (GameApi.HpFraction(unit) >= 0.995f)
+                    continue; // целый — не цель ремонта (его подберёт эскорт)
+                Vector3 sp = cam.WorldToScreenPoint(GameApi.UnitAnchorWorld(unit));
+                if (sp.z <= 0f)
+                    continue;
+                float d = Vector2.Distance(new Vector2(sp.x, sp.y), mouse);
+                float limit = Mathf.Max(radiusPx, GameApi.ApparentSizePx(unit, cam) * 0.5f);
+                if (d < limit && d < bestDist)
+                {
+                    bestDist = d;
+                    best = unit;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>ПКМ инженерами по обломку = адресный сбор (v0.149, §12-46г):
+        /// точка очереди у обломка (сальваж — движение, а не стоящая связь) —
+        /// доедет и встанет, автосбор SalvageService разбирает сам. Без Shift —
+        /// новая очередь, с Shift — дописать точку (групповой вейпоинт).</summary>
+        private bool TryIssueSalvageOrder()
+        {
+            Wreckage wreck = TryPickWreckAt();
+            if (wreck == null)
+                return false;
+            Vector3 wp = wreck.transform.position;
+            wp.y = GameApi.GroundY(wp.x, wp.z);
+            var point = wp.ToGlobalPosition();
+            int groupId = BuildTasks.NextGroupId();
+            int issued = 0;
+            foreach (Unit unit in _controller.Selection.Selected)
+            {
+                if (unit == null || !GameApi.IsEngineer(unit))
+                    continue;
+                if (!RtsInput.Shift)
+                    BuildTasks.ClearFor(unit); // новый приказ = новая очередь (канон)
+                BuildTasks.AppendMove(unit, point, groupId);
+                issued++;
+            }
+            if (issued == 0)
+                return false; // инженеров нет — не съедаем клик по земле рядом с обломком
+            CommanderHud.Notice(Loc.F("Сбор обломка: {0}", issued));
+            return true;
+        }
+
+        /// <summary>Обломок под курсором — экранный пик по MissionManager.listWrecks
+        /// (Wreckage — не Unit, в реестре юнитов его нет; зеркало TryPickEnemyAt).</summary>
+        private Wreckage TryPickWreckAt()
+        {
+            var mm = MissionManager.i;
+            Camera cam = GameApi.MainCam;
+            if (mm == null || cam == null || mm.listWrecks.Count == 0)
+                return null;
+            float radiusPx = Settings.EnemyPickRadiusPx;
+            Wreckage best = null;
+            float bestDist = float.MaxValue;
+            Vector2 mouse = new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y);
+            foreach (Wreckage wreck in mm.listWrecks)
+            {
+                if (wreck == null)
+                    continue;
+                Vector3 sp = cam.WorldToScreenPoint(wreck.transform.position);
+                if (sp.z <= 0f)
+                    continue;
+                float d = Vector2.Distance(new Vector2(sp.x, sp.y), mouse);
+                if (d < radiusPx && d < bestDist)
+                {
+                    bestDist = d;
+                    best = wreck;
                 }
             }
             return best;

@@ -90,6 +90,25 @@ namespace SupremeNuclear
             public string cliffColor = "#6f6a5e";    // скалы (круче steepDeg)
             public float snowHeightM = 750f;         // вершины выше — к снежному
             public float beachWidthM = 350f;         // полоса пляжа от кромки воды, м
+            public float shoreShelfM = 14f;           // ПОЛОГИЙ ШЕЛЬФ: глубина береговой
+                                                      // полосы, м (0 = крутой берег как прежде;
+                                                      // юзер-канон 2026-11-04: «инженеры
+                                                      // скатываются на дно»)
+            public float coastFlatM = 900f;           // БЕРЕГ-ЖИМ: полоса от уреза, м, где
+                                                      // надводная высота клампится рампой
+                                                      // shoreSlope (0 = выкл; плейтест
+                                                      // 2026-11-04: «всё ещё очень круто,
+                                                      // грузовики тонут с холма»)
+            public float shoreSlope = 0.03f;          // уклон рампы берег-жима, м/м
+                                                      // (900 м × 0.03 = берег не выше ~27 м)
+            public float seaRampM = 350f;             // ГЛУБИННЫЙ ЖИМ: ширина мелкой
+                                                      // аппарели от уреза, м (дальше —
+                                                      // см. navDepthM; плейтест 2026-11-04:
+                                                      // «корабли сели на мель, не слушаются»)
+            public float navDepthM = 12f;             // гарантированная глубина за
+                                                      // аппарелью, м (спавн-фильтр флота
+                                                      // требует max(4, height·0.15) ≈ 9 —
+                                                      // запас; 0 = выкл, мель как прежде)
 
             /// <summary>Хеш морфологии (все поля стиля/рельефа, FNV-1a): входит в
             /// ключ карты — правка JSON-шаблона не коллизирует миры в реестре Built
@@ -107,7 +126,10 @@ namespace SupremeNuclear
                     Mix(ref h, seaLevelM); Mix(ref h, steepDeg); Mix(ref h, edgeM);
                     Mix(ref h, oceanFloorM); Mix(ref h, coastRadius); Mix(ref h, coastBand);
                     Mix(ref h, seaScaleM); Mix(ref h, islandScaleM); Mix(ref h, baseIslandRadiusM);
-                    Mix(ref h, snowHeightM); Mix(ref h, beachWidthM); Mix(ref h, albedoRes); Mix(ref h, corridorWidthM);
+                    Mix(ref h, snowHeightM); Mix(ref h, beachWidthM); Mix(ref h, shoreShelfM);
+                    Mix(ref h, coastFlatM); Mix(ref h, shoreSlope);
+                    Mix(ref h, seaRampM); Mix(ref h, navDepthM);
+                    Mix(ref h, albedoRes); Mix(ref h, corridorWidthM);
                     Mix(ref h, style); Mix(ref h, symmetry); Mix(ref h, waterColor); Mix(ref h, shallowColor);
                     Mix(ref h, beachColor); Mix(ref h, cliffColor);
                     if (palette != null)

@@ -148,6 +148,7 @@ namespace SupremeNuclear
                     DrawNukeAim();
                     DrawDepositMarkers();
                     DrawSalvageMarkers();
+                    DrawRepairMarkers();
                     DrawCaptureMarkers();
                     DrawStrategicIcons(controller);
                     DrawHpBars();
@@ -273,8 +274,8 @@ namespace SupremeNuclear
                 float gy = Screen.height - sp.y;
                 float s = 34f * k;
                 var r = new Rect(sp.x - s * 0.5f, gy - s * 0.5f, s, s);
-                DrawBoxOutline(r, 2f * k, t.ZoneBlocked ? new Color(1f, 0.5f, 0.35f, 0.95f) : c);
-                if (t.ZoneBlocked)
+                DrawBoxOutline(r, 2f * k, t.ZoneBusy ? new Color(1f, 0.5f, 0.35f, 0.95f) : c);
+                if (t.ZoneBusy)
                     GUI.Label(new Rect(sp.x - 140f, gy + s * 0.5f + 2f, 280f, 18f * k),
                         Loc.Tr("зона не расчищена"), _small);
                 float p = t.Progress01;
@@ -398,6 +399,23 @@ namespace SupremeNuclear
                     : null;
                 Color friendTint = isSelected ? new Color(0.7f, 1f, 0.7f, 1f) : new Color(0.45f, 0.9f, 0.5f, 1f);
                 DrawUnitSprite(new Vector2(sp.x, guiY), size, sprite, friendTint, true);
+                // ТИР-чип инженеров (юзер-канон 2026-11-04 «в SupCom это разные
+                // юниты»): T2/T3 — цветная метка под иконкой, в мире видно
+                // различие без всматривания в плитки очереди.
+                if (GameApi.IsEngineer(unit))
+                {
+                    int engTier = EngineerService.TierOf(unit.definition);
+                    if (engTier > 1)
+                    {
+                        Color prev = GUI.color;
+                        GUI.color = engTier >= 3
+                            ? new Color(1f, 0.55f, 0.25f, 1f)   // T3 — оранжевый
+                            : new Color(1f, 0.85f, 0.3f, 1f);    // T2 — жёлтый
+                        GUI.Label(new Rect(sp.x - 14f, guiY + size * 0.5f + 1f, 28f, 13f),
+                            "T" + engTier, _small);
+                        GUI.color = prev;
+                    }
+                }
                 if (isSelected)
                     DrawBoxOutline(new Rect(sp.x - size * 0.7f - 4f, guiY - size * 0.5f - 4f,
                         size * 1.4f + 8f, size + 8f), 1.5f, new Color(0.6f, 1f, 0.6f, 1f));
@@ -717,6 +735,43 @@ namespace SupremeNuclear
                 float innerSize = s * (0.15f + 0.7f * progress[i]);
                 Color fill = color;
                 fill.a = 0.7f;
+                DrawRect(new Rect(sp.x - innerSize * 0.5f, guiY - innerSize * 0.5f, innerSize, innerSize), fill);
+            }
+        }
+
+        /// <summary>Маркеры ремонта (v0.149, канон SupCom — жёлтое семейство Repair,
+        /// как ModeColor): цели, которые прямо сейчас чинят инженеры; заполнение =
+        /// восстановленная доля от HP на начало работы.</summary>
+        private static void DrawRepairMarkers()
+        {
+            Camera cam = GameApi.MainCam;
+            var targets = RepairService.MarkerTargets;
+            var from01 = RepairService.MarkerFrom01;
+            var hp01 = RepairService.MarkerHp01;
+            if (cam == null || targets.Count == 0)
+                return;
+
+            float s = 18f * (Screen.height / 1440f);
+            Color color = new Color(1f, 1f, 0f, 1f);
+            for (int i = 0; i < targets.Count; i++)
+            {
+                Unit target = targets[i];
+                if (target == null)
+                    continue;
+                Vector3 sp = cam.WorldToScreenPoint(GameApi.UnitAnchorWorld(target));
+                if (sp.z <= 0f || sp.x < -40f || sp.x > Screen.width + 40f || sp.y < -40f || sp.y > Screen.height + 40f)
+                    continue;
+                float guiY = Screen.height - sp.y;
+                if (UnderMinimapWindow(new Vector2(sp.x, guiY)))
+                    continue;
+
+                var outer = new Rect(sp.x - s * 0.5f, guiY - s * 0.5f, s, s);
+                DrawBoxOutline(outer, 2f, color);
+                float span = Mathf.Max(0.05f, 1f - from01[i]);
+                float progress = Mathf.Clamp01((hp01[i] - from01[i]) / span);
+                float innerSize = s * (0.15f + 0.7f * progress);
+                Color fill = color;
+                fill.a = 0.55f;
                 DrawRect(new Rect(sp.x - innerSize * 0.5f, guiY - innerSize * 0.5f, innerSize, innerSize), fill);
             }
         }
@@ -1408,6 +1463,7 @@ namespace SupremeNuclear
         private static readonly List<Unit> EscortUnits = new List<Unit>();
         private static readonly List<Unit> EscortTargetsBuf = new List<Unit>();
         private static readonly HashSet<Unit> DrawnEscortMarkers = new HashSet<Unit>();
+        private static readonly HashSet<Unit> DrawnRepairMarkers = new HashSet<Unit>();
         // Групповые точки планов авиации: центроид группы бортов + дедуп маркеров.
         private static readonly Dictionary<int, Vector4> AirGidCentroids = new Dictionary<int, Vector4>();
         private static readonly HashSet<int> DrawnAirGid = new HashSet<int>();
@@ -1768,6 +1824,36 @@ namespace SupremeNuclear
                 DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
                 DrawWorldWaypointColored(cam, TargetGround(target), Color.white, a); // канон FA
             }
+
+            // Связи ремонта (v0.149): жёлтая лента «инженер → цель», одна на цель
+            // (маркер на цели рисует DrawRepairMarkers — белую точку не дублируем).
+            GroundOrders.CollectRepairs(EscortUnits, EscortTargetsBuf, hq);
+            if (EscortUnits.Count == 0)
+                return;
+            Color rc = ModeColor(AirOrderMode.Escort); // семейство Repair = жёлтый (канон FA)
+            for (int i = 0; i < EscortUnits.Count; i++)
+            {
+                Unit unit = EscortUnits[i];
+                bool own = controller.Selection.Selected.Contains(unit);
+                if (!own && !shiftHeld)
+                    continue;
+                Unit target = EscortTargetsBuf[i];
+                if (target == null || target.disabled)
+                    continue;
+                if (!DrawnRepairMarkers.Add(target))
+                    continue; // ногу на цель уже нарисовал первый ремонтник
+                float a = own ? 0.87f : 0.2f;
+                Vector3 anchor = new Vector3(unit.transform.position.x, 0f, unit.transform.position.z);
+                anchor.y = GameApi.GroundY(anchor.x, anchor.z);
+                ChainPts.Clear();
+                ChainCols.Clear();
+                ChainAlphas.Clear();
+                ChainPts.Add(anchor);
+                ChainPts.Add(TargetGround(target));
+                ChainCols.Add(rc);
+                ChainAlphas.Add(a);
+                DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+            }
         }
 
         private void DrawAircraftRoutes(CommanderModeController controller)
@@ -1830,6 +1916,7 @@ namespace SupremeNuclear
             DrawnGroundTargets.Clear(); // цели-узлы: дедуп крестов и ног для всей группы
             DrawnTargetExits.Clear();
             DrawnEscortMarkers.Clear();
+            DrawnRepairMarkers.Clear();
             // Два прохода: сначала выделенные (ярко), затем при Shift остальные —
             // общие ленты/маркеры достаются первому встретившему (дедуп).
             for (int pass = 0; pass < 2; pass++)

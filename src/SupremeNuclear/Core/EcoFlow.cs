@@ -57,6 +57,19 @@ namespace SupremeNuclear
             return Math.Max(0f, baseCost) + (1f - hp01) * Math.Max(0f, unitValue) * Math.Max(0f, damageFactor);
         }
 
+        /// <summary>
+        /// Масса за ремонт (канон SupCom: ремонт стоит ресурсы пропорционально
+        /// восстановленному HP): доля (to−from) × ценность юнита × фактор.
+        /// Полное восстановление = costFactor × цену юнита. Ценность ≤ 0
+        /// (нативные объекты без цены) — базис 1: почти бесплатно, но не ноль.
+        /// </summary>
+        public static float RepairCost(float unitValue, float hpFrom01, float hpTo01, float costFactor)
+        {
+            float fixed01 = Clamp01(hpFrom01);
+            return Math.Max(0f, Clamp01(hpTo01) - fixed01) *
+                   Math.Max(1f, unitValue) * Math.Max(0f, costFactor);
+        }
+
         private static float Clamp01(float v) => v < 0f ? 0f : (v > 1f ? 1f : v);
     }
 }

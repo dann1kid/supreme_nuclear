@@ -319,6 +319,60 @@ namespace SupremeNuclear
 
         private static readonly float[] _nb = new float[8];
 
+        /// <summary>Дистанция до ближайшей воды (МЕТРЫ, по клеткам) — двухпроходный
+        /// chamfer 3-4 (приближение евклида). Вода = высота ниже уровня моря —
+        /// ровно семантика маски Water из RebuildMasks; едят и берег-жим
+        /// (HeightmapGen.Generate), и пляжная полоса текстур (MapTextures).
+        /// Симметрична: у пары симметрии равные высоты → равные дистанции.</summary>
+        internal static float[,] DistToWaterM(float[,] height, int w, float step, float seaLevel) =>
+            Chamfer(height, w, step, seaLevel, maskIsWater: true);
+
+        /// <summary>Дистанция до ближайшего БЕРЕГА (метры) — зеркало DistToWaterM:
+        /// ноль у суши. Нужна глубинному жиму: дистанция считается ДЛЯ воды
+        /// (DistToWaterM даёт воде ноль — полоса мели не отсчитать).</summary>
+        internal static float[,] DistToLandM(float[,] height, int w, float step, float seaLevel) =>
+            Chamfer(height, w, step, seaLevel, maskIsWater: false);
+
+        private static float[,] Chamfer(float[,] height, int w, float step, float seaLevel,
+            bool maskIsWater)
+        {
+            const float inf = 1e9f;
+            var d = new float[w, w];
+            for (int j = 0; j < w; j++)
+                for (int i = 0; i < w; i++)
+                {
+                    bool water = height[i, j] < seaLevel;
+                    d[i, j] = water == maskIsWater ? 0f : inf;
+                }
+
+            for (int j = 0; j < w; j++)
+                for (int i = 0; i < w; i++)
+                {
+                    float m = Math.Min(
+                        Math.Min(i > 0 ? d[i - 1, j] + 1f : inf,
+                                 j > 0 ? d[i, j - 1] + 1f : inf),
+                        Math.Min(i > 0 && j > 0 ? d[i - 1, j - 1] + 1.4142f : inf,
+                                 i < w - 1 && j > 0 ? d[i + 1, j - 1] + 1.4142f : inf));
+                    if (m < d[i, j])
+                        d[i, j] = m;
+                }
+            for (int j = w - 1; j >= 0; j--)
+                for (int i = w - 1; i >= 0; i--)
+                {
+                    float m = Math.Min(
+                        Math.Min(i < w - 1 ? d[i + 1, j] + 1f : inf,
+                                 j < w - 1 ? d[i, j + 1] + 1f : inf),
+                        Math.Min(i < w - 1 && j < w - 1 ? d[i + 1, j + 1] + 1.4142f : inf,
+                                 i > 0 && j < w - 1 ? d[i - 1, j + 1] + 1.4142f : inf));
+                    if (m < d[i, j])
+                        d[i, j] = m;
+                }
+            for (int j = 0; j < w; j++)
+                for (int i = 0; i < w; i++)
+                    d[i, j] = (d[i, j] >= inf ? w : d[i, j]) * step; // маски нет — «далеко»
+            return d;
+        }
+
         private static int Clamp(int v, int lo, int hi) => v < lo ? lo : (v > hi ? hi : v);
 
         private static float ClampF(float v, float lo, float hi) => v < lo ? lo : (v > hi ? hi : v);
@@ -532,12 +586,112 @@ namespace SupremeNuclear
             // клетки: при stepM 100 м порог «0.7·клетки» жевал бы ступени 70 м.
             Heightmap.SmoothRamps(map.Height, w, t.stepM, t.terraceStepM);
 
+            // ПОЛОГИЙ БЕРЕГ (юзер-канон 2026-11-04 «инженеры скатились на дно»):
+            // ПОСЛЕ террас — террасная лестница у кромки воды крута (ступени
+            // десятки метров), наземка скатывается под воду и вязнет. В полосе
+            // глубин [0..shoreShelfM] глубина перенажимается квадратично:
+            // у кромки почти нулевой уклон, к границе полосы — исходный.
+            // Преобразование — функция ТОЛЬКО высоты → симметрия карты цела.
+            if (t.shoreShelfM > 0f)
+            {
+                float shelf = t.shoreShelfM;
+                for (int j = 0; j < w; j++)
+                    for (int i = 0; i < w; i++)
+                    {
+                        float h = map.Height[i, j];
+                        float depth = map.SeaLevel - h;
+                        if (depth <= 0f || depth >= shelf)
+                            continue;
+                        float frac = depth / shelf;        // 0 у кромки → 1 на границе
+                        map.Height[i, j] = map.SeaLevel - shelf * frac * frac; // полого у уреза
+                    }
+            }
+
+            // БЕРЕГ-ЖИМ И ГЛУБИННЫЙ ЖИМ (v0.150.2, одно поле дистанций на двоих).
+            //
+            // БЕРЕГ-ЖИМ — надводный двойник шельфа (юзер-плейтест 2026-11-04
+            // «всё ещё очень круто: грузовики тонут, скатываясь с холма»):
+            // подводный шельф пологит только ДНО, надводный обрыв остаётся —
+            // техника разгоняется по склону и проскакивает −2 м быстрее
+            // водной пружины. В полосе РАССТОЯНИЙ [0..coastFlatM] от уреза
+            // высота над морем клампится рампой shoreSlope·дистанция — холмы
+            // у кромки срезаются в низкий пологий берег.
+            //
+            // ГЛУБИННЫЙ ЖИМ (юзер-плейтест 2026-11-04 «корабли сели на мель,
+            // плывут хрен знает куда»): шельф сжал мелководье 0–14 м в ещё
+            // более мелкое — полоса неплавучей мели у берега стала широкой,
+            // а озёра fBm глубины не гарантируют вовсе; спавн-фильтр верфи
+            // глубину проверяет, ДВИЖЕНИЕ — нет: приказ через отмель сажает
+            // корабль брюхом на дно, тяга тащит его непредсказуемо. За мелкой
+            // аппарелью [0..seaRampM] вода обязана быть судоходной: глубина
+            // ≥ navDepthM (флот с запасом над спавн-порогом max(4, h·0.15)).
+            //
+            // Дистанция симметрична → пары симметрии получают равные значения,
+            // карта остаётся ТОЧНО симметричной.
+            if (t.coastFlatM > 0f || t.navDepthM > 0f)
+            {
+                // Два поля: дистанция ДО ВОДЫ (для суши — берег-жим) и ДО БЕРЕГА
+                // (для воды — глубинный жим; DistToWaterM даёт воде ноль).
+                // Пары симметрии — ОДНО значение: пути chamfer у зеркальной пары
+                // накапливаются в разном порядке (float не ассоциативен) и
+                // расходятся в младших битах — жим расплывал бы ТОЧНУЮ симметрию.
+                float[,] toWater = t.coastFlatM > 0f
+                    ? Heightmap.DistToWaterM(map.Height, w, t.stepM, map.SeaLevel) : null;
+                float[,] toLand = t.navDepthM > 0f
+                    ? Heightmap.DistToLandM(map.Height, w, t.stepM, map.SeaLevel) : null;
+                if (toWater != null)
+                    Symmetrize(toWater, w, t.symmetry, smooth: true);
+                if (toLand != null)
+                    Symmetrize(toLand, w, t.symmetry, smooth: true);
+                for (int j = 0; j < w; j++)
+                    for (int i = 0; i < w; i++)
+                    {
+                        if (toWater != null)
+                            map.Height[i, j] = ShoreClamp(map.Height[i, j], map.SeaLevel,
+                                toWater[i, j], t.coastFlatM, t.shoreSlope);
+                        if (toLand != null)
+                            map.Height[i, j] = NavDepthClamp(map.Height[i, j], map.SeaLevel,
+                                toLand[i, j], t.seaRampM, t.navDepthM);
+                    }
+            }
+
             // Классификация масок по финальным высотам (после зеркалирования).
             map.RebuildMasks(t);
             return map;
         }
 
         /// <summary>Нормализация режима симметрии шаблона (неизвестный → mirror).</summary>
+        /// <summary>Берег-жим одной клетки (чистая, тестируется): подводная и
+        /// далёкая суша — без изменений; суша в полосе [0..flatM] от уреза не выше
+        /// рампы sea+slope·d, у границы полосы плавный выход к исходной высоте
+        /// (вес smoothstep по дистанции). slope кламп снизу — 0 не бывает.</summary>
+        internal static float ShoreClamp(float h, float seaLevel, float distM, float flatM, float slope)
+        {
+            if (h <= seaLevel || distM >= flatM || flatM <= 0f)
+                return h;
+            float cap = seaLevel + Math.Max(0.005f, slope) * distM;
+            float target = h < cap ? h : cap;
+            float wgt = Smoothstep(flatM * 0.45f, flatM, distM); // 0 у воды → 1 у границы
+            return target + (h - target) * wgt;
+        }
+
+        /// <summary>Глубинный жим одной клетки (чистая, тестируется): суша,
+        /// аппарель [0..rampM] от уреза и уже глубокая вода — без изменений;
+        /// подводная клетка за аппарелью мельче navDepthM — дно опускается до
+        /// sea−navDepthM (плавный вход в полосе [rampM..2·rampM] — подводный
+        /// излом не вертикальный).</summary>
+        internal static float NavDepthClamp(float h, float seaLevel, float distM,
+            float rampM, float navDepthM)
+        {
+            if (h >= seaLevel || navDepthM <= 0f || distM <= rampM)
+                return h;
+            if (seaLevel - h >= navDepthM)
+                return h; // уже судоходно
+            float target = Math.Min(h, seaLevel - navDepthM); // дно ВНИЗ до судоходного
+            float wgt = Smoothstep(rampM, rampM * 2f, distM); // 0 у аппарели → 1 глубже
+            return target + (h - target) * (1f - wgt);
+        }
+
         public static string SymmetryOf(string symmetry)
         {
             switch ((symmetry ?? "mirror").Trim().ToLowerInvariant())

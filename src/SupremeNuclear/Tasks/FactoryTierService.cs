@@ -216,6 +216,20 @@ namespace SupremeNuclear
                     : Loc.F("Фабрика → T{0}", toTier));
         }
 
+        /// <summary>Построена фабрика ТИРОМ напрямую (пул: «Наземная фабрика
+        /// T2» — юзер-канон 2026-11-04): тир ставится тихо, без Notice
+        /// («Построено: …» уже сказал игроку). Только вверх — ручные апгрейды
+        /// не сбиваем.</summary>
+        public static void SpawnedAs(object factory, int tier)
+        {
+            object key = KeyOfFactory(factory);
+            if (key == null || tier <= 1 || TierOf(key) >= tier)
+                return;
+            _tiers[key] = Mathf.Clamp(tier, 1, 3);
+            Version++;
+            Log.Info("FactoryTier: построена сразу T" + tier + " (" + Describe(key) + ")");
+        }
+
         /// <summary>Чистка мёртвых ключей (каждую секунду, host); налив апгрейда
         /// с v0.136 живёт ПОЗИЦИЕЙ ОЧЕРЕДИ ProductionTasks — здесь только реестр.</summary>
         public static void Tick(float dt)

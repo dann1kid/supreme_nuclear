@@ -183,6 +183,20 @@ namespace SupremeNuclear
         private static readonly Dictionary<Unit, float> _hpCache = new Dictionary<Unit, float>();
         private static float _nextHpRefresh;
 
+        // Масштаб HP клонов инженеров (канон SupCom: T2 ×2.67, T3 ×5.33): части старта
+        // со 100×масштаб — знаменатель доли должен это знать, иначе полоски клонов врут.
+        private static readonly Dictionary<Unit, float> _hpScale = new Dictionary<Unit, float>();
+        private static readonly List<Unit> _hpScalePrune = new List<Unit>();
+
+        /// <summary>Зарегистрировать масштаб HP юнита (клоны инженеров): HpFraction
+        /// считается относительно 100×масштаб на часть. Один раз после спавна
+        /// (EngineerService.OnVehicleSpawned); масштаб ≥ 1.</summary>
+        public static void RegisterHpScale(Unit unit, float scale)
+        {
+            if (unit != null && scale >= 1f)
+                _hpScale[unit] = scale;
+        }
+
         /// <summary>Доля HP юнита 0..1 (агрегат по деталям; 1 = не повреждён).</summary>
         public static float HpFraction(Unit unit) =>
             unit != null && _hpCache.TryGetValue(unit, out float v) ? v : 1f;
@@ -232,6 +246,7 @@ namespace SupremeNuclear
                 List<UnitPart> parts = unit.partLookup;
                 if (parts == null || parts.Count == 0)
                     continue;
+                float scale = _hpScale.TryGetValue(unit, out float s) ? s : 1f;
                 float sum = 0f;
                 int n = 0;
                 for (int i = 0; i < parts.Count; i++)
@@ -242,7 +257,17 @@ namespace SupremeNuclear
                     sum += p.hitPoints;
                     n++;
                 }
-                _hpCache[unit] = n > 0 ? Mathf.Clamp01(sum / (n * 100f)) : 1f;
+                _hpCache[unit] = n > 0 ? Mathf.Clamp01(sum / (n * 100f * scale)) : 1f;
+            }
+            // Масштабы мёртвых клонов чистим (Unity fake-null), иначе словарь растёт всю сессию.
+            if (_hpScale.Count > 0)
+            {
+                _hpScalePrune.Clear();
+                foreach (KeyValuePair<Unit, float> kv in _hpScale)
+                    if (kv.Key == null)
+                        _hpScalePrune.Add(kv.Key);
+                for (int i = 0; i < _hpScalePrune.Count; i++)
+                    _hpScale.Remove(_hpScalePrune[i]);
             }
             // «Пояс» мёртвых юнитов из кэша убираем (Unity fake-null), иначе кэш растёт всю сессию.
             if (_ringBeltCache.Count > 0)

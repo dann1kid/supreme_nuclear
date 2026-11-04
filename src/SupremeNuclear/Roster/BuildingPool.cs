@@ -23,6 +23,9 @@ namespace SupremeNuclear
         public int tier = 1;         // тир каталога (гейт инженера)
         public float price;          // 0 = нативная (эконом-роли проставит профиль)
         public bool heliport;        // вертолётная площадка: рулёжку не строить
+        public bool factory;         // фабрика: пуласт T2/T3-варианты «дешёвая
+                                     // ветка напрямую» (юзер-канон 2026-11-04:
+                                     // инженер нужного тира + живой HQ типа)
     }
 
     /// <summary>
@@ -102,6 +105,38 @@ namespace SupremeNuclear
                 _byRole[spec.role] = clone;
                 _byDef[clone] = spec;
                 _all.Add(clone);
+
+                // Фабрика — T2/T3-варианты «дешёвая ветка НАПРЯМУЮ» (юзер-канон
+                // 2026-11-04): инженер нужного тира строит сразу T2/T3-клон
+                // (гейт — живой HQ типа этого тира в Place). Цена = базовая +
+                // дешёвые апгрейды до целевого тира (как путь T1+upgrade).
+                if (spec.factory && spec.tier == 1)
+                {
+                    float upTo2 = FactoryTierService.NextCost(1, false, out float m2, out _, out _)
+                        ? m2 : 0f;
+                    float upTo3 = FactoryTierService.NextCost(2, false, out float m3, out _, out _)
+                        ? m3 : 0f;
+                    for (int tier = 2; tier <= 3; tier++)
+                    {
+                        BuildingDefinition variant = Object.Instantiate(clone);
+                        string vname = display + " T" + tier;
+                        variant.name = vname;
+                        variant.unitName = vname;
+                        variant.code = (string.IsNullOrEmpty(spec.code)
+                            ? spec.role.ToUpperInvariant() : spec.code) + tier;
+                        variant.value = clone.value + (tier >= 2 ? upTo2 : 0f) +
+                                        (tier >= 3 ? upTo3 : 0f);
+                        UnitRoster.SetTier(variant, tier);
+                        var vspec = new PoolSpec
+                        {
+                            role = spec.role, donor = spec.donor, name = vname,
+                            code = variant.code, tier = tier, price = variant.value,
+                            heliport = spec.heliport, factory = true,
+                        };
+                        _byDef[variant] = vspec;
+                        _all.Add(variant);
+                    }
+                }
             }
 
             _ready = _all.Count > 0;
@@ -116,16 +151,19 @@ namespace SupremeNuclear
         /// Чистая — тестируется.</summary>
         internal static List<PoolSpec> Defaults() => new List<PoolSpec>
         {
-            // Экономика (цены проставит EconomyProfile — как раньше)
-            new PoolSpec { role = "mes", donor = "storageTank", name = "Экстрактор", code = "MES" },
-            new PoolSpec { role = "hyd", donor = "ammoDump", name = "Гидрокарбонка", code = "HYD" },
-            new PoolSpec { role = "gen", donor = "fuelTank1", name = "Генератор T1", code = "GEN" },
-            // Фабрики (T1: рост тира — апгрейд на месте, §2.3а)
-            new PoolSpec { role = "depot", donor = "VehicleDepot1" },
-            new PoolSpec { role = "hangar", donor = "hangar_med" },
-            new PoolSpec { role = "heliport", donor = "Helipad", heliport = true },
-            new PoolSpec { role = "revetment", donor = "revetment1" },
-            new PoolSpec { role = "storage", donor = "ammunitionBunker", tier = 3 },
+            // Экономика (цены проставит EconomyProfile — как раньше); имена —
+            // канон SupCom (Mass Extractor / Hydrocarbon Power Plant / Power
+            // Generator), юзер-канон 2026-11-04 «понятно, что производит».
+            new PoolSpec { role = "mes", donor = "gabionBunker1", name = "Экстрактор массы", code = "MES" },
+            new PoolSpec { role = "hyd", donor = "ammoDump", name = "Гидрокарбонная станция", code = "HYD" },
+            new PoolSpec { role = "gen", donor = "fuelTank1", name = "Генератор энергии", code = "GEN" },
+            // Фабрики (T1: рост тира — апгрейд на месте, §2.3а); имена — SupCom
+            // (Land/Air Factory): по имени виден ВЫПУСК (техника/авиация/вертолёты).
+            new PoolSpec { role = "depot", donor = "VehicleDepot1", name = "Наземная фабрика", code = "LAND", factory = true },
+            new PoolSpec { role = "hangar", donor = "hangar_med", name = "Авиафабрика", code = "AIR", factory = true },
+            new PoolSpec { role = "heliport", donor = "Helipad", name = "Вертолётная фабрика", code = "HELO", heliport = true, factory = true },
+            new PoolSpec { role = "revetment", donor = "revetment1", name = "Авиафабрика лёгкая", code = "AIRL", factory = true },
+            new PoolSpec { role = "storage", donor = "ammunitionBunker", name = "Хранилище БЧ", code = "WHS", tier = 3 },
             // Оборона (вооружённая + укрытия — вся линия, юзер-выбор 2026-11-03)
             new PoolSpec { role = "mg", donor = "Emplacement1_MG" },
             new PoolSpec { role = "atgm", donor = "Emplacement1_ATGM" },

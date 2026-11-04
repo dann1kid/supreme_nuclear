@@ -71,6 +71,8 @@ namespace SupremeNuclear
             {
                 if (unit == null || unit.disabled || !GameApi.IsEngineer(unit))
                     continue;
+                if (PauseService.IsPaused(unit))
+                    continue; // пауза юнита — не захватывает
                 if (Mathf.Abs(unit.speed) > 1f)
                     continue; // едет мимо — не захватывает
                 FactionHQ hq = unit.NetworkHQ;
