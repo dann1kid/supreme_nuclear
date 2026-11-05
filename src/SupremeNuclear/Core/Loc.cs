@@ -37,7 +37,10 @@ namespace SupremeNuclear
         /// <summary>Загрузка таблиц по настройке языка ("auto" = язык системы:
         /// русский → ru, прочие → en). Вызывается в Awake ДО Settings.Bind —
         /// описания остальных настроек тоже проходят через Tr; повторно — при
-        /// живой смене General.Language (SettingChanged, v0.153).</summary>
+        /// живой смене General.Language (SettingChanged, v0.153).
+        /// en-таблица: файл в Locales/ приоритетнее, вшитая в DLL — страховка
+        /// (папку могли не скопировать при обновлении одним DLL — игрок с
+        /// Language=en оставался на русском молча, жалоба 2026-11-05).</summary>
         public static void Bootstrap(string preferred)
         {
             string auto = Application.systemLanguage == SystemLanguage.Russian ? "ru" : "en";
@@ -46,12 +49,22 @@ namespace SupremeNuclear
                 : preferred.Trim().ToLowerInvariant();
             string dir = Path.Combine(Paths.PluginPath, "SupremeNuclear", "Locales");
             string en = ReadLocale(Path.Combine(dir, "en.json"));
+            string enSource = en != null ? "файл" : null;
+            if (en == null)
+            {
+                en = EmbeddedEn();
+                enSource = en != null ? "вшито в DLL" : "ОТСУТСТВУЕТ";
+            }
             string sel = lang == "ru" || lang == "en"
                 ? null
                 : ReadLocale(Path.Combine(dir, lang + ".json"));
             Install(lang, en, sel);
             Log.Info("Loc: язык " + Language + " — строк переведено " + _table.Count +
-                     ", фолбэк en — " + _en.Count);
+                     ", en (" + enSource + ") — " + _en.Count);
+            if (Language != "ru" && _table.Count == 0)
+                Log.Warn("Loc: язык " + Language + ", но таблица ПУСТА — UI останется " +
+                         "русским. Проверь установку: BepInEx/plugins/SupremeNuclear/Locales/ " +
+                         "или переустанови мод целиком (не одним DLL).");
         }
 
         /// <summary>Имена локалей в папке плагина (для списка допустимых значений настройки
@@ -84,6 +97,28 @@ namespace SupremeNuclear
             catch (Exception e)
             {
                 Log.Error("Loc: не читается " + path + ": " + e.Message);
+                return null;
+            }
+        }
+
+        /// <summary>Вшитая в DLL копия en.json (EmbeddedResource, имя — LogicalName
+        /// в csproj). Возвращает null, только если сборка собрана без ресурса.</summary>
+        private static string EmbeddedEn()
+        {
+            try
+            {
+                using (var s = System.Reflection.Assembly.GetExecutingAssembly()
+                       .GetManifestResourceStream("SupremeNuclear.locales.en.json"))
+                {
+                    if (s == null)
+                        return null;
+                    using (var r = new StreamReader(s, System.Text.Encoding.UTF8))
+                        return r.ReadToEnd();
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Error("Loc: вшитая en-таблица не читается: " + e.Message);
                 return null;
             }
         }

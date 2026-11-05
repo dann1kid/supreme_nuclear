@@ -176,6 +176,14 @@ namespace SupremeNuclear
                 if (HarmonyLib.AccessTools.Field(typeof(VehicleDepot), "spawnTransform") == null)
                     throw new System.Exception("VehicleDepot.spawnTransform не найден — выход депо берётся по габариту");
             });
+            Check("Loc: вшитая en-таблица (фолбэк установки без папки Locales/)", () =>
+            {
+                using (var s = System.Reflection.Assembly.GetExecutingAssembly()
+                       .GetManifestResourceStream("SupremeNuclear.locales.en.json"))
+                    if (s == null)
+                        throw new System.Exception(
+                            "EmbeddedResource en.json не найден в манифесте DLL — csproj потерял встроенный ресурс");
+            });
             Check("Тиры фабрик/инженеров (VehicleDepot.TrySpawnVehicle, Hangar.parentAirbase)", () =>
             {
                 // Клоны инженеров T2/T3 спавнятся нативным депо как обычные

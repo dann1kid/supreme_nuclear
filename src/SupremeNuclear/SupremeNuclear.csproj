@@ -43,6 +43,12 @@
   <ItemGroup>
     <!-- Локали мода: репозиторий locales/ -> игра BepInEx/plugins/SupremeNuclear/Locales/ -->
     <LocaleJsons Include="..\..\locales\*.json" />
+    <!-- en-таблица ВШИТА в DLL (страховка установки): папку Locales/ могли не
+         скопировать/потерять при обновлении одним DLL — англоязычный игрок
+         оставался на русском (жалоба 2026-11-05). Файл в папке приоритетнее. -->
+    <EmbeddedResource Include="..\..\locales\en.json">
+      <LogicalName>SupremeNuclear.locales.en.json</LogicalName>
+    </EmbeddedResource>
     <!-- Пресеты генератора карт (стили land/coast/seas/islands):
          репозиторий mapgen/ -> игра BepInEx/plugins/SupremeNuclear/MapGen/ -->
     <MapGenTemplates Include="..\..\mapgen\*.json" />

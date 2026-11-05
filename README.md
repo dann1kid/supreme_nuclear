@@ -47,7 +47,9 @@ Controls/UX feedback is welcome — GitHub Issues (feedback template).
 кнопка **«Language»** в главном меню под «Скримиш» (цикл `ru` ↔ `en`,
 применяется на лету) или настройка `General.Language` в
 `BepInEx/config/com.supremenuclear.rts.cfg` (`auto` — язык системы; принудительно
-`ru`/`en` или имя файла из `BepInEx/plugins/SupremeNuclear/Locales/`). Добавить свой
+`ru`/`en` или имя файла из `BepInEx/plugins/SupremeNuclear/Locales/`). Английская
+таблица вшита и в сам DLL — английский работает, даже если папка `Locales/`
+потерялась при обновлении. Добавить свой
 язык — один файл `Locales/<язык>.json` по образцу `en.json` (см. AGENTS «Правила
 локализации»). Диагностика (логи, SelfCheck, F11) — только по-русски.
 
@@ -55,8 +57,9 @@ The mod UI ships in **Russian** (source language) and **English**. Switch it wit
 **Language** button in the main menu (under Skirmish; toggles `ru`/`en`,
 applies instantly) or via the `General.Language` entry in the BepInEx config
 (`auto` follows your OS language; other locale files go to
-`BepInEx/plugins/SupremeNuclear/Locales/`). Untranslated entries fall back to English,
-then Russian.
+`BepInEx/plugins/SupremeNuclear/Locales/`). The English table is also embedded in the
+DLL itself, so it works even if the `Locales/` folder went missing during an update.
+Untranslated entries fall back to English, then Russian.
 
 ---
 
