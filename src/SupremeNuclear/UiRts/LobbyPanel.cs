@@ -350,19 +350,19 @@ namespace SupremeNuclear
             {
                 switch (col)
                 {
-                    case 1: ShowContextMenu(armyId, cellRt); break; // ник → меню FAF-стиля
-                    case 2: SnLobbyService.CycleTeam(armyId); break;
-                    case 3: SnLobbyService.CycleColor(armyId); break;
+                    case 1:
                     case 4:
-                        // Столбец «Занять/Готов»: свой слот — готовность, открытый
-                        // или ИИ-слот — хост пересаживается сам (плейтест
-                        // 2026-11-07: «занятие слотов не работает»).
+                        // Ник и столбец состояния открывают FAF-дропдаун слота;
+                        // исключение — СВОЙ сидящий слот в col 4: клик = готовность
+                        // (быстрый путь, как клик по кнопке «Готов» у гостя).
                         LobbyState.Army seat = SnLobbyService.State?.armies.Find(x => x.id == armyId);
-                        if (seat != null && seat.controller == LobbyState.CtrlHuman)
+                        if (col == 4 && seat != null && seat.controller == LobbyState.CtrlHuman)
                             SnLobbyService.ToggleSlotReady(armyId);
                         else
-                            SnLobbyService.SeatHostAt(armyId);
+                            ShowContextMenu(armyId, cellRt);
                         break;
+                    case 2: SnLobbyService.CycleTeam(armyId); break;
+                    case 3: SnLobbyService.CycleColor(armyId); break;
                 }
             }
             else
@@ -433,8 +433,10 @@ namespace SupremeNuclear
 
         // ---------- контекстное меню слота (FAF-стиль) ----------
 
-        /// <summary>Меню у курсора: Закрыт / Открыт / ИИ-командир / назначить
-        /// наблюдателя в слот. Хост-only; закрывается кликом мимо или выбором.</summary>
+        /// <summary>Дропдаун состояния слота (FAF-канон, плейтест 2026-11-07
+        /// «посмотри как сделано тут»): Закрыт / Открыт / Занять (я) / ИИ-профили
+        /// (Стандарт-Лёгкий-Жёсткий-Экономист-Агрессор) / назначить наблюдателя.
+        /// Хост-only; открывается кликом по слоту, закрывается выбором/кликом мимо.</summary>
         private void ShowContextMenu(int armyId, RectTransform cellRt)
         {
             if (!SnLobbyService.Hosting || SnLobbyService.State == null ||
@@ -445,8 +447,10 @@ namespace SupremeNuclear
 
             var observers = LobbyState.Observers(SnLobbyService.State);
             LobbyState.Army menuArmy = SnLobbyService.State.armies.Find(x => x.id == armyId);
-            bool isAiSlot = menuArmy != null && menuArmy.controller == LobbyState.CtrlAi;
-            int itemCount = 3 + (isAiSlot ? 1 : 0) + (observers.Count > 0 ? 1 + observers.Count : 0);
+            bool canOccupy = menuArmy != null &&
+                (menuArmy.controller == LobbyState.CtrlOpen || menuArmy.controller == LobbyState.CtrlAi);
+            int itemCount = 2 + (canOccupy ? 1 : 0) + AiProfile.Types.Length +
+                (observers.Count > 0 ? 1 + observers.Count : 0);
             float w = 240f, h = itemCount * 30f + 10f;
             _ctxMenu = Panel("ctxMenu", _canvas.transform, new Vector2(0f, 0f), new Vector2(0f, 0f),
                 Vector2.zero, new Vector2(w, h), SupcomUi.PanelBg);
@@ -472,15 +476,18 @@ namespace SupremeNuclear
             iy += 30f;
             MenuItem(Loc.Tr("Открыт"), () => { SnLobbyService.SetArmyController(armyId, LobbyState.CtrlOpen); CloseContextMenu(); }, iy);
             iy += 30f;
-            MenuItem(Loc.Tr("ИИ-командир"), () => { SnLobbyService.SetArmyController(armyId, LobbyState.CtrlAi); CloseContextMenu(); }, iy);
-            iy += 30f;
-            if (isAiSlot)
+            if (canOccupy)
             {
-                // Цикл пресета ИИ (§12-49): Стандарт → Лёгкий → Жёсткий →
-                // Экономист → Агрессор → …; aiType уходит гостям с Broadcast.
-                string cur = string.IsNullOrEmpty(menuArmy.aiType) ? "commander" : menuArmy.aiType;
-                MenuItem(Loc.F("Профиль ИИ: {0}", AiProfile.LabelOf(cur)),
-                    () => { SnLobbyService.CycleAiType(armyId); CloseContextMenu(); }, iy);
+                MenuItem(Loc.Tr("Занять (я)"), () => { SnLobbyService.SeatHostAt(armyId); CloseContextMenu(); }, iy);
+                iy += 30f;
+            }
+            // ИИ-профили (FAF-канон: «AI: Easy/Normal/…») — выбор ставит слот
+            // в ИИ сразу с пресетом; aiType уходит гостям с Broadcast (§12-49).
+            foreach (string type in AiProfile.Types)
+            {
+                string profile = type; // замыкание на текущий тип
+                MenuItem(Loc.F("ИИ: {0}", AiProfile.LabelOf(type)),
+                    () => { SnLobbyService.SetAiProfile(armyId, profile); CloseContextMenu(); }, iy);
                 iy += 30f;
             }
             if (observers.Count > 0)

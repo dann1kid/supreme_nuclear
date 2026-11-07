@@ -565,20 +565,21 @@ namespace SupremeNuclear
             Broadcast();
         }
 
-        /// <summary>Хост циклит профиль ИИ-слота (aiType → AI/&lt;type&gt;.json,
-        /// §12-49): пресеты AiProfile.Types. В миссию aiType не запекается
-        /// (только поведение AI) — регенерация карты не нужна.</summary>
-        internal static void CycleAiType(int armyId)
+        /// <summary>Хост ставит слот в ИИ с КОНКРЕТНЫМ профилем (FAF-дропдаун
+        /// «AI: Easy/Normal/…», плейтест 2026-11-07): aiType → AI/&lt;type&gt;.json,
+        /// §12-49. В миссию aiType не запекается — регенерация карты не нужна.</summary>
+        internal static void SetAiProfile(int armyId, string type)
         {
             if (!Hosting || State == null || State.status != LobbyState.StatusWaiting)
                 return;
             LobbyState.Army a = State.armies.Find(x => x.id == armyId);
-            if (a == null || a.controller != LobbyState.CtrlAi)
+            if (a == null)
                 return;
-            string cur = string.IsNullOrEmpty(a.aiType) ? "commander" : a.aiType;
-            int idx = System.Array.IndexOf(AiProfile.Types, cur);
-            a.aiType = AiProfile.Types[(idx + 1) % AiProfile.Types.Length];
-            Log.Info($"SnLobby: профиль ИИ слота {armyId} → {a.aiType}");
+            if (System.Array.IndexOf(AiProfile.Types, type) < 0)
+                type = "commander";
+            a.controller = LobbyState.CtrlAi;
+            a.aiType = type;
+            Log.Info($"SnLobby: слот {armyId} → ИИ ({type})");
             Broadcast();
         }
 
