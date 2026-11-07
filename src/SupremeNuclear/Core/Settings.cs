@@ -201,7 +201,7 @@ namespace SupremeNuclear
         }
 
         /// <summary>Выбор игроков панели (1×1…4×4): держим как MapGenTemplate/Seed
-        /// (долг §12-57(д) — выбор больше не сбрасывается между запусками).</summary>
+        /// (долг §12-67(д) — выбор больше не сбрасывается между запусками).</summary>
         public static void SetMapGenPlayers(int players)
         {
             MapGenPlayers = LobbyState.ClampPlayers(players);

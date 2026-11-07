@@ -3,8 +3,11 @@
 версия от исходника до задеплоенного DLL, линт накопленных классов багов,
 тесты чистой логики. Выход ≠ 0 при любой проблеме.
 
-Запуск:  python tools/build.py          (полный конвейер)
-         python tools/build.py --fast   (без чистки obj)
+Запуск:  python tools/build.py            (полный конвейер; нужна установленная игра)
+         python tools/build.py --fast     (без чистки obj)
+         python tools/build.py --no-game  (версия+линт+локали+реестр долгов — шаги,
+                                           которым игра не нужна; для CI. Без сборки,
+                                           тестов и деплой-сверок)
 """
 import io
 import os
@@ -38,10 +41,16 @@ def step(name, ok, details=""):
         failures.append(name)
 
 
-def run(cmd, cwd=None):
+def run(cmd, cwd=None, decode="cp1251"):
     p = subprocess.run(cmd, cwd=cwd, capture_output=True, shell=True)
     text = (p.stdout or b"") + (p.stderr or b"")
-    return p.returncode, text.decode("cp1251", errors="replace")
+    return p.returncode, text.decode(decode, errors="replace")
+
+
+def run_tool(script):
+    """Скрипт tools/: тем же интерпретатором (CI-машины без «python» в PATH)."""
+    return run('"%s" "%s"' % (sys.executable, os.path.join(ROOT, "tools", script)),
+               decode="utf-8")
 
 
 def read(path):
@@ -56,10 +65,7 @@ def source_files():
                 yield os.path.join(base, f)
 
 
-def main():
-    fast = "--fast" in sys.argv
-
-    # ---------- 1. Версия ----------
+def check_version():
     m = re.search(r'Version\s*=\s*"(\d+\.\d+\.\d+)"', read(PLUGIN_INFO))
     version = m.group(1) if m else None
     step("Версия в PluginInfo.cs распознана", version is not None, version or "нет")
@@ -67,8 +73,10 @@ def main():
         step("Версия не застряла на 0.35.2", False, "инцидент повторился")
     else:
         step("Версия не застряла на 0.35.2", True)
+    return version
 
-    # ---------- 2. Линт ----------
+
+def lint():
     double_text = 0
     go_without_rt = 0
     for path in source_files():
@@ -89,18 +97,28 @@ def main():
     step("Линт: GameObject- ctor только с typeof(RectTransform)", go_without_rt == 0,
          "нарушений: %d" % go_without_rt)
 
-    # ---------- 2b. Локали: ключи кода = ключи каждой локали ----------
-    code, out = run('python "%s"' % os.path.join(ROOT, "tools", "check_locales.py"))
+
+def locales():
+    code, out = run_tool("check_locales.py")
     step("Локали: ключи Loc.* покрыты всеми файлами locales/", code == 0,
          out.strip().split("\n")[-1] if out.strip() else "")
 
-    # ---------- 3. Сборка (полная, предупреждения = ошибки) ----------
+
+def registry():
+    code, out = run_tool("check_registry.py")
+    step("Реестр долгов §12: номера уникальны", code == 0,
+         out.strip().split("\n")[-1] if out.strip() else "")
+
+
+def build(fast):
     if not fast:
         subprocess.run("rm -rf obj", cwd=SRC, shell=True, capture_output=True)
     code, out = run("dotnet build -c Release -warnaserror", cwd=SRC)
-    step("Сборка 0 ошибок / 0 предупреждений", code == 0, out.strip().split("\n")[-1] if out else "")
+    step("Сборка 0 ошибок / 0 предупреждений", code == 0,
+         out.strip().split("\n")[-1] if out.strip() else "")
 
-    # ---------- 4. Версия в бинарнике и деплой ----------
+
+def bin_and_deploy(version):
     if os.path.exists(BIN_DLL):
         data = open(BIN_DLL, "rb").read()
         step("Версия в bin DLL совпадает с исходником",
@@ -158,7 +176,8 @@ def main():
     else:
         step("Игровой DLL существует", False, GAME_DLL)
 
-    # ---------- 5. Тесты чистой логики ----------
+
+def tests():
     code, out = run("dotnet build -c Release", cwd=TESTS)
     if code == 0:
         exe = os.path.join(TESTS, "bin", "Release", "SupremeNuclear.Tests.exe")
@@ -168,11 +187,45 @@ def main():
     else:
         step("Сборка тестов", False, out[-400:])
 
+
+def finish(version):
     print()
     if failures:
         print("КОНВЕЙЕР ПРОВАЛЕН: " + ", ".join(failures))
         sys.exit(1)
     print("КОНВЕЙЕР ЗЕЛЁНЫЙ (v%s)" % version)
+
+
+def main():
+    fast = "--fast" in sys.argv
+    no_game = "--no-game" in sys.argv
+
+    # ---------- 1. Версия ----------
+    version = check_version()
+
+    # ---------- 2. Линт ----------
+    lint()
+
+    # ---------- 2b. Локали: ключи кода = ключи каждой локали ----------
+    locales()
+
+    # ---------- 2c. Реестр долгов §12: номера уникальны ----------
+    registry()
+
+    if no_game:
+        finish(version)
+        return
+
+    # ---------- 3. Сборка (полная, предупреждения = ошибки) ----------
+    build(fast)
+
+    # ---------- 4. Версия в бинарнике и деплой ----------
+    bin_and_deploy(version)
+
+    # ---------- 5. Тесты чистой логики ----------
+    tests()
+
+    finish(version)
 
 
 if __name__ == "__main__":

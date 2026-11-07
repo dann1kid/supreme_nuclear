@@ -1,0 +1,21 @@
+# CI без установленной игры: шаги конвейера, которым игра не нужна —
+# версия/линт/локали/реестр долгов (tools/build.py --no-game).
+# Сборка, тесты и деплой-сверки требуют reference-сборки установленной игры
+# (20 DLL вне репозитория) и остаются локальным конвейером; релизы — tools/publish.py.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  no-game:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Конвейер без игры (версия, линт, локали, реестр долгов)
+        run: python tools/build.py --no-game

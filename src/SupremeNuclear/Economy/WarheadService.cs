@@ -96,7 +96,7 @@ namespace SupremeNuclear
             }
             if (_storageDef == null)
                 Log.Warn("ЯО: здание-хранилище БЧ не найдено в энциклопедии — " +
-                         "авиация без ЯО (долг §12-57)");
+                         "авиация без ЯО (долг §12-60)");
             ScanMissile(e);
             Log.Info("ЯО: скан — склад '" + (_storageDef != null ? _storageDef.jsonKey : "нет") +
                      "', ракета '" + (_nukeDef != null ? _nukeDef.jsonKey : "нет") +
@@ -132,7 +132,7 @@ namespace SupremeNuclear
             }
             if (best == null)
             {
-                Log.Warn("ЯО: ядерных ракет в энциклопедии нет — пуск с корабля недоступен (§12-57)");
+                Log.Warn("ЯО: ядерных ракет в энциклопедии нет — пуск с корабля недоступен (§12-60)");
                 return;
             }
             _nukeDef = best;
