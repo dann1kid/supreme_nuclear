@@ -213,12 +213,12 @@ namespace SupremeNuclear
 
         private static int HostIndex()
         {
-            // Хост и его клиент — одно локальное соединение (LocalPipe): индекс
-            // хоста ВСЕГДА = индексу локального игрока. Раньше читали
-            // Server.LocalPlayer, а «свой слот» в панели сравнивала с
-            // Client.Player — два независимых пути давали рассинхрон, и хост
-            // не мог кликнуть свой флаг готовности (плейтест 2026-11-07).
-            return LocalPlayerIndex();
+            // Серверная сторона — ТОТ ЖЕ источник, каким Broadcast строит
+            // members (Server.AuthenticatedPlayers): id хоста в слоте всегда
+            // найдётся в списке участников. (v0.165 сводил к Client.Player —
+            // это ДРУГОЙ источник: auth-SaveData на клиенте дефолтна.)
+            var local = NetworkManagerNuclearOption.i.Server.LocalPlayer;
+            return local != null ? PlayerIndexOf(local) : -1;
         }
 
         // ---------- команды армий (союз/враг в бою) ----------
@@ -305,12 +305,18 @@ namespace SupremeNuclear
 
         internal static int LocalPlayerIndex()
         {
-            // БЕЗ кэша (плейтест 2026-11-07): ранний вызов до завершения auth
-            // возвращал ДЕФОЛТНЫЙ PlayerIndex и навсегда закэшировал неверный
-            // id — «свой слот» не совпадал, флаг готовности не кликался. Вызов
-            // дешёвый (рефреш 0.4 с × ≤8 строк), корректность дороже.
-            var local = NetworkManagerNuclearOption.i?.Client?.Player;
-            return local != null ? PlayerIndexOf(local) : -1;
+            // Идентичность локального игрока — SyncVar PlayerIndex ЗАСПАВНЕННОГО
+            // Player (сервер назначает индекс в AssignPlayerIndex, SyncVar
+            // синхронизируется ВСЕМ, включая владельца; плейтест 2026-11-07:
+            // два пути по auth-SaveData — Server.LocalPlayer vs Client.Player —
+            // давали РАЗНЫЕ id: на клиенте SaveData.PlayerIndex дефолтен, слот
+            // хоста садился на «пустой» id, ник падал в «хост», свой флаг не
+            // кликался). До спавна Player (первые секунды комнаты) — -1.
+            // Паттерн тот же, что у GameManager.GetLocalHQ (GameApi).
+            if (GameManager.GetLocalPlayer<NuclearOption.Networking.Player>(out var p) &&
+                p != null && p.PlayerIndex > 0)
+                return p.PlayerIndex;
+            return -1;
         }
 
         private static void SendRequest(LobbyRequest request)
