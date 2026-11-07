@@ -184,8 +184,16 @@ namespace SupremeNuclear
             }
             y -= 38f;
 
-            // Библиотека: метка + ◀ [имя] ▶ + «Взять» (вторая строка).
+            // Библиотека: метка + переключатель источника (SN-сейвы ↔ ванильные
+            // МП-миссии игры, v0.167) + ◀ [имя] ▶ + «Взять».
             y = Header(_container, y, Loc.Tr("Библиотека"));
+            _sourceButton = host.Button_(_container, "lib_source", "", ToggleSource, 12);
+            var srcRt = (RectTransform)_sourceButton.transform;
+            srcRt.anchorMin = new Vector2(0.52f, 1f);
+            srcRt.anchorMax = new Vector2(1f, 1f);
+            srcRt.offsetMin = new Vector2(2f, y + 12f);
+            srcRt.offsetMax = new Vector2(-2f, y + 30f);
+            _libraryButtons.Add(_sourceButton);
             var libRow = host.Panel("libRow", _container, new Vector2(0f, 1f), new Vector2(1f, 1f),
                 new Vector2(2f, y - 32f), new Vector2(-2f, y), new Color(0f, 0f, 0f, 0f));
             var prev = host.Button_(libRow, "lib_prev", "◀", () => CycleSaved(-1), 13);
@@ -261,15 +269,36 @@ namespace SupremeNuclear
             return y - 30f;
         }
 
-        // ---------- библиотека сохранённых карт ----------
+        // ---------- библиотека карт: SN-сейвы + ванильные МП-миссии (v0.167) ----------
 
         private List<SkirmishService.SavedMap> _savedMaps = new List<SkirmishService.SavedMap>();
         private int _savedIndex = -1;
         private float _nextScanAt;
         private string _statusOverride; // «шаблон сейва не найден» и пр. (до следующего действия)
+        private Button _sourceButton;   // SN ↔ ванильные
+        private bool _vanillaSource;
+        private int _vanillaIndex = -1;
+
+        /// <summary>Источник библиотеки: SN-сейвы ↔ ванильные МП-миссии
+        /// (2 стороны по канону карты, §3-13).</summary>
+        private void ToggleSource()
+        {
+            _vanillaSource = !_vanillaSource;
+            RefreshLibrary();
+            RefreshDynamic();
+        }
 
         private void CycleSaved(int dir)
         {
+            if (_vanillaSource)
+            {
+                var vanilla = SkirmishService.ListVanillaMaps();
+                if (vanilla.Count == 0)
+                    return;
+                _vanillaIndex = (_vanillaIndex + dir + vanilla.Count) % vanilla.Count;
+                RefreshLibrary();
+                return;
+            }
             ScanSaved();
             if (_savedMaps.Count == 0)
                 return;
@@ -289,9 +318,27 @@ namespace SupremeNuclear
 
         private void RefreshLibrary()
         {
-            ScanSaved();
             if (_libraryLabel == null)
                 return;
+            if (_sourceButton != null)
+                _sourceButton.GetComponentInChildren<Text>().text = _vanillaSource
+                    ? Loc.Tr("Источник: ванильные")
+                    : Loc.Tr("Источник: SN");
+            if (_vanillaSource)
+            {
+                var vanilla = SkirmishService.ListVanillaMaps();
+                if (vanilla.Count == 0)
+                {
+                    _libraryLabel.text = Loc.Tr("(нет ванильных МП-карт)");
+                    return;
+                }
+                if (_vanillaIndex < 0 || _vanillaIndex >= vanilla.Count)
+                    _vanillaIndex = 0;
+                SkirmishService.VanillaMap m = vanilla[_vanillaIndex];
+                _libraryLabel.text = Loc.F("{0}: {1} vs {2}", m.Title, m.Sides[0], m.Sides[1]);
+                return;
+            }
+            ScanSaved();
             if (_savedMaps.Count == 0)
             {
                 _libraryLabel.text = Loc.Tr("(нет карт)");
@@ -299,16 +346,31 @@ namespace SupremeNuclear
             }
             if (_savedIndex < 0)
                 _savedIndex = 0;
-            SkirmishService.SavedMap m = _savedMaps[_savedIndex];
-            _libraryLabel.text = m.Name.Replace("SN-Terrain-", "") +
-                (m.Players > 0 ? Loc.F(" ·{0}", m.Players) : "");
+            SkirmishService.SavedMap sm = _savedMaps[_savedIndex];
+            _libraryLabel.text = sm.Name.Replace("SN-Terrain-", "") +
+                (sm.Players > 0 ? Loc.F(" ·{0}", sm.Players) : "");
         }
 
-        /// <summary>«Взять»: подставить тройку выбранной карты (шаблон → стиль,
-        /// сид → поле, пул → стороны) и сразу генерировать — Built-кэш даст
-        /// мгновенное превью; холодная карта посчитается фоном.</summary>
+        /// <summary>«Взять»: ванильный источник — выбрать МП-миссию игры (пул
+        /// строго 2, стороны = фракции миссии, старт — дроп инженеров на своей
+        /// базе при СТАРТе; сцена НЕ грузится до запуска). SN-источник —
+        /// подставить тройку выбранной карты (шаблон → стиль, сид → поле,
+        /// пул → стороны) и сразу генерировать — Built-кэш даст мгновенное
+        /// превью; холодная карта посчитается фоном.</summary>
         private void TakeSaved()
         {
+            if (_vanillaSource)
+            {
+                var vanilla = SkirmishService.ListVanillaMaps();
+                if (vanilla.Count == 0 || _vanillaIndex < 0 || _vanillaIndex >= vanilla.Count)
+                    return;
+                SkirmishService.VanillaMap vm = vanilla[_vanillaIndex];
+                SnLobbyService.SetVanillaMap(vm);
+                _statusOverride = Loc.F("Ванильная карта: {0} ({1} vs {2}, баз {3})",
+                    vm.Title, vm.Sides[0], vm.Sides[1], vm.Bases);
+                RefreshDynamic();
+                return;
+            }
             ScanSaved();
             if (_savedMaps.Count == 0 || _savedIndex < 0 || _savedIndex >= _savedMaps.Count)
                 return;
@@ -405,11 +467,13 @@ namespace SupremeNuclear
             RefreshDynamic();
         }
 
-        /// <summary>Подсветки выбора + гейты кнопок.</summary>
+        /// <summary>Подсветки выбора + гейты кнопок. Ванильная карта активна —
+        /// пул заперт на 2 (канон карты), превью SN гасим.</summary>
         internal void RefreshDynamic()
         {
             bool genBusy = MapGenAsync.Current == MapGenAsync.Phase.Worker ||
                            MapGenAsync.Current == MapGenAsync.Phase.Building;
+            bool vanillaMap = SnLobbyService.State?.map?.vanilla == true;
             for (int i = 0; i < _styleButtons.Count; i++)
             {
                 var img = _styleButtons[i].GetComponent<Image>();
@@ -419,13 +483,14 @@ namespace SupremeNuclear
                 _styleButtons[i].interactable = _interactive && _styleTemplates[i] != null;
             }
             int[] values = { 2, 4, 6, 8 };
+            int poolShown = vanillaMap ? 2 : _players;
             for (int i = 0; i < _playerButtons.Length; i++)
             {
                 var img = _playerButtons[i] != null ? _playerButtons[i].GetComponent<Image>() : null;
                 if (img != null)
-                    img.color = values[i] == _players ? SupcomUi.BtnActive : SupcomUi.BtnBg;
+                    img.color = values[i] == poolShown ? SupcomUi.BtnActive : SupcomUi.BtnBg;
                 if (_playerButtons[i] != null)
-                    _playerButtons[i].interactable = _interactive;
+                    _playerButtons[i].interactable = _interactive && !vanillaMap;
             }
             if (_generateButton != null)
                 _generateButton.interactable = _interactive && HasTemplate && !genBusy;
@@ -437,7 +502,7 @@ namespace SupremeNuclear
             if (_previewImage != null)
             {
                 _previewImage.sprite = MapGenAsync.Preview;
-                _previewImage.enabled = MapGenAsync.Preview != null;
+                _previewImage.enabled = !vanillaMap && MapGenAsync.Preview != null;
             }
         }
 

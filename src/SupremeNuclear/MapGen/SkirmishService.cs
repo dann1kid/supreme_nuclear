@@ -110,5 +110,86 @@ namespace SupremeNuclear
             result.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
             return result;
         }
+
+        // ---------- ванильные карты (лобби v3, §3-13, решение юзера 2026-11-07:
+        // «2 стороны по канону карты» + «только МП-миссии с базами») ----------
+
+        /// <summary>Ванильная МП-миссия для лобби: стороны = ровно ДВЕ боевые
+        /// фракции, владеющие аэродромами (из JSON-переопределений миссии —
+        /// БЕЗ загрузки сцены: во всех штатных МП-миссиях авторы переопределяют
+        /// именно значимые базы с фракцией и позицией, разведка 2026-11-07).</summary>
+        public sealed class VanillaMap
+        {
+            public string Name;     // имя миссии BuiltIn-группы (MissionKey.Name)
+            public string Title;    // человекочитаемое имя миссии
+            public string[] Sides;  // ровно 2 фракции боевых сторон
+            public int Bases;       // живых (не Disabled) аэродромов миссии
+        }
+
+        private static List<VanillaMap> _vanillaCache;
+
+        /// <summary>Каталог ванильных МП-миссий (кэш сессии, контент игры
+        /// статичен): BuiltIn-группа, playerMode ≠ Singleplayer, ровно 2 боевые
+        /// фракции на живых аэродромах. Миссии без переопределений баз
+        /// (туториалы) и с иным числом сторон отсеиваются (модель лобби v1 —
+        /// строго 2 стороны, решение юзера 2026-11-07).</summary>
+        public static List<VanillaMap> ListVanillaMaps()
+        {
+            if (_vanillaCache != null)
+                return _vanillaCache;
+            var result = new List<VanillaMap>();
+            try
+            {
+                foreach (MissionKey key in MissionGroup.BuiltIn.GetMissions())
+                {
+                    Mission mission;
+                    try
+                    {
+                        if (!key.TryLoad(out mission, out string err))
+                            continue;
+                    }
+                    catch (System.Exception)
+                    {
+                        continue; // битая/чужая запись группы — не наш пациент
+                    }
+                    if (mission == null ||
+                        mission.missionSettings != null &&
+                        mission.missionSettings.playerMode == PlayerMode.Singleplayer)
+                        continue;
+                    if (mission.airbases == null || mission.airbases.Count == 0)
+                        continue;
+                    var sides = new List<string>();
+                    int bases = 0;
+                    foreach (SavedAirbase ab in mission.airbases)
+                    {
+                        if (ab == null || ab.Disabled)
+                            continue;
+                        bases++;
+                        string f = ab.faction;
+                        if (string.IsNullOrEmpty(f) || f == "None" || f == "Neutral")
+                            continue; // нейтральные/захватываемые — не сторона
+                        if (!sides.Contains(f))
+                            sides.Add(f);
+                    }
+                    if (sides.Count != 2)
+                        continue; // модель v1 — строго дуэль по канону карты
+                    result.Add(new VanillaMap
+                    {
+                        Name = key.Name,
+                        Title = mission.Name,
+                        Sides = sides.ToArray(),
+                        Bases = bases,
+                    });
+                }
+            }
+            catch (System.Exception e)
+            {
+                Log.Error("Skirmish: ванильные миссии не читаются — " + e.Message);
+            }
+            result.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+            _vanillaCache = result;
+            Log.Info("Skirmish: ванильных МП-миссий с 2 сторонами — " + result.Count);
+            return result;
+        }
     }
 }

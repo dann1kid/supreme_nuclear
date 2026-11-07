@@ -680,5 +680,11 @@
   "энергооружие": "Using Energy Weapon",
   "эсминец": "destroyer",
   "юнит|юнита|юнитов": "unit|units",
-  "✓ готов": "✓ ready"
+  "✓ готов": "✓ ready",
+  "(нет ванильных МП-карт)": "(no vanilla MP maps)",
+  "Ванильная карта: {0} ({1} vs {2}, баз {3})": "Vanilla map: {0} ({1} vs {2}, {3} bases)",
+  "Ванильная карта: инженеров в стартовом аирдропе на сторону (0 — без дропа)": "Vanilla map: engineers in the starting airdrop per side (0 — no drop)",
+  "Ванильная: {0}": "Vanilla: {0}",
+  "Источник: SN": "Source: SN",
+  "Источник: ванильные": "Source: vanilla"
 }

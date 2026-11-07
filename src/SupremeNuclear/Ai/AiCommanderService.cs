@@ -364,14 +364,10 @@ namespace SupremeNuclear
             var state = SnLobbyService.State;
             if (state?.armies == null || hq.faction == null)
                 return true; // вне лобби — старое поведение
-            string name = hq.faction.factionName;
-            foreach (LobbyState.Army a in state.armies)
-            {
-                if (FactionFactory.ArmyName(a.id) != name)
-                    continue;
-                return a.controller == LobbyState.CtrlAi;
-            }
-            return true; // фракция не из плана (нативные) — старое поведение
+            // Резолвер понимает ОБЕ модели карт: SN (рантайм «SN Армия N»)
+            // и ванильную (фракции миссии, v0.167).
+            LobbyState.Army army = SnLobbyService.ArmyOfFaction(hq.faction.factionName);
+            return army == null || army.controller == LobbyState.CtrlAi;
         }
 
         /// <summary>aiType слота армии этого HQ («commander» вне лобби/без слота) —
@@ -381,11 +377,8 @@ namespace SupremeNuclear
             var state = SnLobbyService.State;
             if (state?.armies == null || hq.faction == null)
                 return "commander";
-            string name = hq.faction.factionName;
-            foreach (LobbyState.Army a in state.armies)
-                if (FactionFactory.ArmyName(a.id) == name)
-                    return string.IsNullOrEmpty(a.aiType) ? "commander" : a.aiType;
-            return "commander";
+            LobbyState.Army army = SnLobbyService.ArmyOfFaction(hq.faction.factionName);
+            return army != null && !string.IsNullOrEmpty(army.aiType) ? army.aiType : "commander";
         }
 
         /// <summary>Союзная ли армия с армией AI (лобби v3: команда-союз).

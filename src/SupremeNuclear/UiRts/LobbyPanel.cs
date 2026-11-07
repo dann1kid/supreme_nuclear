@@ -83,7 +83,9 @@ namespace SupremeNuclear
         {
             // Хост крутит «Стороны» в блоке карты — слоты перестраиваются СРАЗУ,
             // до генерации (юзер 2026-11-06: пустые слоты должны быть доступны).
+            // Ванильная карта пул НЕ меняет — строго 2 по канону карты (v0.167).
             if (SnLobbyService.Hosting && _mapBlock != null &&
+                SnLobbyService.State?.map?.vanilla != true &&
                 _mapBlock.Players != (SnLobbyService.State?.pool ?? 2))
                 SnLobbyService.SetPool(_mapBlock.Players);
             bool want = SnLobbyService.InWaitingRoom;
@@ -584,9 +586,11 @@ namespace SupremeNuclear
             if (_peek)
                 _peek = false; // состав/план сменились — вернуть панель гостю
 
-            _title.text = Loc.Tr("Лобби — ") + (state.map != null
-                ? "SN " + state.map.template + " " + state.map.seed.ToString("X8")
-                : Loc.Tr("карта не выбрана"));
+            _title.text = Loc.Tr("Лобби — ") + (state.map == null
+                ? Loc.Tr("карта не выбрана")
+                : state.map.vanilla
+                    ? Loc.F("Ванильная: {0}", state.map.saveName)
+                    : "SN " + state.map.template + " " + state.map.seed.ToString("X8"));
             _victoryButton.GetComponentInChildren<Text>().text = VictoryLabel(victory);
             _victoryButton.gameObject.SetActive(_hostMode);
             _observers.text = sb.Length > 0 ? sb.ToString() : Loc.Tr("(пока никого — ждём игроков)");

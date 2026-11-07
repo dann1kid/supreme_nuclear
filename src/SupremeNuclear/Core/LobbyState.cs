@@ -59,6 +59,12 @@ namespace SupremeNuclear
             public int seed;
             public int players;   // пул позиций: 2×(players/2) баз
             public string saveName;
+            /// <summary>Ванильная карта (v0.167, §3-13): template/saveName = имя
+            /// миссии BuiltIn-группы, seed не используется, players строго 2.</summary>
+            public bool vanilla;
+            /// <summary>Ванильная: стороны-фракции миссии (id армии → sides[id]);
+            /// SN-карта: null.</summary>
+            public List<string> sides;
         }
 
         /// <summary>Контроллеры слота.</summary>

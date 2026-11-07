@@ -542,6 +542,16 @@ namespace SupremeNuclear
                 if (HarmonyLib.AccessTools.Property(typeof(NetworkManagerNuclearOption), "SetModdedServer") != null &&
                     HarmonyLib.AccessTools.Method(typeof(NetworkManagerNuclearOption), "SetModdedServer") == null)
                     throw new System.Exception("SetModdedServer пропал (инстанс-метод)");
+                // Ванильные карты лобби (v0.167, §3-13): каталог BuiltIn-миссий
+                // читается, стороны/базы парсятся из JSON БЕЗ сцены. Ноль карт =
+                // сломалось предположение о контенте игры (обновление убрало
+                // МП-миссии или сменился формат airbases).
+                var vanillaMaps = SkirmishService.ListVanillaMaps();
+                if (vanillaMaps.Count == 0)
+                    throw new System.Exception("Ванильные МП-миссии не найдены (BuiltIn пуст или без 2 сторон)");
+                foreach (SkirmishService.VanillaMap vm in vanillaMaps)
+                    if (string.IsNullOrEmpty(vm.Name) || vm.Sides == null || vm.Sides.Length != 2)
+                        throw new System.Exception("Ванильная карта '" + vm.Name + "' без двух сторон");
             });
             // Сплат-бандл: раннее eager-подхват (правило 13 — проверка предположения
             // «бандл читается рантаймом ЭТОЙ ревизии»): диагноз в лог сразу, в меню,

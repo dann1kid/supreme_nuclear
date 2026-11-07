@@ -77,6 +77,7 @@ namespace SupremeNuclear
         public static string LobbyVisibility = "friends"; // public | friends | private
         public static string LobbyPassword = "";         // пусто — без пароля
         public static int LobbySlots = 8;                // 2..16, MaxConnections = slots-1
+        public static int VanillaStarterEngineers = 5;   // ванильная карта: инженеров в стартовом дропе на сторону
 
         // Выделение
         public static float BoxDragThresholdPx = 8f;
@@ -382,6 +383,9 @@ namespace SupremeNuclear
                 new ConfigDescription(Loc.Tr("Слотов в лобби, включая хоста"),
                     new AcceptableValueRange<int>(2, 16)));
             LobbySlots = _lobbySlots.Value;
+            VanillaStarterEngineers = config.Bind("Lobby", "VanillaStarterEngineers", 5,
+                new ConfigDescription(Loc.Tr("Ванильная карта: инженеров в стартовом аирдропе на сторону (0 — без дропа)"),
+                    new AcceptableValueRange<int>(0, 20))).Value;
 
             BoxDragThresholdPx = config.Bind("Selection", "BoxDragThresholdPx", 8f).Value;
             DoubleClickSec = config.Bind("Selection", "DoubleClickSec", 0.35f).Value;

@@ -234,13 +234,7 @@ namespace SupremeNuclear
                 return true;
             if (State?.armies == null)
                 return false;
-            LobbyState.Army a = null, b = null;
-            foreach (LobbyState.Army army in State.armies)
-            {
-                string name = FactionFactory.ArmyName(army.id);
-                if (name == factionA) a = army;
-                if (name == factionB) b = army;
-            }
+            LobbyState.Army a = ArmyOfFaction(factionA), b = ArmyOfFaction(factionB);
             return a != null && b != null && a.controller != LobbyState.CtrlClosed &&
                    b.controller != LobbyState.CtrlClosed && a.team == b.team;
         }
@@ -265,13 +259,38 @@ namespace SupremeNuclear
             }
         }
 
-        /// <summary>Штаб армии по плану (фракция = рантайм-имя армии).</summary>
+        /// <summary>Штаб армии по плану: SN-карта — рантайм-фракция «SN Армия N»;
+        /// ванильная — фракция МИССИИ (sides[army.id], зарегистрирована запечёнными
+        /// HQ сцены; двухстадийная модель юзера 2026-11-07).</summary>
         internal static bool TryGetHqOfArmy(LobbyState.Army army, out FactionHQ hq)
         {
             hq = null;
-            string factionName = FactionFactory.ArmyName(army.id);
+            string factionName = ArmyFactionName(army);
             return FactionRegistry.factionLookup.TryGetValue(factionName, out Faction faction) &&
                    FactionRegistry.HQLookup.TryGetValue(faction, out hq) && hq != null;
+        }
+
+        /// <summary>Фракция армии в мире: SN-карта — рантайм-имя армии;
+        /// ванильная — сторона миссии по индексу армии.</summary>
+        internal static string ArmyFactionName(LobbyState.Army army)
+        {
+            LobbyState.MapInfo map = State?.map;
+            if (map != null && map.vanilla && map.sides != null &&
+                army.id >= 0 && army.id < map.sides.Count)
+                return map.sides[army.id];
+            return FactionFactory.ArmyName(army.id);
+        }
+
+        /// <summary>Армия плана по мировому имени фракции (зеркало
+        /// ArmyFactionName; null — фракция не из плана, напр. нейтралы).</summary>
+        internal static LobbyState.Army ArmyOfFaction(string factionName)
+        {
+            if (string.IsNullOrEmpty(factionName) || State?.armies == null)
+                return null;
+            foreach (LobbyState.Army a in State.armies)
+                if (ArmyFactionName(a) == factionName)
+                    return a;
+            return null;
         }
 
         // ---------- запросы гостей ----------
@@ -469,13 +488,17 @@ namespace SupremeNuclear
             bool armiesChanged = State == null || ArmiesDiffer(State.armies, state.armies);
             State = state;
             StateChanged?.Invoke();
-            if (!Hosting && state.map != null && (mapChanged || armiesChanged) &&
+            if (!Hosting && state.map != null && !state.map.vanilla &&
+                (mapChanged || armiesChanged) &&
                 State.status == LobbyState.StatusWaiting)
             {
                 MapGenAsync.Request(state.map.template, state.map.seed, state.map.players,
                     buildMission: false, supersede: true,
                     armies: state.armies, victory: state.victory);
             }
+            // Ванильная карта: гость НЕ генерирует ничего — карта придёт
+            // нативным LoadMapMessage на СТАРТе (MapKey миссии), состав
+            // мира синхронизируется сетью. Превью нет — только имя в панели.
         }
 
         private static bool ArmiesDiffer(List<LobbyState.Army> a, List<LobbyState.Army> b)
@@ -760,6 +783,28 @@ namespace SupremeNuclear
             Broadcast();
         }
 
+        /// <summary>Выбор ВАНИЛЬНОЙ карты (v0.167, §3-13, юзер 2026-11-07: «2
+        /// стороны по канону карты»): стороны = фракции миссии, пул строго 2,
+        /// аэродромы — из JSON миссии (сцена не грузится до СТАРТА). Запуск
+        /// использует миссию игры как есть + стартовый дроп инженеров (Launch).</summary>
+        internal static void SetVanillaMap(SkirmishService.VanillaMap map)
+        {
+            if (!Hosting || map == null || map.Sides == null || map.Sides.Length != 2)
+                return;
+            State.map = new LobbyState.MapInfo
+            {
+                template = map.Name,
+                saveName = map.Name,
+                players = 2,
+                vanilla = true,
+                sides = new List<string>(map.Sides),
+            };
+            SetPool(2); // пул строго 2 — по канону карты
+            Broadcast(); // SetPool выходит без Broadcast при равном пуле
+            Log.Info($"SnLobby: ванильная карта — '{map.Title}' " +
+                     $"[{map.Sides[0]} vs {map.Sides[1]}], баз {map.Bases}");
+        }
+
         // ---------- синк ----------
 
         private static void Broadcast()
@@ -846,10 +891,11 @@ namespace SupremeNuclear
             if (State.pool != State.map.players)
                 return Loc.F("Пул стола ({0}) ≠ пулу карты ({1}) — выбери стороны заново",
                     State.pool, State.map.players);
-            if (MapGenAsync.Current != MapGenAsync.Phase.Done ||
-                MapGenAsync.TemplateName != State.map.template ||
-                MapGenAsync.Seed != State.map.seed ||
-                MapGenAsync.Players != State.map.players)
+            if (!State.map.vanilla &&
+                (MapGenAsync.Current != MapGenAsync.Phase.Done ||
+                 MapGenAsync.TemplateName != State.map.template ||
+                 MapGenAsync.Seed != State.map.seed ||
+                 MapGenAsync.Players != State.map.players))
                 return Loc.Tr("Карта с текущими армиями ещё не сгенерирована");
             string invalid = LobbyState.ValidateForLaunch(State);
             if (invalid != null)
@@ -863,6 +909,64 @@ namespace SupremeNuclear
             return null;
         }
 
+        /// <summary>Стартовый дроп ванильной карты (v0.167): каждой ЖИВОЙ армии
+        /// (человек/ИИ) — отряд инженеров АИРДРОПОМ на первый живой аэродром её
+        /// стороны (позиции из JSON-переопределений миссии, сцена ещё не грузилась;
+        /// парашюты раскроет нативный CargoDeploymentSystem — юниты не провалятся).
+        /// Юниты/экономика/цели самой миссии не трогаются — канон карты.</summary>
+        private static void InjectVanillaStarters(Mission mission)
+        {
+            int count = Mathf.Max(0, Settings.VanillaStarterEngineers);
+            if (count == 0 || mission?.airbases == null || State?.armies == null)
+                return;
+            VehicleDefinition engineer = AiCommanderService.EngineerDefinition(3);
+            if (engineer == null)
+            {
+                Log.Warn("SnLobby: определение инженера не найдено — ванильный старт без дропа");
+                return;
+            }
+            const float altM = 150f; // высота аирдропа — канон пресетов MapGen
+            int dropped = 0;
+            foreach (LobbyState.Army a in State.armies)
+            {
+                if (a == null || a.controller == LobbyState.CtrlClosed ||
+                    a.controller == LobbyState.CtrlOpen)
+                    continue; // живые армии: человек/ИИ
+                string faction = ArmyFactionName(a);
+                SavedAirbase home = null;
+                foreach (SavedAirbase ab in mission.airbases)
+                    if (ab != null && !ab.Disabled && ab.faction == faction)
+                    {
+                        home = ab;
+                        break;
+                    }
+                if (home == null)
+                {
+                    Log.Warn($"SnLobby: у стороны '{faction}' нет живого аэродрома — без дропа");
+                    continue;
+                }
+                Vector3 c = home.Center.ToLocalPosition();
+                for (int i = 0; i < count; i++)
+                {
+                    // Линия сбоку от центра базы (как BuildStarter пресетов):
+                    // 5 в ряд, шаг 70 м; высота — аирдроп над центром.
+                    Vector3 p = c + new Vector3(120f + (i % 5) * 70f, altM, (i / 5) * 70f);
+                    mission.vehicles.Add(new SavedVehicle($"SN-START-{faction}-{i}")
+                    {
+                        type = engineer.jsonKey,
+                        faction = faction,
+                        PlacementType = PlacementType.Custom,
+                        globalPosition = p.ToGlobalPosition(),
+                        rotation = Quaternion.identity,
+                        skill = 0.8f,
+                    });
+                    dropped++;
+                }
+            }
+            Log.Info($"SnLobby: ванильный старт — инженеров {dropped} " +
+                     $"({count} на сторону, аирдроп {altM:F0} м)");
+        }
+
         /// <summary>СТАРТ: карта у всех → фракции по плану (№16) → нативный каскад.</summary>
         internal static async UniTask Launch()
         {
@@ -874,12 +978,29 @@ namespace SupremeNuclear
             Broadcast();
             try
             {
-                var key = new MissionKey(State.map.saveName, MissionGroup.User);
-                if (!key.TryLoad(out _mission, out string loadError))
+                if (State.map.vanilla)
                 {
-                    Log.Error("SnLobby: миссия не загрузилась — " + loadError);
-                    AbortLaunch();
-                    return;
+                    // Ванильная карта (v0.167): миссия игры как есть (MapKey её
+                    // собственный) + стартовый дроп инженеров на базу каждой
+                    // живой армии; экономика/цели — канон карты.
+                    var vkey = new MissionKey(State.map.saveName, MissionGroup.BuiltIn);
+                    if (!vkey.TryLoad(out _mission, out string vError))
+                    {
+                        Log.Error("SnLobby: ванильная миссия не загрузилась — " + vError);
+                        AbortLaunch();
+                        return;
+                    }
+                    InjectVanillaStarters(_mission);
+                }
+                else
+                {
+                    var key = new MissionKey(State.map.saveName, MissionGroup.User);
+                    if (!key.TryLoad(out _mission, out string loadError))
+                    {
+                        Log.Error("SnLobby: миссия не загрузилась — " + loadError);
+                        AbortLaunch();
+                        return;
+                    }
                 }
                 var nm = NetworkManagerNuclearOption.i;
                 nm.SendServerLoadingMessage(_mission.Name);
