@@ -86,6 +86,11 @@ namespace SupremeNuclear
             public readonly List<GlobalPosition> Points = new List<GlobalPosition>();
             /// <summary>Группа приказа каждой точки, параллельно Points.</summary>
             public readonly List<int> Groups = new List<int>();
+            /// <summary>Патрульный цикл (§12-30, ПКМ по точке ралли): будущие выходы
+            /// фабрики получают ПАТРУЛЬ по точкам маршрута вместо линейной цепочки.
+            /// Флаг маршрута: новые точки (обычное ралли) дописываются в тот же
+            /// цикл; уже спущенные юниты не ретроактивны (правится ИСТОЧНИК).</summary>
+            public bool Patrol;
             public int Count => Points.Count;
         }
         private static readonly Dictionary<object, RallyRoute> Rally =
@@ -1090,6 +1095,27 @@ namespace SupremeNuclear
         public static RallyRoute RallyOf(object factory) =>
             Rally.TryGetValue(factory, out RallyRoute route) ? route : null;
 
+        /// <summary>Ралли-маршрут фабрики → патрульный цикл будущих выходов (§12-30,
+        /// ПКМ по точке ралли — зеркально конвертации вейпоинтов юнитов): флаг
+        /// маршрута, точки/группы не меняются. Уже спущенные цепочки не ретроактивны.
+        /// true — маршрут есть и теперь патрульный (повторный клик — идемпотентно).</summary>
+        public static bool ConvertRallyToPatrol(object factory)
+        {
+            if (!Rally.TryGetValue(factory, out RallyRoute route) || route.Count == 0)
+                return false;
+            if (!route.Patrol)
+            {
+                route.Patrol = true;
+                Version++;
+            }
+            return true;
+        }
+
+        /// <summary>Маршрут ралли фабрики — патрульный цикл? (отрисовка замыкающей
+        /// ноги DrawFactoryRally; нет маршрута — false).</summary>
+        public static bool RallyIsPatrol(object factory) =>
+            Rally.TryGetValue(factory, out RallyRoute route) && route.Patrol;
+
         /// <summary>Ралли своей фракции? AI-фабрики ставят ралли в тот же реестр —
         /// чужие точки сбора не рисуются и не пикаются (зеркально CollectRallies).</summary>
         public static bool IsOwnRally(object factory, FactionHQ hq)
@@ -1448,6 +1474,13 @@ namespace SupremeNuclear
             if (ship == null || !Rally.TryGetValue(dock, out RallyRoute route) ||
                 route.Count == 0)
                 return;
+            if (route.Patrol)
+            {
+                GroundOrders.SetPatrol(ship, route.Points[0], route.Groups[0]);
+                for (int i = 1; i < route.Count; i++)
+                    GroundOrders.EnqueuePatrol(ship, route.Points[i], route.Groups[i]);
+                return;
+            }
             GroundOrders.Set(ship, route.Points[0], false, route.Groups[0]);
             for (int i = 1; i < route.Count; i++)
                 GroundOrders.Enqueue(ship, route.Points[i], false, route.Groups[i]);
@@ -1481,6 +1514,13 @@ namespace SupremeNuclear
             if (spawned == null)
                 return;
             Routed.Add(spawned);
+            if (route.Patrol)
+            {
+                GroundOrders.SetPatrol(spawned, route.Points[0], route.Groups[0]);
+                for (int i = 1; i < route.Count; i++)
+                    GroundOrders.EnqueuePatrol(spawned, route.Points[i], route.Groups[i]);
+                return;
+            }
             GroundOrders.Set(spawned, route.Points[0], false, route.Groups[0]);
             for (int i = 1; i < route.Count; i++)
                 GroundOrders.Enqueue(spawned, route.Points[i], false, route.Groups[i]);
@@ -1554,10 +1594,14 @@ namespace SupremeNuclear
             RallyRoute route = RouteOf(hangar);
             if (aircraft == null || route == null)
                 return;
-            AircraftOrders.Set(aircraft, AirOrderMode.Transit,
+            // Патрульное ралли (§12-30): Enqueue(Patrol) дописывает точки в ОДИН
+            // патрульный сегмент (слияние SameFlightModes) — второй вечный цикл
+            // не заводится (долг §12-32 не воспроизводится).
+            AirOrderMode mode = route.Patrol ? AirOrderMode.Patrol : AirOrderMode.Transit;
+            AircraftOrders.Set(aircraft, mode,
                 route.Points[0].ToLocalPosition(), route.Groups[0]);
             for (int i = 1; i < route.Count; i++)
-                AircraftOrders.Enqueue(aircraft, AirOrderMode.Transit,
+                AircraftOrders.Enqueue(aircraft, mode,
                     route.Points[i].ToLocalPosition(), route.Groups[i]);
         }
 

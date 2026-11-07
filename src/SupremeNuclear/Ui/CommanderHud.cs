@@ -1417,6 +1417,14 @@ namespace SupremeNuclear
                 ChainCols.Add(c);
                 ChainAlphas.Add(a);
             }
+            // Патрульное ралли (§12-30): замыкающая нога цикла (последняя → первая),
+            // как у ленты патруля — будущие выходы идут по кругу, не по линии.
+            if (ProductionTasks.RallyIsPatrol(factory) && RallyWps.Count > 1)
+            {
+                ChainPts.Add(RallyWps[0]);
+                ChainCols.Add(c);
+                ChainAlphas.Add(a * 0.6f);
+            }
             DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas, meshGated: false);
             DrawWorldWaypoints(cam, RallyWps, Color.white, a); // маркеры белые — канон FA
         }
@@ -1488,6 +1496,10 @@ namespace SupremeNuclear
         private static readonly List<Unit> EscortTargetsBuf = new List<Unit>();
         private static readonly HashSet<Unit> DrawnEscortMarkers = new HashSet<Unit>();
         private static readonly HashSet<Unit> DrawnRepairMarkers = new HashSet<Unit>();
+        private static readonly HashSet<Unit> DrawnGuardMarkers = new HashSet<Unit>();
+        /// <summary>Охрана (Guard ≠ Escort, §2.11): янтарная — семейство жёлтых
+        /// сервисных связей, но отличима от эскорта/ремонта (канон FA — жёлтые).</summary>
+        private static readonly Color GuardLinkColor = new Color(1f, 0.62f, 0.15f, 1f);
         // Групповые точки планов авиации: центроид группы бортов + дедуп маркеров.
         private static readonly Dictionary<int, Vector4> AirGidCentroids = new Dictionary<int, Vector4>();
         private static readonly HashSet<int> DrawnAirGid = new HashSet<int>();
@@ -1852,9 +1864,41 @@ namespace SupremeNuclear
             // Связи ремонта (v0.149): жёлтая лента «инженер → цель», одна на цель
             // (маркер на цели рисует DrawRepairMarkers — белую точку не дублируем).
             GroundOrders.CollectRepairs(EscortUnits, EscortTargetsBuf, hq);
+            if (EscortUnits.Count > 0)
+            {
+                Color rc = ModeColor(AirOrderMode.Escort); // семейство Repair = жёлтый (канон FA)
+                for (int i = 0; i < EscortUnits.Count; i++)
+                {
+                    Unit unit = EscortUnits[i];
+                    bool own = controller.Selection.Selected.Contains(unit);
+                    if (!own && !shiftHeld)
+                        continue;
+                    Unit target = EscortTargetsBuf[i];
+                    if (target == null || target.disabled)
+                        continue;
+                    if (!DrawnRepairMarkers.Add(target))
+                        continue; // ногу на цель уже нарисовал первый ремонтник
+                    float a = own ? 0.87f : 0.2f;
+                    Vector3 anchor = new Vector3(unit.transform.position.x, 0f, unit.transform.position.z);
+                    anchor.y = GameApi.GroundY(anchor.x, anchor.z);
+                    ChainPts.Clear();
+                    ChainCols.Clear();
+                    ChainAlphas.Clear();
+                    ChainPts.Add(anchor);
+                    ChainPts.Add(TargetGround(target));
+                    ChainCols.Add(rc);
+                    ChainAlphas.Add(a);
+                    DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                }
+            }
+
+            // Связи охраны (v0.158): янтарная лента «страж → цель» — семейство
+            // жёлтых (сервисные связи), но отличима от эскорта/ремонта. Одна на
+            // цель (первый страж рисует ногу и маркер).
+            GroundOrders.CollectGuards(EscortUnits, EscortTargetsBuf, hq);
             if (EscortUnits.Count == 0)
                 return;
-            Color rc = ModeColor(AirOrderMode.Escort); // семейство Repair = жёлтый (канон FA)
+            Color gc = GuardLinkColor;
             for (int i = 0; i < EscortUnits.Count; i++)
             {
                 Unit unit = EscortUnits[i];
@@ -1864,8 +1908,8 @@ namespace SupremeNuclear
                 Unit target = EscortTargetsBuf[i];
                 if (target == null || target.disabled)
                     continue;
-                if (!DrawnRepairMarkers.Add(target))
-                    continue; // ногу на цель уже нарисовал первый ремонтник
+                if (!DrawnGuardMarkers.Add(target))
+                    continue; // ногу на цель уже нарисовал первый страж
                 float a = own ? 0.87f : 0.2f;
                 Vector3 anchor = new Vector3(unit.transform.position.x, 0f, unit.transform.position.z);
                 anchor.y = GameApi.GroundY(anchor.x, anchor.z);
@@ -1874,9 +1918,10 @@ namespace SupremeNuclear
                 ChainAlphas.Clear();
                 ChainPts.Add(anchor);
                 ChainPts.Add(TargetGround(target));
-                ChainCols.Add(rc);
+                ChainCols.Add(gc);
                 ChainAlphas.Add(a);
                 DrawChainRibbon(cam, ChainPts, ChainCols, ChainAlphas);
+                DrawWorldWaypointColored(cam, TargetGround(target), Color.white, a); // канон FA
             }
         }
 

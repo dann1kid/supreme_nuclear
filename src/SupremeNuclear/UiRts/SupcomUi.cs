@@ -1825,6 +1825,9 @@ step = "arrows";
             else if (pending == Loc.Tr("Распределение"))
                 _modeHint.text = Util.FitLine(
                     Loc.Tr("Распределение: ЛКМ по целям — накопить · ЛКМ по земле — раздать группу · ПКМ — отмена"), 62);
+            else if (pending == Loc.Tr("Охрана"))
+                _modeHint.text = Util.FitLine(
+                    Loc.Tr("Охрана: ЛКМ по союзному юниту/зданию — охрана (инженер авто-ремонт) · ПКМ/Esc — отмена"), 62);
             else if (pending != null)
                 _modeHint.text = Util.FitLine(
                     Loc.F("{0}: ЛКМ — вейпоинт (Shift — серия) · ПКМ/Esc — отмена", pending), 62);
@@ -2000,6 +2003,9 @@ step = "arrows";
                 // сами подхватывают близлежащие недострои).
                 defs.Add(("cmd_patrol", Loc.Tr("Патруль (U)"), () => OrderModes.Pending = OrderMode.Patrol));
                 defs.Add(("cmd_attack", Loc.Tr("Атака (T)"), () => OrderModes.Pending = OrderMode.Attack));
+                // Охрана (v0.158, канон SupCom guard): ЛКМ по союзному юниту/зданию;
+                // авиации не назначается (у бортов escort-сегменты плана).
+                defs.Add(("cmd_guard", Loc.Tr("Охрана (Y)"), () => OrderModes.Pending = OrderMode.Guard));
                 if ((showAir && hasMissileAir) || hasMissileFleet)
                     defs.Add(("cmd_salvo", Loc.Tr("Залп (V)"), () => controller.MoveOrders.ChargeSalvo()));
                 // ЯО (v0.139): носители БЧ (корабли/ПУ) и я-авиация — прицел с кольцом

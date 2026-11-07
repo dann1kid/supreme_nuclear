@@ -12,6 +12,10 @@ namespace SupremeNuclear
         AirPoint,    // точка плана авиации
         RallyPoint,  // точка ралли-маршрута фабрики (владелец — фабрика, не юнит)
         EscortLink,  // связь сопровождения (маркер — на ЦЕЛИ сопровождения)
+        RepairLink,  // связь ремонта (v0.158, §12-58б): маркер — на цели ремонта,
+                     // Ctrl+Shift+ПКМ снимает ремонт у ВСЕХ инженеров цели
+        GuardLink,   // связь охраны (v0.158): маркер — на охраняемом,
+                     // Ctrl+Shift+ПКМ снимает охрану у ВСЕХ стражей
         AttackTarget, // цель серии атак (крест): драг = перенацелить, Ctrl+Shift+ПКМ = снять
         SalvoPoint   // точка обстрела залпа флота: ПОЛНОЦЕННЫЙ вейпоинт SupCom-тактичек —
                      // лента от корабля, драг (без снапа к юнитам), Ctrl+Shift+ПКМ = снять волну
@@ -21,8 +25,8 @@ namespace SupremeNuclear
     /// раньше поиск существовал в двух расходящихся копиях — RouteEditor.TryGrab
     /// (захват для драга) и MoveOrderService.TryDeleteWaypoint (удаление). Теперь
     /// оба зовут этот скан; порядок приоритета один: площадки → движения очередей →
-    /// точки ралли фабрик → цепочки наземки → планы авиации → связи сопровождения.
-    /// allUnits = режим видимости (Shift).</summary>
+    /// точки ралли фабрик → цепочки наземки → планы авиации → связи
+    /// (ремонт → сопровождение → охрана). allUnits = режим видимости (Shift).</summary>
     public readonly struct WaypointHit
     {
         public readonly WaypointKind Kind;
@@ -334,11 +338,29 @@ namespace SupremeNuclear
                     }
             }
 
-            // 6. Связи сопровождения: маркер рисуется на ЦЕЛИ — там же и пикается
-            // (Ctrl+Shift+ПКМ снимает сопровождение у ВСЕХ её эскортировщиков,
-            // наземка и авиация разом). Точки цепочек выше приоритетнее.
+            // 6. Связи ремонта/сопровождения/охраны: маркер рисуется на ЦЕЛИ — там
+            // же и пикается (Ctrl+Shift+ПКМ снимает связь у ВСЕХ её держателей:
+            // ремонтников, эскортировщиков — живых и ждущих в очереди §12-36а —
+            // и стражей). Точки цепочек выше приоритетнее. РЕМОНТ сканируется
+            // ПЕРВЫМ: цель может нести связи двух видов одновременно (чинят +
+            // сопровождают) — маркеры в одной точке; клик сначала снимает ремонт
+            // (более адресное действие), второй клик — сопровождение.
             // Авиа-эскорт — из живого сбора CUnits/CPlans (см. §5); наземный сбор
             // ниже перезаписывает CUnits — потому авиация идёт первой.
+            GroundOrders.CollectRepairs(CUnits, CTargets, localHq);
+            SeenEscortTargets.Clear();
+            for (int i = 0; i < CTargets.Count; i++)
+            {
+                Unit target = CTargets[i];
+                if (target == null || target.disabled)
+                    continue;
+                if (!SeenEscortTargets.Add(target))
+                    continue; // несколько ремонтников одной цели — один маркер
+                Vector3 tp = target.transform.position;
+                tp.y = GameApi.RouteY(tp.x, tp.z);
+                if (Near(cam, tp, mouse, px))
+                    return new WaypointHit(WaypointKind.RepairLink, target, null, 0, 0);
+            }
             SeenEscortTargets.Clear();
             for (int i = 0; i < CUnits.Count; i++)
             {
@@ -370,6 +392,20 @@ namespace SupremeNuclear
                 tp.y = GameApi.RouteY(tp.x, tp.z);
                 if (Near(cam, tp, mouse, px))
                     return new WaypointHit(WaypointKind.EscortLink, target, null, 0, 0);
+            }
+            GroundOrders.CollectGuards(CUnits, CTargets, localHq);
+            SeenEscortTargets.Clear();
+            for (int i = 0; i < CTargets.Count; i++)
+            {
+                Unit target = CTargets[i];
+                if (target == null || target.disabled)
+                    continue;
+                if (!SeenEscortTargets.Add(target))
+                    continue; // несколько стражей одной цели — один маркер
+                Vector3 tp = target.transform.position;
+                tp.y = GameApi.RouteY(tp.x, tp.z);
+                if (Near(cam, tp, mouse, px))
+                    return new WaypointHit(WaypointKind.GuardLink, target, null, 0, 0);
             }
 
             return new WaypointHit(WaypointKind.None, null, null, 0, 0);

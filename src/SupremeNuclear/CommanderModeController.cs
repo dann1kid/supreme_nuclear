@@ -453,6 +453,7 @@ namespace SupremeNuclear
                 else if (RtsInput.KeyDown(KeyCode.N)) MoveOrders.ChargeNuke(); // ЯО-прицел
                 else if (RtsInput.KeyDown(KeyCode.R))
                     MoveOrders.ChargeFanAttack(); // «Распределение»: копим цели ПКМ-ами
+                else if (RtsInput.KeyDown(KeyCode.Y)) OrderModes.Pending = OrderMode.Guard;
                 else if (RtsInput.KeyDown(KeyCode.S))
                     MoveOrders.CancelAll(Selection.Selected); // мгновенная отмена
                 if (alt && RtsInput.KeyDown(KeyCode.N))

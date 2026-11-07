@@ -422,6 +422,13 @@ namespace SupremeNuclear
                     }
                     break;
 
+                case OrderMode.Guard:
+                    // ЛКМ по союзному юниту/зданию — охрана (канон SupCom guard);
+                    // мимо цели — тихий no-op (заряд остаётся, выход ПКМ/Esc).
+                    if (!IssueGuardOrders(localHq))
+                        return;
+                    break;
+
                 case OrderMode.DisperseAttack:
                     // сюда доходит только клик по земле (цели съедены веткой заряда
                     // в Tick выше): копили ЛКМ по врагам — раздаём, не копили —
@@ -763,7 +770,7 @@ namespace SupremeNuclear
                     b.transform.position.z - fp.z)));
             float groundStandoff = Settings.EscortStandoffM + friend.maxRadius + 10f;
             float airStep = Settings.FormationSpacing * 4f;
-            int issued = 0, engNotQueued = 0;
+            int issued = 0;
             for (int i = 0; i < _escortFan.Count; i++)
             {
                 Unit unit = _escortFan[i];
@@ -779,11 +786,11 @@ namespace SupremeNuclear
                 }
                 if (RtsInput.Shift)
                 {
-                    // Наземная цепочка одна: сопровождение — стоящий приказ, в очередь
-                    // точек не кладётся (долг §12-36). Инженеру Shift ломать очередь
-                    // молча тоже нельзя — пропускаем с объяснением.
-                    if (GameApi.IsEngineer(unit))
-                        engNotQueued++;
+                    // Очередь сопровождения (§12-36а, зеркально авиации): в линейной
+                    // цепочке связь активируется после пройденных точек, в эскортирующей —
+                    // по смерти текущей цели. Инженеру легально наравне с боевыми.
+                    GroundOrders.EnqueueEscort(unit, friend);
+                    issued++;
                     continue;
                 }
                 if (GameApi.IsEngineer(unit))
@@ -798,8 +805,100 @@ namespace SupremeNuclear
             if (issued > 0)
                 CommanderHud.Notice(Loc.F("Сопровождение: {0} → {1}", issued,
                     friend.definition != null ? friend.definition.unitName : "?"));
-            if (engNotQueued > 0)
-                CommanderHud.Notice(Loc.Tr("Сопровождение не ставится в очередь — выдай без Shift"));
+            return true;
+        }
+
+        /// <summary>Союзный юнит/здание под курсором для ОХРАНЫ — экранный пик
+        /// (свои видны всегда): мобильная техника, флот, авиация И здания (канон
+        /// SupCom: охрана радара/завода = защита + авто-ремонт инженером).
+        /// Зеркало TryPickFriendlyAt с расширенным набором типов.</summary>
+        private Unit TryPickGuardTargetAt(FactionHQ localHq)
+        {
+            float radiusPx = Settings.EnemyPickRadiusPx;
+            Camera cam = GameApi.MainCam;
+            if (cam == null || localHq == null)
+                return null;
+            Unit best = null;
+            float bestDist = float.MaxValue;
+            Vector2 mouse = new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y);
+            foreach (Unit unit in UnitRegistry.allUnits)
+            {
+                if (unit == null || unit.disabled || unit.NetworkHQ == null || unit.NetworkHQ != localHq)
+                    continue;
+                if (!(unit is GroundVehicle || unit is Ship || unit is Aircraft || unit is Building))
+                    continue;
+                Vector3 sp = cam.WorldToScreenPoint(GameApi.UnitAnchorWorld(unit));
+                if (sp.z <= 0f)
+                    continue;
+                float d = Vector2.Distance(new Vector2(sp.x, sp.y), mouse);
+                float limit = Mathf.Max(radiusPx, GameApi.ApparentSizePx(unit, cam) * 0.5f);
+                if (d < limit && d < bestDist)
+                {
+                    bestDist = d;
+                    best = unit;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>Охрана союзного юнита/здания (v0.158, SupCom guard, OrderMode.Y):
+        /// наземка/флот — follow-модель эскорта с веером секторов; инженер — охрана
+        /// с авто-ремонтом (повреждённая цель временно уходит в Repair); авиация
+        /// охраны не имеет (план-модель: escort-сегменты, ПКМ по союзнику) —
+        /// пропускается с Notice. Цель сама себе стражем быть не может.
+        /// true — клик по цели съеден (цель найдена или выделение только авиация).</summary>
+        private bool IssueGuardOrders(FactionHQ localHq)
+        {
+            Unit friend = TryPickGuardTargetAt(localHq);
+            if (friend == null)
+                return false;
+            Vector3 fp = friend.transform.position;
+
+            _escortFan.Clear();
+            int airCount = 0;
+            foreach (Unit unit in _controller.Selection.Selected)
+            {
+                if (unit == null || unit == friend)
+                    continue; // сам себя не охраняет
+                if (unit is Aircraft)
+                {
+                    airCount++;
+                    continue;
+                }
+                if (unit is GroundVehicle || unit is Ship)
+                    _escortFan.Add(unit);
+            }
+            if (_escortFan.Count == 0)
+            {
+                CommanderHud.Notice(airCount > 0
+                    ? Loc.Tr("Охрана: авиации не назначается — сопровождение (ПКМ по союзнику)")
+                    : Loc.Tr("Охрана: цель — всё выделение"));
+                return true; // клик съеден: приказов движению по самой цели не выдаём
+            }
+
+            // Сортировка по азимутам вокруг цели: соседние сектора веера соседям
+            // (как полукруг групповой атаки и веер эскорта).
+            _escortFan.Sort((a, b) => Mathf.Atan2(a.transform.position.x - fp.x,
+                    a.transform.position.z - fp.z)
+                .CompareTo(Mathf.Atan2(b.transform.position.x - fp.x,
+                    b.transform.position.z - fp.z)));
+            float guardStandoff = Settings.EscortStandoffM + friend.maxRadius + 10f;
+            int issued = 0;
+            for (int i = 0; i < _escortFan.Count; i++)
+            {
+                Unit unit = _escortFan[i];
+                if (GameApi.IsEngineer(unit))
+                    BuildTasks.ClearFor(unit); // новая связь = новая очередь (как патруль)
+                Vector3 up = unit.transform.position;
+                float bearing = Mathf.Atan2(up.x - fp.x, up.z - fp.z) +
+                    GroundOrders.FanBearingOffset(i, _escortFan.Count,
+                        Settings.FormationSpacing, guardStandoff);
+                GroundOrders.SetGuard(unit, friend, bearing);
+                issued++;
+            }
+            if (issued > 0)
+                CommanderHud.Notice(Loc.F("Охрана: {0} → {1}", issued,
+                    friend.definition != null ? friend.definition.unitName : "?"));
             return true;
         }
 

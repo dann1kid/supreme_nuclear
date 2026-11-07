@@ -167,13 +167,15 @@ namespace SupremeNuclear
             if (DoneBuf.Count > 0)
             {
                 // Инженерам завершённых целей — снять связь (патруль вернёт FinishDrops).
+                // RepairFinished (не Clear): охранник с GuardResume вернётся к охране
+                // живой цели (канон SupCom guard — авто-ремонт подопечного).
                 GroundOrders.CollectRepairs(EngBuf, TgtBuf);
                 foreach (Unit target in DoneBuf)
                 {
                     StartedAt01.Remove(target);
                     for (int i = 0; i < EngBuf.Count; i++)
                         if (TgtBuf[i] == target && EngBuf[i] != null)
-                            GroundOrders.Clear(EngBuf[i]);
+                            GroundOrders.RepairFinished(EngBuf[i]);
                 }
             }
         }

@@ -1545,19 +1545,22 @@ namespace SupremeNuclear.Tests
 
             // ---------- GroundOrders.CanClosePatrol: гейты конвертации хвостом ----------
             Check("Конвертация хвостом: линейная цепочка, точка не последняя — можно",
-                GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, 2, 0));
+                GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, 2, 0, 0));
             Check("Конвертация хвостом: атака-движение тоже линейная — можно",
-                GroundOrders.CanClosePatrol(GroundOrderKind.AttackMove, 4, 0, 0));
+                GroundOrders.CanClosePatrol(GroundOrderKind.AttackMove, 4, 0, 0, 0));
             Check("Конвертация хвостом: последняя точка — циклу нужно ≥2 точек",
-                !GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, 3, 0));
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, 3, 0, 0));
             Check("Конвертация хвостом: ждущие цели серии запрещают (канон Moho)",
-                !GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, 1, 2));
-            Check("Конвертация хвостом: атака/патруль/эскорт не конвертятся",
-                !GroundOrders.CanClosePatrol(GroundOrderKind.Attack, 4, 1, 0) &&
-                !GroundOrders.CanClosePatrol(GroundOrderKind.Patrol, 4, 1, 0) &&
-                !GroundOrders.CanClosePatrol(GroundOrderKind.Escort, 4, 1, 0));
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, 1, 2, 0));
+            Check("Конвертация хвостом: ждущие эскорт-связи запрещают (§12-36а — вечный цикл их не дойдёт)",
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, 1, 0, 1));
+            Check("Конвертация хвостом: атака/патруль/эскорт/охрана не конвертятся",
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Attack, 4, 1, 0, 0) &&
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Patrol, 4, 1, 0, 0) &&
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Escort, 4, 1, 0, 0) &&
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Guard, 4, 1, 0, 0));
             Check("Конвертация хвостом: отрицательный индекс — no-op",
-                !GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, -1, 0));
+                !GroundOrders.CanClosePatrol(GroundOrderKind.Move, 4, -1, 0, 0));
 
             // ---------- GroundOrders.FanBearingOffset: секторы полукруга атаки ----------
             Check("Полукруг: симметричный веер, центр без смещения",

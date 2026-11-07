@@ -19,6 +19,11 @@ namespace SupremeNuclear
         /// заряда; я-авиация: одноразовое разрешение + атака-движение в точку);
         /// Shift — серия точек. Кольцо у курсора = зона поражения.</summary>
         Nuke,
+        /// <summary>Охрана (v0.158, канон SupCom guard, §2.11): ЛКМ по союзному
+        /// юниту/зданию — охрана. Follow-модель эскорта; инженер авто-чинит
+        /// охраняемого, боевое прикрытие перехватывает угрозы у цели (Guard ≠
+        /// Escort). Авиации не назначается (у бортов escort-сегменты).</summary>
+        Guard,
         Cancel
     }
 
@@ -42,6 +47,7 @@ namespace SupremeNuclear
                 OrderMode.Salvo => Loc.Tr("Залп"),
                 OrderMode.DisperseAttack => Loc.Tr("Распределение"),
                 OrderMode.Nuke => Loc.Tr("Ядерный удар"),
+                OrderMode.Guard => Loc.Tr("Охрана"),
                 OrderMode.Cancel => Loc.Tr("Стоп"),
                 _ => null
             };

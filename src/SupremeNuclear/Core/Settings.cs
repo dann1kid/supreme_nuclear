@@ -95,6 +95,7 @@ namespace SupremeNuclear
         public static float EscortAirDistM = 900f;   // сопровождение: смещение авиаэскорта от цели (сектор веера), м
         public static float EscortTrailSampleM = 25f;   // сопровождение: шаг следа цели (breadcrumbs сплайна), м
         public static float EscortTrailLengthM = 600f;  // сопровождение: длина следа цели (сплайн-якорь колонны), м
+        public static float GuardScanM = 500f;   // охрана: радиус перехвата угроз вокруг охраняемого, м
 
         // Режимы полёта: профили высоты (штампуются на участок маршрута) и скорость
         public static float AircraftAltVeryLowAgl = 75f;  // «Сверхнизко»: огибание рельефа, м над рельефом
@@ -407,6 +408,8 @@ namespace SupremeNuclear
                 Loc.Tr("Сопровождение: шаг следа цели (точки сплайна движения колонны), м")).Value;
             EscortTrailLengthM = config.Bind("Orders", "EscortTrailLengthM", 600f,
                 Loc.Tr("Сопровождение: длина следа цели для сплайна движения колонны, м")).Value;
+            GuardScanM = config.Bind("Orders", "GuardScanM", 500f,
+                Loc.Tr("Охрана: радиус перехвата угроз вокруг охраняемого юнита, м")).Value;
             AircraftAltVeryLowAgl = config.Bind("Orders", "AircraftAltVeryLowAgl", 75f,
                 Loc.Tr("Профиль «Сверхнизко» (огибание рельефа), м над рельефом")).Value;
             AircraftAltLowAgl = config.Bind("Orders", "AircraftAltLowAgl", 150f,

@@ -23,6 +23,12 @@ namespace SupremeNuclear
         /// защита как атака-движение (stop-and-fire, флот дерётся на ходу).
         /// Инженеры в сопровождении ассистят стройкам цели (BuildTasks).</summary>
         Escort,
+        /// <summary>Охрана союзного юнита (v0.158, SupCom guard): follow-модель
+        /// сопровождения + канонные отличия от эскорта — инженер АВТОМАТОМ чинит
+        /// охраняемого (уходит в Repair с GuardResume), боевое прикрытие
+        /// ПЕРЕХВАТЫВАЕТ угрозы у цели (враг рядом с охраняемым — погоня с
+        /// поводком ОТ ЦЕЛИ, после боя страж возвращается). DESIGN §2.11.</summary>
+        Guard,
         /// <summary>Ремонт союзного юнита/здания (v0.149, канон SupCom — 4-я функция
         /// инженерного сьюта): инженер следует к цели и стоит в радиусе налива
         /// (EconomyProfile.repairRadiusM); HP льёт RepairService (host). Как
@@ -100,9 +106,24 @@ namespace SupremeNuclear
             /// <summary>Escort: цель сопровождения (живёт в цепочке отдельно от
             /// Target атаки — смешанная очередь атак не должна её терять).</summary>
             public Unit EscortTarget;
+            /// <summary>Guard: цель охраны. Дублируется в EscortTarget (follow-модель
+            /// эскорта — след/веер/кольцо — работает без копий); Collections и
+            /// удаление связей различают их по Kind.</summary>
+            public Unit GuardTarget;
+            /// <summary>Guard-инженер временно уходит в Repair: после завершения
+            /// налива (RepairService → RepairFinished) охрана живой цели
+            /// восстанавливается. Прямой Cancel игроком охрану не воскресает.</summary>
+            public bool GuardResume;
             /// <summary>Repair: цель ремонта (отдельно от EscortTarget по той же
             /// причине — вид приказа живёт в цепочке, а не в точках).</summary>
             public Unit RepairTarget;
+            /// <summary>Очередь эскортов (Shift+ПКМ по союзникам, §12-36а): в
+            /// эскортирующей цепочке следующая связь активируется по СМЕРТИ
+            /// текущей цели (позиции серии бессмысленны — точек нет); в линейной —
+            /// на СВОЕЙ позиции серии (EscortAfter[i], как TargetAfter у целей).</summary>
+            public readonly List<Unit> EscortQueue = new List<Unit>();
+            /// <summary>Позиция серии каждой ждущей эскорт-связи, параллельно EscortQueue.</summary>
+            public readonly List<int> EscortAfter = new List<int>();
         }
 
         private static readonly Dictionary<Unit, Chain> Chains = new Dictionary<Unit, Chain>();
@@ -131,15 +152,18 @@ namespace SupremeNuclear
         public static Unit RepairTargetOf(Unit unit) =>
             Chains.TryGetValue(unit, out Chain ch) && ch.Kind == GroundOrderKind.Repair ? ch.RepairTarget : null;
 
-        /// <summary>Юнит без активных приказов: непройденных точек нет И целей нет.
-        /// Атака/очередь целей — занят даже при пустой цепочке точек (раньше атаку
-        /// «занятой» делала производная точка подхода — её больше нет).
-        /// Сопровождение и ремонт — стоящие приказы: занят всегда (выталкивание из
-        /// зоны стройки не должно рвать связь).</summary>
+        /// <summary>Юнит без активных приказов: непройденных точек нет И целей нет
+        /// И ждущих эскорт-связей нет. Атака/очередь целей — занят даже при пустой
+        /// цепочке точек (раньше атаку «занятой» делала производная точка подхода —
+        /// её больше нет). Сопровождение (живое или ждущее в очереди), охрана и
+        /// ремонт — стоящие приказы: занят всегда (выталкивание из зоны стройки
+        /// не должно рвать связь).</summary>
         public static bool IsIdle(Unit unit) =>
             !Chains.TryGetValue(unit, out Chain ch) ||
-            (ch.Kind != GroundOrderKind.Escort && ch.Kind != GroundOrderKind.Repair &&
-             ch.Index >= ch.Points.Count && ch.TargetQueue.Count == 0);
+            (ch.Kind != GroundOrderKind.Escort && ch.Kind != GroundOrderKind.Guard &&
+             ch.Kind != GroundOrderKind.Repair &&
+             ch.Index >= ch.Points.Count && ch.TargetQueue.Count == 0 &&
+             ch.EscortQueue.Count == 0);
 
         /// <summary>Цель дозрела: точки ДО её позиции серии пройдены. Удаления точек
         /// могли сдвинуть позицию — клампим к длине очереди. Чистая — тестируется.</summary>
@@ -296,12 +320,14 @@ namespace SupremeNuclear
 
         /// <summary>Можно ли замкнуть патрульный цикл с точки fromIndex: линейная
         /// цепочка (движение/атака-движение), точка не последняя (циклу нужно ≥2
-        /// точек) и в очереди нет ждущих целей серии (как Moho: конвертация только
-        /// чисто-движительной очереди). Чистая — тестируется.</summary>
+        /// точек), в очереди нет ждущих целей серии И ждущих эскорт-связей
+        /// (как Moho: конвертация только чисто-движительной очереди — вечный цикл
+        /// никогда не дойдёт до стоящей за ним связи). Чистая — тестируется.</summary>
         public static bool CanClosePatrol(GroundOrderKind kind, int pointCount, int fromIndex,
-            int waitingTargets) =>
+            int waitingTargets, int queuedEscorts) =>
             (kind == GroundOrderKind.Move || kind == GroundOrderKind.AttackMove) &&
-            fromIndex >= 0 && fromIndex < pointCount - 1 && waitingTargets == 0;
+            fromIndex >= 0 && fromIndex < pointCount - 1 && waitingTargets == 0 &&
+            queuedEscorts == 0;
 
         /// <summary>ПКМ по вейпоинту цепочки: ХВОСТ от точки fromIndex замыкается в
         /// патрульный цикл (канон SupCom/Moho RestartMoveCommandAsPatrol: конвертация
@@ -312,7 +338,8 @@ namespace SupremeNuclear
         public static bool ConvertToPatrol(Unit unit, int fromIndex)
         {
             if (!Chains.TryGetValue(unit, out Chain ch) ||
-                !CanClosePatrol(ch.Kind, ch.Points.Count, fromIndex, ch.TargetQueue.Count))
+                !CanClosePatrol(ch.Kind, ch.Points.Count, fromIndex,
+                    ch.TargetQueue.Count, ch.EscortQueue.Count))
                 return false;
             Version++;
             ch.Kind = GroundOrderKind.Patrol;
@@ -334,7 +361,8 @@ namespace SupremeNuclear
         {
             return Chains.TryGetValue(unit, out Chain ch) &&
                    index >= ch.Index && index < ch.Points.Count &&
-                   CanClosePatrol(ch.Kind, ch.Points.Count, index, ch.TargetQueue.Count);
+                   CanClosePatrol(ch.Kind, ch.Points.Count, index,
+                       ch.TargetQueue.Count, ch.EscortQueue.Count);
         }
 
         /// <summary>Снимок патрульной цепочки (авто-достройка снимает патруль на время
@@ -409,6 +437,76 @@ namespace SupremeNuclear
             IssueFollow(unit, ch, force: true);
         }
 
+        /// <summary>Дописать сопровождение в очередь (Shift+ПКМ по союзнику,
+        /// §12-36а — зеркально авиации): в линейной цепочке связь активируется на
+        /// СВОЕЙ позиции серии (после точек, кликнутых раньше); в эскортирующей —
+        /// по СМЕРТИ текущей цели (точек в цепочке нет, позиции серии бессмысленны);
+        /// цепочки нет — сразу SetEscort. Инженеру легально наравне с боевыми.</summary>
+        public static void EnqueueEscort(Unit unit, Unit target, float bearing = float.NaN)
+        {
+            Version++;
+            if (!Chains.TryGetValue(unit, out Chain ch) ||
+                (ch.Kind != GroundOrderKind.Escort &&
+                 ch.Points.Count == 0 && ch.TargetQueue.Count == 0))
+            {
+                SetEscort(unit, target, bearing);
+                return;
+            }
+            ch.EscortQueue.Add(target);
+            // Эскорт — стоящий приказ: в эскортирующей цепочке ждать нечего,
+            // в атакующей — серия уже достигнута (как EnqueueAttack по ch.Index).
+            ch.EscortAfter.Add(ch.Kind == GroundOrderKind.Attack ? ch.Index : ch.Points.Count);
+        }
+
+        /// <summary>Смена эскортируемой цели по очереди (текущая погибла/снята).
+        /// Мёртвые головы уходят; true — взяли следующую живую связь.</summary>
+        private static bool PromoteNextEscort(Unit unit, Chain ch)
+        {
+            while (ch.EscortQueue.Count > 0)
+            {
+                Unit next = ch.EscortQueue[0];
+                ch.EscortQueue.RemoveAt(0);
+                ch.EscortAfter.RemoveAt(0);
+                Version++;
+                if (next == null || next.disabled)
+                    continue;
+                ch.EscortTarget = next;
+                ch.ApproachBearing = float.NaN; // живой азимут: веер клика не сохранить
+                ch.Holding = false;
+                ch.NextScanAt = 0f; // первый follow-скан немедленно
+                IssueFollow(unit, ch, force: true);
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>Поднять ДОЗРЕВШИЙ эскорт из очереди: линейная цепочка дошла до
+        /// его позиции серии (зеркало PromoteDue у целей). Мёртвые головы уходят;
+        /// true — цепочка стала сопровождением.</summary>
+        private static bool PromoteEscortDue(Unit unit, Chain ch)
+        {
+            while (ch.EscortQueue.Count > 0)
+            {
+                if (!TargetDue(ch.Index, ch.EscortAfter[0], ch.Points.Count))
+                    break; // позиция серии ещё впереди — едем по маршруту
+                Unit target = ch.EscortQueue[0];
+                ch.EscortQueue.RemoveAt(0);
+                ch.EscortAfter.RemoveAt(0);
+                Version++;
+                if (target == null || target.disabled)
+                    continue;
+                ch.ResumeKind = ch.Kind;
+                ch.Kind = GroundOrderKind.Escort;
+                ch.EscortTarget = target;
+                ch.ApproachBearing = float.NaN;
+                ch.Holding = false;
+                ch.NextScanAt = 0f;
+                IssueFollow(unit, ch, force: true);
+                return true;
+            }
+            return false;
+        }
+
         /// <summary>Снапшот сопровождения (эскорт-ассист снимает связь на время
         /// стройки и возвращает после).</summary>
         public static bool TryGetEscortSnapshot(Unit unit, out Unit target, out float bearing)
@@ -431,38 +529,223 @@ namespace SupremeNuclear
             SetEscort(unit, target, bearing);
         }
 
-        /// <summary>Живые связи сопровождения: пары «эскорт → цель» (отрисовка,
-        /// скан вейпоинта-связи, отмена по цели). only — фильтр своей фракции
-        /// (как CollectAll: AI делит реестр, чужие связи не рисуются/не пикаются).</summary>
+        /// <summary>Живые и ждущие связи сопровождения: пары «эскорт → цель»
+        /// (отрисовка, скан вейпоинта-связи, отмена по цели) — очередь §12-36а
+        /// полноправна: ждущая связь рисуется и пикается так же, как живая.
+        /// Юнит с несколькими связями (живая + ждущие) отдаётся парами. only —
+        /// фильтр своей фракции (как CollectAll: AI делит реестр, чужие связи
+        /// не рисуются/не пикаются).</summary>
         public static void CollectEscorts(List<Unit> units, List<Unit> targets, FactionHQ only = null)
         {
             units.Clear();
             targets.Clear();
             foreach (KeyValuePair<Unit, Chain> kv in Chains)
             {
+                if (kv.Key == null || kv.Key.disabled)
+                    continue;
+                if (only != null && !GameApi.IsFriendlyUnit(kv.Key, only))
+                    continue;
+                Chain c = kv.Value;
+                if (c.Kind == GroundOrderKind.Escort && c.EscortTarget != null)
+                {
+                    units.Add(kv.Key);
+                    targets.Add(c.EscortTarget);
+                }
+                for (int i = 0; i < c.EscortQueue.Count; i++)
+                    if (c.EscortQueue[i] != null)
+                    {
+                        units.Add(kv.Key);
+                        targets.Add(c.EscortQueue[i]);
+                    }
+            }
+        }
+
+        /// <summary>Снять сопровождение цели у ВСЕХ юнитов (Ctrl+Shift+ПКМ по
+        /// связи): живая связь — приказ снимается целиком (стоящий эскорт);
+        /// ждущие записи очереди — удаляются, остальная цепочка (точки/цели)
+        /// живёт. Возвращает число снятых связей (живых + ждущих).</summary>
+        public static int CancelEscortOf(Unit target)
+        {
+            int removed = 0;
+            List<Unit> drop = null;
+            foreach (KeyValuePair<Unit, Chain> kv in Chains)
+            {
+                Chain c = kv.Value;
+                if (c.Kind == GroundOrderKind.Escort && c.EscortTarget == target)
+                {
+                    (drop ??= new List<Unit>()).Add(kv.Key);
+                    removed++;
+                    continue;
+                }
+                for (int i = c.EscortQueue.Count - 1; i >= 0; i--)
+                    if (c.EscortQueue[i] == target)
+                    {
+                        c.EscortQueue.RemoveAt(i);
+                        c.EscortAfter.RemoveAt(i);
+                        removed++;
+                    }
+            }
+            if (drop != null)
+                foreach (Unit unit in drop)
+                    Clear(unit);
+            return removed;
+        }
+
+        // == ОХРАНА (v0.158, SupCom guard): приказ «охранять союзника» — follow-модель
+        // сопровождения (EscortTarget дублирует GuardTarget: след/веер/кольцо работают
+        // без копий) + канонные отличия от эскорта: инженер АВТОМАТОМ чинит охраняемого
+        // (временный Repair с GuardResume, возврат через RepairFinished), боевое
+        // прикрытие ПЕРЕХВАТЫВАЕТ угрозы у цели — враг рядом с ОХРАНЯЕМЫМ поднимает
+        // погоню с поводком ОТ ЦЕЛИ (после боя/поводка страж возвращается, как патруль).
+        // Guard ≠ Escort зафиксировано в DESIGN §2.11.
+
+        /// <summary>Приказ охраны (перезапись текущего, как любой приказ без Shift).
+        /// bearing — сектор веера группы (NaN — живой азимут).</summary>
+        public static void SetGuard(Unit unit, Unit target, float bearing = float.NaN)
+        {
+            Version++;
+            var ch = new Chain
+            {
+                Kind = GroundOrderKind.Guard,
+                GuardTarget = target,
+                EscortTarget = target, // follow-модель эскорта читает EscortTarget
+                ApproachBearing = bearing
+            };
+            Chains[unit] = ch;
+            IssueFollow(unit, ch, force: true);
+        }
+
+        /// <summary>Цель охраны юнита (для отрисовки/ассиста), иначе null.</summary>
+        public static Unit GuardTargetOf(Unit unit) =>
+            Chains.TryGetValue(unit, out Chain ch) && ch.Kind == GroundOrderKind.Guard
+                ? ch.GuardTarget
+                : null;
+
+        /// <summary>Живые связи охраны: пары «страж → цель» (отрисовка, скан
+        /// вейпоинта-связи, отмена по цели). only — фильтр своей фракции.</summary>
+        public static void CollectGuards(List<Unit> units, List<Unit> targets, FactionHQ only = null)
+        {
+            units.Clear();
+            targets.Clear();
+            foreach (KeyValuePair<Unit, Chain> kv in Chains)
+            {
                 if (kv.Key == null || kv.Key.disabled ||
-                    kv.Value.Kind != GroundOrderKind.Escort || kv.Value.EscortTarget == null)
+                    kv.Value.Kind != GroundOrderKind.Guard || kv.Value.GuardTarget == null)
                     continue;
                 if (only != null && !GameApi.IsFriendlyUnit(kv.Key, only))
                     continue;
                 units.Add(kv.Key);
-                targets.Add(kv.Value.EscortTarget);
+                targets.Add(kv.Value.GuardTarget);
             }
         }
 
-        /// <summary>Снять сопровождение ВСЕХ юнитов, следующих за целью
-        /// (Ctrl+Shift+ПКМ по связи). Возвращает число снятых связей.</summary>
-        public static int CancelEscortOf(Unit target)
+        /// <summary>Снять охрану цели у ВСЕХ стражей (Ctrl+Shift+ПКМ по связи).
+        /// Возвращает число снятых связей.</summary>
+        public static int CancelGuardOf(Unit target)
         {
             List<Unit> drop = null;
             foreach (KeyValuePair<Unit, Chain> kv in Chains)
-                if (kv.Value.Kind == GroundOrderKind.Escort && kv.Value.EscortTarget == target)
+                if (kv.Value.Kind == GroundOrderKind.Guard && kv.Value.GuardTarget == target)
                     (drop ??= new List<Unit>()).Add(kv.Key);
             if (drop == null)
                 return 0;
             foreach (Unit unit in drop)
                 Clear(unit);
             return drop.Count;
+        }
+
+        /// <summary>Ближайшая угроза охраняемому: враг в радиусе GuardScanM от ЦЕЛИ
+        /// (не от стража — перехват у охраняемого), видимый даталинку (погоня только
+        /// за трекнутым — как у турелей). null — угроз нет.</summary>
+        private static Unit NearestGuardThreat(Unit unit, Unit target)
+        {
+            FactionHQ hq = unit.NetworkHQ;
+            if (hq == null)
+                return null;
+            Unit best = null;
+            float bestSq = float.MaxValue;
+            foreach (Unit enemy in BattlefieldGrid.GetUnitsInRangeEnumerable(
+                         target.GlobalPosition(), Settings.GuardScanM))
+            {
+                if (enemy == null || enemy.disabled || enemy.NetworkHQ == null ||
+                    enemy.NetworkHQ == hq)
+                    continue;
+                if (!(enemy is GroundVehicle || enemy is Ship || enemy is Aircraft || enemy is Building))
+                    continue;
+                if (hq.GetTrackingData(enemy.persistentID) == null)
+                    continue; // даталинк: невидимого не перехватываем
+                Vector3 d = enemy.transform.position - target.transform.position;
+                float sq = d.x * d.x + d.z * d.z;
+                if (sq < bestSq)
+                {
+                    bestSq = sq;
+                    best = enemy;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>Тик охраны: инженер при повреждённой цели уходит во временный
+        /// ремонт (GuardResume — RepairService наливает, RepairFinished вернёт
+        /// охрану); боевое прикрытие перехватывает угрозы у цели (погоня с поводком
+        /// ОТ ЦЕЛИ, зеркально поводку патруля); никто рядом — follow-модель эскорта
+        /// (след/веер/кольцо, stop-and-fire рядом с целью). Авиация охраны не имеет
+        /// (у бортов escort-сегменты плана — DESIGN §2.11). true = цель охраны
+        /// погибла — цепочка завершена.</summary>
+        private static bool TickGuard(Unit unit, Chain ch, float now)
+        {
+            if (ch.GuardTarget == null || ch.GuardTarget.disabled)
+                return true;
+            if (GameApi.IsEngineer(unit) && GameApi.HpFraction(ch.GuardTarget) < 1f)
+            {
+                Version++;
+                ch.GuardResume = true;
+                ch.Kind = GroundOrderKind.Repair;
+                ch.RepairTarget = ch.GuardTarget;
+                IssueRepairFollow(unit, ch, force: true);
+                return false;
+            }
+            if (now < ch.NextScanAt)
+                return false;
+            ch.NextScanAt = now + ScanIntervalSec;
+            Unit threat = NearestGuardThreat(unit, ch.GuardTarget);
+            if (threat != null)
+            {
+                Version++;
+                ch.ResumeKind = GroundOrderKind.Guard;
+                ch.PatrolLeashPoint = ch.GuardTarget.transform.position.ToGlobalPosition();
+                ch.PatrolLeashSet = true;
+                ch.PatrolLeashArmed = false;
+                ch.Kind = GroundOrderKind.Attack;
+                ch.Target = threat;
+                ch.Holding = false;
+                ch.LastPoint = default;
+                IssuePursuit(unit, ch, PursueRange(unit, threat), force: true);
+                return false;
+            }
+            return TickEscort(unit, ch, now); // бездействие: следование + stop-and-fire
+        }
+
+        /// <summary>Завершение налива (RepairService: HP полно — связь снята).
+        /// Инженер с GuardResume возвращается к охране живой цели; остальным —
+        /// обычная очистка. Вызывается сервисом завершения ВМЕСТО Clear: прямой
+        /// Cancel игроком идёт через Clear — охрана не воскресает.</summary>
+        public static void RepairFinished(Unit unit)
+        {
+            if (!Chains.TryGetValue(unit, out Chain ch))
+                return;
+            if (ch.GuardResume && ch.GuardTarget != null && !ch.GuardTarget.disabled)
+            {
+                Version++;
+                ch.GuardResume = false;
+                ch.RepairTarget = null;
+                ch.Kind = GroundOrderKind.Guard;
+                ch.Holding = false;
+                ch.NextScanAt = 0f;
+                IssueFollow(unit, ch, force: true);
+                return;
+            }
+            Clear(unit);
         }
 
         // == РЕМОНТ (v0.149, канон SupCom — 4-я функция инженерного сьюта):
@@ -512,6 +795,21 @@ namespace SupremeNuclear
                 units.Add(kv.Key);
                 targets.Add(kv.Value.RepairTarget);
             }
+        }
+
+        /// <summary>Снять ремонт цели у ВСЕХ инженеров (Ctrl+Shift+ПКМ по связи,
+        /// §12-58б — зеркально эскорту). Возвращает число снятых связей.</summary>
+        public static int CancelRepairOf(Unit target)
+        {
+            List<Unit> drop = null;
+            foreach (KeyValuePair<Unit, Chain> kv in Chains)
+                if (kv.Value.Kind == GroundOrderKind.Repair && kv.Value.RepairTarget == target)
+                    (drop ??= new List<Unit>()).Add(kv.Key);
+            if (drop == null)
+                return 0;
+            foreach (Unit unit in drop)
+                Clear(unit);
+            return drop.Count;
         }
 
         /// <summary>Радиус налива ремонта из профиля экономики (фолбэк 60 м —
@@ -717,7 +1015,7 @@ namespace SupremeNuclear
         private static bool TickEscort(Unit unit, Chain ch, float now)
         {
             if (ch.EscortTarget == null || ch.EscortTarget.disabled)
-                return true;
+                return !PromoteNextEscort(unit, ch); // очередь связей — следующая; иначе завершено
             if (now < ch.NextScanAt)
                 return false;
             ch.NextScanAt = now + ScanIntervalSec;
@@ -782,6 +1080,10 @@ namespace SupremeNuclear
                 }
                 if (ch.Kind != GroundOrderKind.Attack && PromoteDue(unit, ch))
                     continue; // дозревшая цель: цепочка стала атакующей — погоня со следующего тика
+                if (ch.Kind != GroundOrderKind.Attack &&
+                    ch.Kind != GroundOrderKind.Escort && ch.Kind != GroundOrderKind.Repair &&
+                    ch.Kind != GroundOrderKind.Guard && PromoteEscortDue(unit, ch))
+                    continue; // дозревший эскорт: цепочка стала сопровождением (§12-36а)
                 if (ch.Kind == GroundOrderKind.Attack)
                 {
                     // true = цепочка завершена (цель мертва, очередей нет) — удаление
@@ -794,6 +1096,12 @@ namespace SupremeNuclear
                 if (ch.Kind == GroundOrderKind.Escort)
                 {
                     if (TickEscort(unit, ch, now))
+                        (done ??= new List<Unit>()).Add(unit);
+                    continue;
+                }
+                if (ch.Kind == GroundOrderKind.Guard)
+                {
+                    if (TickGuard(unit, ch, now))
                         (done ??= new List<Unit>()).Add(unit);
                     continue;
                 }
@@ -952,9 +1260,13 @@ namespace SupremeNuclear
                 else
                     StanceService.SetCoordHold(unit, true);
             }
-            // Поводок патруля: вошли в контакт (engaged) и ушли от якоря отрыва
-            // дальше PatrolLeashM — погоню бросаем (цель «умерла» для нас).
-            if (ch.ResumeKind == GroundOrderKind.Patrol && ch.PatrolLeashSet && ch.PatrolLeashArmed)
+            // Поводок патруля/охраны: вошли в контакт (engaged) и ушли от якоря
+            // отрыва дальше PatrolLeashM — погоню бросаем (цель «умерла» для нас).
+            // У охраны якорь — позиция ОХРАНЯЕМОГО на момент перехвата: страж не
+            // убегает за врагом от подопечного (канон guard).
+            if ((ch.ResumeKind == GroundOrderKind.Patrol ||
+                 ch.ResumeKind == GroundOrderKind.Guard) &&
+                ch.PatrolLeashSet && ch.PatrolLeashArmed)
             {
                 Vector3 leash = ch.PatrolLeashPoint.ToLocalPosition();
                 Vector3 upL = unit.transform.position;
@@ -1015,6 +1327,21 @@ namespace SupremeNuclear
                     Version++;
                     return false;
                 }
+                // Перехват охраны завершён (угроза убита/поводок): страж возвращается
+                // к охраняемому (зеркало возврата патруля в цикл).
+                if (ch.ResumeKind == GroundOrderKind.Guard &&
+                    ch.GuardTarget != null && !ch.GuardTarget.disabled)
+                {
+                    ch.Kind = GroundOrderKind.Guard;
+                    ch.Target = null;
+                    ch.Holding = false;
+                    ch.PatrolLeashSet = false;
+                    ch.PatrolLeashArmed = false;
+                    ch.NextScanAt = 0f;
+                    IssueFollow(unit, ch, force: true);
+                    Version++;
+                    return false;
+                }
                 return true; // цель мертва, продолжений нет — цепочка завершена
             }
             if (now < ch.NextScanAt)
@@ -1034,7 +1361,8 @@ namespace SupremeNuclear
                 // сюда, нативная остановка на ней), огонь — нативные турели. Никаких
                 // «стоп»-приказов: кораблю они разворачивают циркуляцию.
                 ch.Holding = true;
-                ch.PatrolLeashArmed = ch.ResumeKind == GroundOrderKind.Patrol; // поводок взведён
+                ch.PatrolLeashArmed = ch.ResumeKind == GroundOrderKind.Patrol ||
+                                      ch.ResumeKind == GroundOrderKind.Guard; // поводок взведён
                 return false;
             }
             ch.Holding = false;
@@ -1274,6 +1602,9 @@ namespace SupremeNuclear
             for (int t = 0; t < ch.TargetAfter.Count; t++)
                 if (ch.TargetAfter[t] > index)
                     ch.TargetAfter[t]--;
+            for (int t = 0; t < ch.EscortAfter.Count; t++)
+                if (ch.EscortAfter[t] > index)
+                    ch.EscortAfter[t]--;
             if (index < ch.Index)
                 ch.Index--;
             // Патрульный хвост не выпал из цикла — начало цикла сдвигается вместе с очередью.

@@ -97,11 +97,29 @@ namespace SupremeNuclear
                 case WaypointKind.EscortLink:
                 {
                     // Снять сопровождение цели у ВСЕХ эскортировщиков (наземка + авиация):
-                    // связь — свойство цели, а не выделения.
+                    // связь — свойство цели, а не выделения. Живые связи снимаются
+                    // целиком, ждущие записи очереди (§12-36а) удаляются из очереди.
                     int ground = GroundOrders.CancelEscortOf(hit.Owner);
                     int air = AircraftOrders.CancelEscortOf(hit.Owner);
                     if (ground + air > 0)
                         CommanderHud.Notice(Loc.F("Сопровождение снято: {0}", ground + air));
+                    return true;
+                }
+                case WaypointKind.RepairLink:
+                {
+                    // Снять ремонт цели у ВСЕХ инженеров (§12-58б — связь кликом,
+                    // зеркально эскорту; раньше ремонт снимался только новым приказом).
+                    int cancelled = GroundOrders.CancelRepairOf(hit.Owner);
+                    if (cancelled > 0)
+                        CommanderHud.Notice(Loc.F("Ремонт снят: инженеров — {0}", cancelled));
+                    return true;
+                }
+                case WaypointKind.GuardLink:
+                {
+                    // Снять охрану цели у ВСЕХ стражей (связь — свойство цели).
+                    int cancelled = GroundOrders.CancelGuardOf(hit.Owner);
+                    if (cancelled > 0)
+                        CommanderHud.Notice(Loc.F("Охрана снята: юнитов — {0}", cancelled));
                     return true;
                 }
                 case WaypointKind.SalvoPoint:
@@ -123,16 +141,31 @@ namespace SupremeNuclear
         /// ХВОСТОМ от пикнутой точки (канон SupCom: точки до неё проходятся линейно
         /// один раз, дальше цикл). Групповой вейпоинт конвертируется у ВСЕХ членов
         /// группы приказа — каждый от своей точки этой группы (как Moho RestartMoveCommandAsPatrol:
-        /// конвертация приказа идёт всем юнитам, получившим его вместе).
+        /// конвертация приказа идёт всем юнитам, получившим его вместе; §12-31 —
+        /// решение 2026-11-07: групповая конвертация и у авиации, фан-аут как у
+        /// удаления — каждый борт конвертирует СВОЙ сегмент с точкой группы).
+        /// Ралли-точка фабрики — маршрут будущих выходов становится патрульным
+        /// циклом (§12-30; уже спущенные цепочки не ретроактивны).
         /// Поиск — единым сканом (земля-проекция, служебные точки не отдаются);
-        /// гард «атака/залп/RTB не конвертятся» — внутри конвертаций, в одном месте.
-        /// Авиация пер-бортовая: у группы приказа сегменты асинхронны.</summary>
+        /// гард «атака/залп/RTB не конвертятся» — внутри конвертаций, в одном месте.</summary>
         public static bool ConvertToPatrolAt(CommanderModeController controller, Camera cam,
             Vector2 mouse, bool allUnits, out WaypointHit hit)
         {
             hit = WaypointScanner.Scan(controller, cam, mouse, WaypointScanner.PickPx, allUnits);
             if (hit.Kind == WaypointKind.AirPoint)
-                return AircraftOrders.ConvertToPatrol(hit.Owner, hit.Segment);
+            {
+                int gid = AircraftOrders.GroupIdOf(hit.Owner, hit.Segment, hit.Index);
+                if (gid == 0)
+                    return AircraftOrders.ConvertToPatrol(hit.Owner, hit.Segment);
+                // Групповая конвертация (§12-31): каждый борт группы конвертирует
+                // СВОЙ сегмент, содержащий точку этой группы (CollectGroup даёт
+                // индексы сегментов), — зеркально наземке и удалению.
+                AircraftOrders.CollectGroup(gid, GroupUnits, GroupIdx, GroupIdx2);
+                bool any = false;
+                for (int m = 0; m < GroupUnits.Count; m++)
+                    any |= AircraftOrders.ConvertToPatrol(GroupUnits[m], GroupIdx[m]);
+                return any;
+            }
             if (hit.Kind == WaypointKind.GroundPoint)
             {
                 int gid = GroundOrders.GroupIdOf(hit.Owner, hit.Index);
@@ -143,6 +176,18 @@ namespace SupremeNuclear
                 for (int m = 0; m < GroupUnits.Count; m++)
                     any |= GroundOrders.ConvertToPatrol(GroupUnits[m], GroupIdx[m]);
                 return any;
+            }
+            if (hit.Kind == WaypointKind.RallyPoint)
+            {
+                // Ралли-маршрут фабрики → патрульный цикл будущих выходов: точки
+                // и группы не меняются, флаг маршрута; уже спущенные юниты едут
+                // по старым (линейным) цепочкам — правится ИСТОЧНИК (§12-30).
+                if (ProductionTasks.ConvertRallyToPatrol(hit.RallyFactory))
+                {
+                    CommanderHud.Notice(Loc.Tr("Ралли фабрики — патрульный цикл"));
+                    return true;
+                }
+                return false;
             }
             return false;
         }
