@@ -352,13 +352,11 @@ namespace SupremeNuclear
                 switch (col)
                 {
                     case 1:
-                        // Ник: открытый слот — занять НАПРЯМУЮ (плейтест
-                        // 2026-11-07: «строка не занимается игроком или ии»);
-                        // сидящий человек/ИИ — FAF-дропдаун состояния слота.
-                        if (seat != null && seat.controller == LobbyState.CtrlOpen)
-                            SnLobbyService.SeatHostAt(armyId);
-                        else
-                            ShowContextMenu(armyId, cellRt);
+                        // Ник: ВСЕГДА FAF-дропдаун состояния (плейтест 2026-11-07:
+                        // прямой клик-занять давал «пинг-понг» пересадок хоста
+                        // между открытыми слотами; занятие — выбором «Занять (я)»
+                        // или «ИИ: …» из меню, как в FAF).
+                        ShowContextMenu(armyId, cellRt);
                         break;
                     case 4:
                         // Бинарный столбец «Занять/Готов» только для СВОЕГО
