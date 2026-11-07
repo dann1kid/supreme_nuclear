@@ -67,6 +67,16 @@ namespace SupremeNuclear
         public static KeyCode MapGenKey = KeyCode.G;   // в редакторе миссий: Ctrl+G
         public static string MapGenTemplate = "duel";
         public static int MapGenSeed = 0;              // 0 — случайный каждый запуск
+        public static int MapGenPlayers = 2;           // 2/4/6/8 — пары баз (панель Скримиша)
+        // Эксперимент v0.154: приём теней рельефом (каст остаётся off — тени
+        // отбрасывают только деревья; артефакты плейтестов v1 закрыты тогглом).
+        public static bool TerrainShadows = false;
+
+        // MP-лобби «Скримиша» (v0.154, Ур.2): параметры кнопки «Создать лобби»
+        public static string LobbyName = "";             // пусто — «<ник> — Supreme Nuclear»
+        public static string LobbyVisibility = "friends"; // public | friends | private
+        public static string LobbyPassword = "";         // пусто — без пароля
+        public static int LobbySlots = 8;                // 2..16, MaxConnections = slots-1
 
         // Выделение
         public static float BoxDragThresholdPx = 8f;
@@ -169,6 +179,12 @@ namespace SupremeNuclear
         private static ConfigEntry<bool> _rangeWeapons;
         private static ConfigEntry<string> _mapGenTemplate;
         private static ConfigEntry<int> _mapGenSeed;
+        private static ConfigEntry<int> _mapGenPlayers;
+        private static ConfigEntry<bool> _terrainShadows;
+        private static ConfigEntry<string> _lobbyName;
+        private static ConfigEntry<string> _lobbyVisibility;
+        private static ConfigEntry<string> _lobbyPassword;
+        private static ConfigEntry<int> _lobbySlots;
         private static ConfigEntry<string> _language; // удержанная запись — живая смена языка (свитчер в меню)
 
         /// <summary>Выбор панели Скримиша (шаблон-пресет + сид): пишем и статические
@@ -180,6 +196,27 @@ namespace SupremeNuclear
             MapGenSeed = seed;
             _mapGenTemplate.Value = template;
             _mapGenSeed.Value = seed;
+        }
+
+        /// <summary>Выбор игроков панели (1×1…4×4): держим как MapGenTemplate/Seed
+        /// (долг §12-57(д) — выбор больше не сбрасывается между запусками).</summary>
+        public static void SetMapGenPlayers(int players)
+        {
+            MapGenPlayers = LobbyState.ClampPlayers(players);
+            _mapGenPlayers.Value = MapGenPlayers;
+        }
+
+        /// <summary>Параметры MP-лобби из панели — статические поля + записи.</summary>
+        public static void SetLobby(string name, string visibility, string password, int slots)
+        {
+            LobbyName = name ?? "";
+            LobbyVisibility = visibility == "public" || visibility == "private" ? visibility : "friends";
+            LobbyPassword = password ?? "";
+            LobbySlots = Mathf.Clamp(slots, 2, 16);
+            _lobbyName.Value = LobbyName;
+            _lobbyVisibility.Value = LobbyVisibility;
+            _lobbyPassword.Value = LobbyPassword;
+            _lobbySlots.Value = LobbySlots;
         }
 
         /// <summary>Тоггл колец дальности из UI (0 атака-АС / 1 атака-АА / 2 разведка /
@@ -325,6 +362,25 @@ namespace SupremeNuclear
             _mapGenSeed = config.Bind("MapGen", "Seed", 0,
                 Loc.Tr("Сид генерации (0 — случайный каждый запуск; один сид = одна и та же раскладка)"));
             MapGenSeed = _mapGenSeed.Value;
+            _mapGenPlayers = config.Bind("MapGen", "Players", 2,
+                Loc.Tr("Раскладка сторон Скримиша: пары баз (2 = 1×1, 4 = 2×2, 6 = 3×3, 8 = 4×4)"));
+            MapGenPlayers = LobbyState.ClampPlayers(_mapGenPlayers.Value);
+            _terrainShadows = config.Bind("MapGen", "TerrainShadows", false,
+                Loc.Tr("Принимать тени на сгенерированном рельефе (эксперимент: деревья отбрасывают тени; при артефактах — выключить)"));
+            TerrainShadows = _terrainShadows.Value;
+            _lobbyName = config.Bind("Lobby", "Name", "",
+                Loc.Tr("Название лобби (пусто — «<ник> — Supreme Nuclear»)"));
+            LobbyName = _lobbyName.Value;
+            _lobbyVisibility = config.Bind("Lobby", "Visibility", "friends",
+                Loc.Tr("Видимость лобби: public (в общем списке), friends (только друзьям), private (по инвайту)"));
+            LobbyVisibility = _lobbyVisibility.Value;
+            _lobbyPassword = config.Bind("Lobby", "Password", "",
+                Loc.Tr("Пароль лобби (пусто — без пароля)"));
+            LobbyPassword = _lobbyPassword.Value;
+            _lobbySlots = config.Bind("Lobby", "Slots", 8,
+                new ConfigDescription(Loc.Tr("Слотов в лобби, включая хоста"),
+                    new AcceptableValueRange<int>(2, 16)));
+            LobbySlots = _lobbySlots.Value;
 
             BoxDragThresholdPx = config.Bind("Selection", "BoxDragThresholdPx", 8f).Value;
             DoubleClickSec = config.Bind("Selection", "DoubleClickSec", 0.35f).Value;

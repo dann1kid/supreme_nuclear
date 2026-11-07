@@ -5,7 +5,11 @@ namespace SupremeNuclear
 {
     /// <summary>Меш-лента маршрутов (как в SupCom), рисуется напрямую через Graphics.DrawMesh
     /// каждый кадр — без GameObject/MeshRenderer, поэтому ей не мешают culling mask и
-    /// фильтры рендер-конвейера игры. Пересборка — по Version приказов + таймер 0.5 с.</summary>
+    /// фильтры рендер-конвейера игры. Пересборка — по Version приказов + таймер 0.5 с.
+    /// Подача — в Application.onBeforeRender с компенсацией сдвига floating origin
+    /// (SubmitBeforeRender): OriginShift игры идёт в LateUpdate камеры, ПОСЛЕ нашей
+    /// подачи из Update — без компенсации кадр сдвига рисовал ленту по старым
+    /// координатам, рывок на весь вектор сдвига («вейпоинты лезут в камеру»).</summary>
     public static class RouteRibbonMesh
     {
         private const float RebuildSec = 0.5f;
@@ -63,6 +67,14 @@ namespace SupremeNuclear
 
         private static Vector3 _lastOriginPos;
 
+        // Origin на момент последней сборки вершин: кадр OriginShift рисует ленту
+        // с компенсирующей трансляцией (SubmitBeforeRender), свежие координаты
+        // принесёт ближайший Tick (originMoved). Лечит рывок ленты на весь вектор
+        // сдвига при движении камеры (threshold 1024 м, сдвиг до километров по Y).
+        private static Vector3 _builtOriginPos;
+        private static bool _beforeRenderHooked;
+        private static bool _drawWanted;
+
         public static void Tick()
         {
             if (!Settings.RouteUseMesh || !GameApi.InMission)
@@ -114,16 +126,42 @@ namespace SupremeNuclear
             }
         }
 
-        /// <summary>Ежекадровая подача мешей в камеры (вызывается из Update контроллера после Tick).</summary>
+        /// <summary>Запрос подачи на кадр (вызывается из Update контроллера после Tick).
+        /// Сама подача — SubmitBeforeRender: OriginShift игры бежит в LateUpdate КАМЕРЫ —
+        /// ПОСЛЕ нашей подачи из Update, и кадр сдвига рисовал ленту по старым
+        /// координатам (рывок на весь вектор сдвига — до километров, включая Y —
+        /// высоту камеры: «вейпоинты лезут в камеру», разбор 2026-11-06).</summary>
         public static void Render()
         {
+            _drawWanted = true;
+            if (!_beforeRenderHooked)
+            {
+                _beforeRenderHooked = true;
+                Application.onBeforeRender += SubmitBeforeRender;
+            }
+        }
+
+        /// <summary>Подача мешей ПОСЛЕ всех LateUpdate (в т.ч. OriginShift) — прямо
+        /// перед рендером; правило №16 соблюдено: это «до рендера», не OnGUI.
+        /// Вершина запекалась при origin P0 как «глобал + P0»; после сдвига (P0→P1)
+        /// её мир = «глобал + P1» = V + (P1 − P0) — рисуем с точной трансляцией,
+        /// ближайший Tick (originMoved) принесёт уже свежие координаты.</summary>
+        private static void SubmitBeforeRender()
+        {
+            if (!_drawWanted)
+                return;
+            _drawWanted = false;
             if (!_ready || _meshes == null || _mats == null)
                 return;
+            Vector3 off = Datum.origin != null
+                ? Datum.origin.position - _builtOriginPos
+                : Vector3.zero;
+            var draw = Matrix4x4.Translate(off);
             for (int i = 0; i < SubmeshCount; i++) // все сабмеши: залп (4) раньше не подавался
             {
                 if (_meshes[i] == null || _meshes[i].vertexCount == 0 || _mats[i] == null)
                     continue;
-                Graphics.DrawMesh(_meshes[i], Matrix4x4.identity, _mats[i], _layer,
+                Graphics.DrawMesh(_meshes[i], draw, _mats[i], _layer,
                     null, 0, null, UnityEngine.Rendering.ShadowCastingMode.Off, false);
             }
         }
@@ -618,6 +656,7 @@ namespace SupremeNuclear
                 _meshes[i].RecalculateNormals();
                 _meshes[i].RecalculateBounds();
             }
+            _builtOriginPos = Datum.origin != null ? Datum.origin.position : Vector3.zero;
             _ready = true;
         }
 
@@ -748,6 +787,7 @@ namespace SupremeNuclear
                         Object.Destroy(m);
                 _mats = null;
             }
+            _drawWanted = false;
             _ready = false;
             _lastAirVersion = -1;
             _lastGroundVersion = -1;

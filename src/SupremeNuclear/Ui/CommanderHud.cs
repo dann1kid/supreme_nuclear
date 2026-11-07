@@ -2655,9 +2655,26 @@ namespace SupremeNuclear
                 Color c = baseC * 0.95f;
                 if (wsp.z > 0f && !UnderMinimapWindow(wscr))
                 {
+                    // Маркер-узел ТОЧЕЧНОЙ волны — канон остальных вейпоинтов:
+                    // редактируемое = белый маркер-ФОРМА (ромб — семейство огневых
+                    // приказов), крест прицеливания поверх; волны по цели маркера
+                    // не имеют (крест следует за юнитом, не таскаются). Hover —
+                    // тот же пик-радиус, что у сканера: подсветка там, где возьмёт
+                    // драг (правило «управляется там, где рисуется»).
+                    bool hovered = false;
+                    if (wave.Target == null)
+                    {
+                        hovered = Vector2.Distance(new Vector2(wsp.x, wsp.y),
+                            new Vector2(RtsInput.MousePos.x, RtsInput.MousePos.y)) < WaypointScanner.PickPx;
+                        DrawWorldWaypointColored(cam, world, Color.white,
+                            hovered ? 1f : 0.9f, WaypointShape.Diamond, hovered ? 1.25f : 1f);
+                    }
                     float pulse = 12f + 6f * Mathf.Abs(Mathf.Sin(now * 3f));
                     DrawCross(wscr, pulse, c);
                     DrawCross(wscr, pulse * 0.5f, c);
+                    if (hovered)
+                        GUI.Label(new Rect(wscr.x + 14f, wscr.y - 10f, 400f, 20f),
+                            Loc.Tr("Залп: ЛКМ-драг — точка удара · Ctrl+Shift+ПКМ — снять волну"), _small);
                 }
                 // копим точку в цепь каждого ждущего корабля (порядок = порядок кликов)
                 if (wsp.z > 0f)

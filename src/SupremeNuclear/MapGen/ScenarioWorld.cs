@@ -14,6 +14,63 @@ namespace SupremeNuclear
         public List<ScenarioLayout.BaseSlot> Bases;
         public List<ScenarioLayout.Deposit> Mass;
         public List<ScenarioLayout.Deposit> Coal;
+
+        /// <summary>Первичные отрезки ровных трасс (v0.154): износ в сплат-маске
+        /// и запрет деревьев/декалей в полосе. Зеркальные копии ScatterPlan
+        /// достраивает сам по симметрии карты — здесь только primary.</summary>
+        public List<CorridorSeg> Corridors = new List<CorridorSeg>();
+
+        /// <summary>Зоны штампованных площадок (v0.154): базы — прямоугольники
+        /// (обе стороны), точки/уголь — круги. Запрет деревьев/шрамов,
+        /// кольца износа декалей — по кромке.</summary>
+        public List<PadZone> Pads = new List<PadZone>();
+    }
+
+    /// <summary>Отрезок ровной трассы проезда: A→B + половина ширины (канон
+    /// Heightmap.SmoothCorridor — max(2 клетки, widthM)).</summary>
+    public struct CorridorSeg
+    {
+        public Vector2 A, B;
+        public float HalfW;
+    }
+
+    /// <summary>Зона штампа площадки: база — прямоугольник (HalfA вдоль оси),
+    /// точка массы/угля — круг (Circle). Хранит ровно то, что штамповал Generate
+    /// — формулы радиусов не дублируются.</summary>
+    public struct PadZone
+    {
+        public Vector2 Center;
+        public float HalfA, HalfB;
+        public bool AlongX;
+        public bool Circle;
+
+        /// <summary>Точка внутри зоны с запасом margin (метры).</summary>
+        public bool Contains(float x, float z, float margin)
+        {
+            float dx = x - Center.x, dz = z - Center.y;
+            if (Circle)
+                return dx * dx + dz * dz <= (HalfA + margin) * (HalfA + margin);
+            float a = AlongX ? dx : dz, b = AlongX ? dz : dx;
+            return Math.Abs(a) <= HalfA + margin && Math.Abs(b) <= HalfB + margin;
+        }
+
+        /// <summary>Метры снаружи зоны (0 внутри) — кольцо износа по кромке
+        /// в сплат-маске.</summary>
+        public float DistanceOutside(float x, float z)
+        {
+            float dx = Math.Abs(x - Center.x), dz = Math.Abs(z - Center.y);
+            if (Circle)
+                return Mathf.Max(0f, Mathf.Sqrt(dx * dx + dz * dz) - HalfA);
+            float ax = AlongX ? dx : dz, az = AlongX ? dz : dx;
+            float ox = Mathf.Max(0f, ax - HalfA), oz = Mathf.Max(0f, az - HalfB);
+            if (ox <= 0f && oz <= 0f)
+                return 0f;
+            if (ox <= 0f)
+                return oz;
+            if (oz <= 0f)
+                return ox;
+            return Mathf.Sqrt(ox * ox + oz * oz);
+        }
     }
 
     /// <summary>
@@ -114,11 +171,12 @@ namespace SupremeNuclear
             // площадки остаются идеально ровными, коридоры выходят ИЗ них.
             // Каждый коридор дублируется X-зеркальным отрезком — точная
             // симметрия карты сохраняется (как у штампов/бампов).
+            var corridors = new List<CorridorSeg>();
             if (t.terrain.corridorWidthM > 1f)
             {
                 foreach (ScenarioLayout.BaseSlot b in bases)
                 {
-                    CorridorPair(hm, b.Pos, c, t.terrain.corridorWidthM);
+                    CorridorPair(hm, corridors, b.Pos, c, t.terrain.corridorWidthM);
                     var targets = new List<ScenarioLayout.Deposit>(mass);
                     targets.AddRange(coal);
                     targets.Sort((x, y) => (x.Pos - b.Pos).sqrMagnitude.CompareTo((y.Pos - b.Pos).sqrMagnitude));
@@ -127,31 +185,49 @@ namespace SupremeNuclear
                     {
                         if (link >= 8)
                             break;
-                        CorridorPair(hm, b.Pos, d.Pos, t.terrain.corridorWidthM);
+                        CorridorPair(hm, corridors, b.Pos, d.Pos, t.terrain.corridorWidthM);
                         link++;
                     }
                 }
             }
+            var pads = new List<PadZone>();
             foreach (ScenarioLayout.BaseSlot b in bases)
             {
                 hm.StampPadRect(b.Pos.x, b.Pos.y, halfAlong, halfAcross, alongX);
                 Vector2 m = ScenarioLayout.Mirror(b.Pos, c);
                 hm.StampPadRect(m.x, m.y, halfAlong, halfAcross, alongX);
+                pads.Add(new PadZone { Center = b.Pos, HalfA = halfAlong, HalfB = halfAcross, AlongX = alongX });
+                pads.Add(new PadZone { Center = m, HalfA = halfAlong, HalfB = halfAcross, AlongX = alongX });
             }
             foreach (ScenarioLayout.Deposit d in mass)
+            {
                 hm.StampPad(d.Pos.x, d.Pos.y, padR);
+                pads.Add(new PadZone { Center = d.Pos, HalfA = padR, HalfB = padR, Circle = true });
+            }
             foreach (ScenarioLayout.Deposit d in coal)
+            {
                 hm.StampPad(d.Pos.x, d.Pos.y, padR);
+                pads.Add(new PadZone { Center = d.Pos, HalfA = padR, HalfB = padR, Circle = true });
+            }
             hm.RebuildMasks(t.terrain);
 
-            return new WorldGen { Hm = hm, Bases = bases, Mass = mass, Coal = coal };
+            return new WorldGen { Hm = hm, Bases = bases, Mass = mass, Coal = coal,
+                                  Corridors = corridors, Pads = pads };
         }
 
-        /// <summary>Коридор + его X-зеркальная копия (симметрия рельефа по X).</summary>
-        private static void CorridorPair(Heightmap hm, Vector2 a, Vector2 b, float widthM)
+        /// <summary>Коридор + его X-зеркальная копия (симметрия рельефа по X);
+        /// первичный отрезок — в реестр для дрессинга (износ/деревья).</summary>
+        private static void CorridorPair(Heightmap hm, List<CorridorSeg> into,
+            Vector2 a, Vector2 b, float widthM)
         {
             hm.SmoothCorridor(a, b, widthM);
             hm.SmoothCorridor(new Vector2(-a.x, a.y), new Vector2(-b.x, b.y), widthM);
+            into.Add(new CorridorSeg
+            {
+                A = a,
+                B = b,
+                HalfW = Mathf.Max(hm.Step * 2f, widthM) * 0.5f,
+            });
         }
     }
 }

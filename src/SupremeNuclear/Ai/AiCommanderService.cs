@@ -74,6 +74,11 @@ namespace SupremeNuclear
             if (net == null || net.Server == null || !net.Server.Active)
                 return;
 
+            // Фаза лобби «Скримиша» (v0.154): миссия не пущена (патч №14 держит
+            // StartMission) — юнитов сценария ещё нет, AI ждать «Старта».
+            if (!MissionManager.IsRunning)
+                return;
+
             // Распознавание — только когда ХОТЯ БЫ ОДНА фракция занята игроком:
             // factionPlayers заполняется при спавне Player, до этого пуст у ВСЕХ
             // (плейтесты 2026-10-29: IsRunning включается РАНЬШЕ входа игрока — обе
@@ -104,6 +109,10 @@ namespace SupremeNuclear
                 if (hq == null || hq == localHq)
                     continue;
                 if (hq.factionPlayers != null && hq.factionPlayers.Count > 0)
+                    continue;
+                // Лобби v3: армия-слот человека НЕ управляется ИИ, даже если
+                // командир ещё не заспавнился (HQ без игроков).
+                if (!IsAiArmy(hq))
                     continue;
                 if (!States.TryGetValue(hq, out State st))
                 {
@@ -315,6 +324,33 @@ namespace SupremeNuclear
         }
 
         /// <summary>Ближайший ЧУЖОЙ самолёт у точки (перехват угроз у базы).</summary>
+        /// <summary>Армия-слот ИИ ли этот HQ (лобби v3): план слотов знает
+        /// контроллеры; вне SN-лобби (Ctrl+G/сток) — прежняя семантика «HQ без
+        /// игроков = ИИ».</summary>
+        private static bool IsAiArmy(FactionHQ hq)
+        {
+            var state = SnLobbyService.State;
+            if (state?.armies == null || hq.faction == null)
+                return true; // вне лобби — старое поведение
+            string name = hq.faction.factionName;
+            foreach (LobbyState.Army a in state.armies)
+            {
+                if (FactionFactory.ArmyName(a.id) != name)
+                    continue;
+                return a.controller == LobbyState.CtrlAi;
+            }
+            return true; // фракция не из плана (нативные) — старое поведение
+        }
+
+        /// <summary>Союзная ли армия с армией AI (лобби v3: команда-союз).
+        /// Вне SN-лобби всегда false — все чужие HQ враждебны.</summary>
+        private static bool AlliedWith(FactionHQ a, FactionHQ b)
+        {
+            if (a == null || b == null || a == b)
+                return false;
+            return SnLobbyService.AlliedFactions(a.faction?.factionName, b.faction?.factionName);
+        }
+
         private static Unit NearestEnemyAircraft(FactionHQ of, Vector3 pos, float radius)
         {
             Unit best = null;
@@ -323,7 +359,7 @@ namespace SupremeNuclear
             {
                 if (unit == null || unit.disabled || unit is Building || !(unit is Aircraft))
                     continue;
-                if (unit.NetworkHQ == null || unit.NetworkHQ == of)
+                if (unit.NetworkHQ == null || unit.NetworkHQ == of || AlliedWith(of, unit.NetworkHQ))
                     continue;
                 float sq = (unit.transform.position - pos).sqrMagnitude;
                 if (sq >= bestSq)
@@ -660,7 +696,7 @@ namespace SupremeNuclear
             foreach (Unit unit in UnitRegistry.allUnits)
             {
                 if (unit == null || unit.disabled || unit is Building ||
-                    unit.NetworkHQ == null || unit.NetworkHQ == of)
+                    unit.NetworkHQ == null || unit.NetworkHQ == of || AlliedWith(of, unit.NetworkHQ))
                     continue;
                 float sq = (unit.transform.position - pos).sqrMagnitude;
                 if (sq < radiusSq && sq < bestSq)
@@ -688,7 +724,7 @@ namespace SupremeNuclear
             foreach (Unit unit in UnitRegistry.allUnits)
             {
                 if (unit == null || unit.disabled || unit is Building ||
-                    unit.NetworkHQ == null || unit.NetworkHQ == of)
+                    unit.NetworkHQ == null || unit.NetworkHQ == of || AlliedWith(of, unit.NetworkHQ))
                     continue;
                 if ((unit.transform.position - pos).sqrMagnitude > radiusSq)
                     continue;
@@ -706,7 +742,7 @@ namespace SupremeNuclear
             foreach (Unit unit in UnitRegistry.allUnits)
             {
                 if (unit == null || unit.disabled || !EconomyService.IsExtractor(unit) ||
-                    unit.NetworkHQ == null || unit.NetworkHQ == of)
+                    unit.NetworkHQ == null || unit.NetworkHQ == of || AlliedWith(of, unit.NetworkHQ))
                     continue;
                 float sq = (unit.transform.position - basePos).sqrMagnitude;
                 if (sq < bestSq)

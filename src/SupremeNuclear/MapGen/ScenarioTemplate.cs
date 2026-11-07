@@ -110,6 +110,24 @@ namespace SupremeNuclear
                                                       // требует max(4, height·0.15) ≈ 9 —
                                                       // запас; 0 = выкл, мель как прежде)
 
+            // ---- Визуальный дрессинг (v0.154): высоты/маски мира не меняют,
+            // НО запекаются в собранный префаб (деревья/декали/износ/шрамы) —
+            // поэтому ВХОДЯТ в MorphHash: правка ручки = новый ключ = свежая
+            // сборка (иначе IsBuilt отдавал старую карту, плейтест 2026-11-06).
+            public float treeDensity = 0.55f;   // плотность леса 0..1 (0 — без деревьев):
+                                                // кластеры fBm на равнинах, модель —
+                                                // GPU-TreeRenderer стока (TerrainTrees)
+            public float wearAmount = 0.6f;     // «износ» в сплат-маске 0..1: грязь
+                                                // (grass → sand) вдоль коридоров и
+                                                // вокруг баз/точек
+            public float wetBandM = 120f;       // мокрая тёмная кромка у воды, м (0 — выкл)
+            public float battleScars = 0.7f;    // предзапечённые выжженные шрамы 0..1
+                                                // (_Global_BlastMap при включении карты;
+                                                // трава выцветает и деревья вырубаются нативно)
+            public float decalAmount = 0.7f;    // плотность декалей 0..1: грязь у кромки
+                                                // воды, потёртости вдоль коридоров,
+                                                // проталины на равнинах (DecalProjector)
+
             /// <summary>Хеш морфологии (все поля стиля/рельефа, FNV-1a): входит в
             /// ключ карты — правка JSON-шаблона не коллизирует миры в реестре Built
             /// (урок X8-сида: один ключ = один мир). Чистая — тестируется.</summary>
@@ -130,6 +148,13 @@ namespace SupremeNuclear
                     Mix(ref h, coastFlatM); Mix(ref h, shoreSlope);
                     Mix(ref h, seaRampM); Mix(ref h, navDepthM);
                     Mix(ref h, albedoRes); Mix(ref h, corridorWidthM);
+                    // Дрессинг (v0.154) — в хеше ОБЯЗАТЕЛЬНО: высоты не меняют,
+                    // но деревья/декали/износ маски запечены в СФБРАННЫЙ
+                    // префаб карты — без хеша правка JSON давала старую сборку
+                    // (RuntimeMap.IsBuilt по тому же ключу, плейтест 2026-11-06
+                    // «иногда остаётся старая карта»)
+                    Mix(ref h, treeDensity); Mix(ref h, wearAmount);
+                    Mix(ref h, wetBandM); Mix(ref h, battleScars); Mix(ref h, decalAmount);
                     Mix(ref h, style); Mix(ref h, symmetry); Mix(ref h, waterColor); Mix(ref h, shallowColor);
                     Mix(ref h, beachColor); Mix(ref h, cliffColor);
                     if (palette != null)

@@ -32,11 +32,15 @@ namespace SupremeNuclear
         internal static void RememberAlbedo(Texture2D albedo) => _lastAlbedo = albedo;
 
         /// <summary>План материала рельефа: сам материал + период UV0 нашего меша
-        /// (метров на один UV-тик: uv0 = мир/UvTileM; при UvTileM = sizeM — 0..1).</summary>
+        /// (метров на один UV-тик: uv0 = мир/UvTileM; при UvTileM = sizeM — 0..1).
+        /// UseVertexColor: сплат-шейдеру вершинные цвета не нужны (альбедо из
+        /// текстур) — на сетке 8192² экономит 16 Б/вершину и покраску ZoneColor
+        /// по каждой вершине (главный тормоз генерации); гибрид/URP Lit — несут.</summary>
         public sealed class Plan
         {
             public Material Mat;
             public float UvTileM;
+            public bool UseVertexColor = true;
         }
 
         /// <summary>Материал рельефа и UV-канон нашего меша. Основной (юзер-канон
@@ -79,7 +83,7 @@ namespace SupremeNuclear
                 // нет бандла — гибрид.
                 Material splat = TerrainSplat.TryCreateMaterial(albedo, sizeM, detailNormal);
                 if (splat != null)
-                    return new Plan { Mat = splat, UvTileM = sizeM };
+                    return new Plan { Mat = splat, UvTileM = sizeM, UseVertexColor = false };
                 return new Plan
                 {
                     Mat = MakeHybrid(albedo, sizeM, chunk.Mat, detailNormal),
@@ -334,7 +338,14 @@ namespace SupremeNuclear
                 // (SN-TerrainStock) тоже подлежит замене: его «голый» вид —
                 // равномерное зелёное поле, зон-каналов нет (см. ResolvePlan).
                 Texture2D mask = _lastAlbedo != null ? _lastAlbedo : mapSettings.TerrainColorMap;
-                Material variant = MakeHybrid(mask, mapSettings.MapSize.x, chunk.Mat, detailNormal);
+                // v0.154: сплат — ПЕРВАЯ попытка и на этом пути. Карта строится в
+                // редакторе, где ResolvePlan не доходит до сплата (сток-чанка там
+                // нет), а сюда приходил всегда — и всегда уезжал в гибрид, даже с
+                // бандлом в игре (лог 2026-11-04: «материал рельефа — ГИБРИД» при
+                // живом splat.bundle). Нет бандла/маски — гибрид как прежде.
+                Material variant = TerrainSplat.TryCreateMaterial(mask, mapSettings.MapSize.x, detailNormal);
+                if (variant == null)
+                    variant = MakeHybrid(mask, mapSettings.MapSize.x, chunk.Mat, detailNormal);
                 int upgraded = 0;
                 foreach (MeshRenderer r in mapSettings.GetComponentsInChildren<MeshRenderer>(true))
                 {

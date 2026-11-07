@@ -71,6 +71,11 @@ namespace SupremeNuclear
         // internal: HUD по Until−MarkTtlSec узнаёт «когда волна отстрелялась» —
         // голова цепи очереди (недавно отстрелянная точка, ракета ещё в полёте).
         internal const float MarkTtlSec = 180f;
+        // Снятая волна (движение без Shift / Ctrl+Shift+ПКМ / таймаут труб) гаснет
+        // БЫСТРО: ракета не летит, держать крест MarkTtlSec — игрок видит «снятия
+        // не произошло» (жалоба 2026-11-06: бифуркация «снято/отстреляно» не
+        // читалась). Отстрелянная живёт MarkTtlSec — пока ракета в полёте.
+        internal const float CancelFadeSec = 3f;
         private const int MarkCap = 12;
         private static int _markIdSeq;
 
@@ -85,10 +90,21 @@ namespace SupremeNuclear
             internal GlobalPosition Aim;
             internal HashSet<PersistentID> Known;
             internal float Until;
+            internal int MarkId; // волна пуска: драг её точки обновит и этот прицел
         }
         private static readonly List<PendingAim> PendingAims = new List<PendingAim>();
         private static readonly HashSet<Missile> Aimed = new HashSet<Missile>(); // уже перенаправленные
         private static readonly HashSet<PersistentID> MissileSnapIds = new HashSet<PersistentID>();
+
+        // ЛЕТЯЩИЕ ракеты волны по MarkId: драг точки волны перенацеливает и их
+        // (жалоба 2026-11-06: «стрельба идёт по старым позициям» — выпущенные
+        // готовыми трубами ракеты летели в точку на момент КЛИКА, пока игрок
+        // тащил крест). Не отзывается только СНЯТАЯ волна — перевыдача прицела
+        // отзываться обязана. Чистка — Tick (мёртвые/протухшие ключи).
+        internal static readonly Dictionary<int, List<Missile>> WaveMissiles =
+            new Dictionary<int, List<Missile>>();
+        private static float _nextWaveMissilesPrune;
+        private static readonly List<int> _pruneKeys = new List<int>(); // буфер чистки
 
         // ПРЕДОХРАНИТЕЛЬ РИТМА (плейтест v0.123: зависание): корабельная VLS-оружка
         // МНОГОЗАРЯДНА (одна Weapon = магазин: Fire() пускает ракету и остаётся на
@@ -153,15 +169,46 @@ namespace SupremeNuclear
             Aimed.Clear();
             FiredBuf.Clear();
             Cooldowns.Clear();
+            WaveMissiles.Clear();
+            _nextWaveMissilesPrune = 0f;
         }
 
         /// <summary>Тик (CommanderHud.Update): волны очереди пускают по готовности
         /// труб, отметки ждущих живут, отложенные перенацеливания доводятся.</summary>
         public static void Tick()
         {
-            if (Queue.Count == 0 && PendingAims.Count == 0)
+            if (Queue.Count == 0 && PendingAims.Count == 0 && WaveMissiles.Count == 0)
                 return;
             float now = Time.unscaledTime;
+
+            // чистка летящих ракет волн (раз в секунду): Unity fake-null +
+            // disabled (долетела/сбита), ключ без живых ракет, без волны в
+            // очереди и без живой отметки — удалить (реестр не должен течь)
+            if (WaveMissiles.Count > 0 && now >= _nextWaveMissilesPrune)
+            {
+                _nextWaveMissilesPrune = now + 1f;
+                _pruneKeys.Clear();
+                foreach (KeyValuePair<int, List<Missile>> kv in WaveMissiles)
+                {
+                    List<Missile> list = kv.Value;
+                    for (int mi = list.Count - 1; mi >= 0; mi--)
+                        if (list[mi] == null || list[mi].disabled)
+                            list.RemoveAt(mi);
+                    if (list.Count == 0)
+                        _pruneKeys.Add(kv.Key);
+                }
+                for (int ki = 0; ki < _pruneKeys.Count; ki++)
+                {
+                    bool alive = false;
+                    int markId = _pruneKeys[ki];
+                    for (int qi = 0; qi < Queue.Count && !alive; qi++)
+                        alive = Queue[qi].MarkId == markId;
+                    for (int mi = 0; mi < Marks.Count && !alive; mi++)
+                        alive = Marks[mi].Id == markId && now < Marks[mi].Until;
+                    if (!alive)
+                        WaveMissiles.Remove(markId);
+                }
+            }
 
             // отложенные перенацеливания: новорождённая ракета владельца, которой
             // не было в снимке на момент пуска. РАЗБОР СТАРЕЙШИЙ-ПЕРВЫМ (FIFO):
@@ -183,6 +230,13 @@ namespace SupremeNuclear
                     {
                         AimMissileAtPoint(m, e.Aim);
                         Aimed.Add(m);
+                        // летящая ракета волны: драг точки волны перенацелит её
+                        if (e.MarkId != 0)
+                        {
+                            if (!WaveMissiles.TryGetValue(e.MarkId, out List<Missile> flying))
+                                WaveMissiles[e.MarkId] = flying = new List<Missile>();
+                            flying.Add(m);
+                        }
                         PendingAims.RemoveAt(i);
                         i--;
                         break;
@@ -210,7 +264,7 @@ namespace SupremeNuclear
                         bool launched;
                         try
                         {
-                            launched = TryLaunchOne(ship, wave.Target, aim);
+                            launched = TryLaunchOne(ship, wave.Target, aim, wave.MarkId);
                         }
                         catch (System.Exception e)
                         {
@@ -240,9 +294,13 @@ namespace SupremeNuclear
                 }
                 // волна отстрелялась (или снята) — отметка угасает обычным порядком
                 if (now >= wave.Deadline && wave.Ships.Count > 0)
+                {
                     Log.Warn($"FleetSalvo: волна #{wave.MarkId} снята по таймауту {WaveTtlSec:F0} с — " +
                              $"трубы так и не стали готовы ({wave.Ships.Count} бортов)");
-                TouchMark(wave.MarkId, now + MarkTtlSec);
+                    TouchMark(wave.MarkId, now + CancelFadeSec); // не стрелявшая — быстрый фейд
+                }
+                else
+                    TouchMark(wave.MarkId, now + MarkTtlSec); // отстрелялась — ракета летит
                 Queue.RemoveAt(qi);
             }
         }
@@ -277,7 +335,7 @@ namespace SupremeNuclear
                 // долбить кнопкой; дозирование серией кликов остаётся для ЧАСТИ
                 // труб: недозаряженные уйдут следующим кликом или волной очереди).
                 int before = firedNow;
-                while (TryLaunchOne(ship, target, target != null ? target.GlobalPosition() : aimpoint))
+                while (TryLaunchOne(ship, target, target != null ? target.GlobalPosition() : aimpoint, markId))
                     firedNow++;
                 if (firedNow == before)
                     waiting.Add(ship);
@@ -303,8 +361,9 @@ namespace SupremeNuclear
 
         /// <summary>Один пуск корабля (готовая подходящая станция). Точечный пуск
         /// (target=null) регистрирует отложенное перенацеливание новорождённой
-        /// ракеты в координату.</summary>
-        private static bool TryLaunchOne(Unit ship, Unit target, GlobalPosition aim)
+        /// ракеты в координату; markId — волна пуска (летящая ракета встанет в
+        /// WaveMissiles: драг точки волны перенацелит и её).</summary>
+        private static bool TryLaunchOne(Unit ship, Unit target, GlobalPosition aim, int markId)
         {
             // предохранитель ритма: после пуска корабль отдыхает cooldown
             if (Cooldowns.TryGetValue(ship, out float until) && Time.unscaledTime < until)
@@ -350,7 +409,8 @@ namespace SupremeNuclear
                     Owner = ship.persistentID,
                     Aim = aim,
                     Known = new HashSet<PersistentID>(MissileSnapIds),
-                    Until = Time.unscaledTime + 10f
+                    Until = Time.unscaledTime + 10f,
+                    MarkId = markId
                 });
             return true;
         }
@@ -370,8 +430,11 @@ namespace SupremeNuclear
 
         /// <summary>Сдвинуть точку обстрела волны (драг вейпоинта, канон тактичек
         /// SupCom): ждущие корабли пустят ракеты туда, где точка стоит на МОМЕНТ
-        /// ВЫСТРЕЛА. Точка приводится к ПОВЕРХНОСТИ (вода — зеркало, не дно) и
-        /// обновляет отметку-крест.</summary>
+        /// ВЫСТРЕЛА, ЛЕТЯЩИЕ ракеты волны и ждущие отложенные перенацелы ведутся
+        /// в новое место немедленно (жалоба 2026-11-06: выпущенные готовыми
+        /// трубами ракеты летели по старой точке, пока игрок тащил крест —
+        /// «стрельба идёт по старым позициям»). Точка приводится к ПОВЕРХНОСТИ
+        /// (вода — зеркало, не дно) и обновляет отметку-крест.</summary>
         internal static void MoveWavePoint(int markId, GlobalPosition point)
         {
             Vector3 l = point.ToLocalPosition();
@@ -390,19 +453,42 @@ namespace SupremeNuclear
                             Marks[mi] = m;
                             break;
                         }
+                    // ЛЕТЯЩИЕ ракеты волны → новая точка (перевыдача прицела
+                    // отзываться обязана; не отзывается только снятая волна)
+                    if (WaveMissiles.TryGetValue(markId, out List<Missile> flying))
+                        for (int fi = flying.Count - 1; fi >= 0; fi--)
+                        {
+                            Missile msl = flying[fi];
+                            if (msl == null || msl.disabled) // Unity fake-null (правило 14)
+                            {
+                                flying.RemoveAt(fi);
+                                continue;
+                            }
+                            AimMissileAtPoint(msl, point);
+                        }
+                    // отложенные перенацелы (спавн опаздывает на кадр) — тоже
+                    for (int pi = 0; pi < PendingAims.Count; pi++)
+                        if (PendingAims[pi].MarkId == markId)
+                        {
+                            PendingAim pa = PendingAims[pi];
+                            pa.Aim = point;
+                            PendingAims[pi] = pa;
+                        }
                     return;
                 }
         }
 
         /// <summary>Снять волну обстрела (Ctrl+Shift+ПКМ по точке): ждущие корабли
-        /// больше не пустят по ней; выпущенное не отзывается. true — нашли.</summary>
+        /// больше не пустят по ней; выпущенное не отзывается. Отметка гаснет
+        /// быстро (CancelFadeSec) — снятие видно сразу, в отличие от отстрелянной.
+        /// true — нашли.</summary>
         internal static bool CancelWave(int markId)
         {
             for (int i = 0; i < Queue.Count; i++)
                 if (Queue[i].MarkId == markId)
                 {
                     Queue.RemoveAt(i);
-                    TouchMark(markId, Time.unscaledTime + MarkTtlSec);
+                    TouchMark(markId, Time.unscaledTime + CancelFadeSec);
                     return true;
                 }
             return false;
@@ -426,25 +512,30 @@ namespace SupremeNuclear
             unit is Ship ||
             (unit is GroundVehicle && !GameApi.IsEngineer(unit) && UnitHasMissiles(unit));
 
-        /// <summary>Снять юнита со ВСЕХ ждущих волн (v0.134: явное движение наземной
-        /// пусковой = батарея уезжает, по точкам больше не бьёт; опустевшие волны
-        /// завершаются обычным порядком — отметка угасает).</summary>
-        public static void CancelWavesOf(Unit unit)
+        /// <summary>Снять юнита со ВСЕХ ждущих волн, вернуть их число. Новый приказ
+        /// движения без Shift = НОВАЯ очередь у ЛЮБОГО участника залпа (наземная ПУ —
+        /// v0.134; корабли уравнены 2026-11-06: прежде «веду и обстреливаю параллельно»
+        /// — точки залпа вели себя не как остальные вейпоинты); опустевшие волны
+        /// завершаются обычным порядком — отметка угасает.</summary>
+        public static int CancelWavesOf(Unit unit)
         {
             if (unit == null)
-                return;
+                return 0;
+            int cancelled = 0;
             for (int i = Queue.Count - 1; i >= 0; i--)
             {
                 QueuedWave wave = Queue[i];
-                wave.Ships.RemoveAll(u => u == unit);
+                if (wave.Ships.RemoveAll(u => u == unit) > 0)
+                    cancelled++;
                 if (wave.Ships.Count == 0)
                 {
                     Queue.RemoveAt(i);
-                    TouchMark(wave.MarkId, Time.unscaledTime + MarkTtlSec);
+                    TouchMark(wave.MarkId, Time.unscaledTime + CancelFadeSec);
                 }
                 else
                     Queue[i] = wave;
             }
+            return cancelled;
         }
 
         /// <summary>Станция для волны: ракетная, с боеприпасом, готовая (интервал/

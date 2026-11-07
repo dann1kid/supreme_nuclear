@@ -50,6 +50,15 @@ namespace SupremeNuclear
                 return false;
             if (IsHumanAce(owner))
                 return true; // ручное применение живого пилота не трогаем
+            // СОЮЗНЫЕ АРМИИ (лобби v3): выстрел по союзной команде резан ВООБЩЕ
+            // всегда (не зависит от WeaponGateService.AnyRestrictions) — цель-
+            // юнит с HQ союзной фракции. Ас-человек выше уже вышел (ручной пуск
+            // по своим остаётся на его совести, как френдли-файр SupCom off).
+            if (target != null && target.NetworkHQ != null && owner.NetworkHQ != null &&
+                target.NetworkHQ != owner.NetworkHQ &&
+                SnLobbyService.AlliedFactions(owner.NetworkHQ.faction?.factionName,
+                    target.NetworkHQ.faction?.factionName))
+                return false;
             if (!WeaponGateService.AnyRestrictions)
                 return true; // в мире нет ни стойки, ни гейтов, ни правил
             return !WeaponGateService.BlocksUse(owner, station, target);

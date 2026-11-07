@@ -31,6 +31,35 @@ and weapon gates. UI ships in English and Russian (`General.Language` in the Bep
 config). Full controls — in the **Controls** section below (RU/EN).
 Controls/UX feedback is welcome — GitHub Issues (feedback template).
 
+## Скримиш и мультиплеер (v0.154)
+
+- **Одиночная**: кнопка **«Скримиш»** в главном меню → вкладка «Одиночная» →
+  стиль карты / сид / стороны 1×1–4×4 / AI-противник → **«В БОЙ»**. Генерация
+  идёт в фоне с превью и прогрессом (игра не виснет), старт — мгновенно после
+  готовности.
+- **Мультиплеер** («командир + асы»): вкладка **«Мультиплеер»** → сгенерируй
+  карту (превью) → **«Создать лобби»** (имя / публичное-друзья-приватное /
+  пароль / слоты). Игроки входят через **список серверов игры** или
+  **Steam-инвайт** (у всех должен стоять мод той же версии). В лобби все
+  видят сгенерированную карту; асы занимают сторону A или B кнопкой,
+  хост открывает/закрывает стороны и жмёт **«СТАРТ»**. Хост — командир
+  стороны A (RTS), остальные летают бортами своей стороны; свободная
+  сторона играет под AI-командиром.
+
+## Skirmish & multiplayer (v0.154, English)
+
+- **Singleplayer**: the **Skirmish** button in the main menu → the "Singleplayer"
+  tab → map style / seed / 1v1–4v4 sides / AI opponent → **LAUNCH**. Generation
+  runs in the background with a live preview (no freeze); the battle starts
+  as soon as the map is ready.
+- **Multiplayer** ("commander + aces"): the **Multiplayer** tab → generate the
+  map (preview) → **Create lobby** (name / public-friends-private / password /
+  slots). Players join via the **in-game server browser** or a **Steam invite**
+  (everyone needs the same mod version). In the lobby everyone sees the generated
+  map; aces claim side A or B with a button, the host opens/closes sides and
+  presses **LAUNCH**. The host commands side A in RTS mode, everyone else flies
+  their side's aircraft; an empty side is played by the AI commander.
+
 ## Известные ограничения
 
 - **Мультиплеер**: командирский режим работает только у хоста (клиент-командир

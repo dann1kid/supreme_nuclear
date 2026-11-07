@@ -50,6 +50,11 @@ namespace SupremeNuclear
             // ассетом, наш MapSettings его не имеет → пустая сеть → NoNetwork →
             // корабль без вейпоинтов. Строим решётку трасс над судоходной водой.
             SeaLanesGen.Install(mapSettings);
+            // Шрамы дрессинга (v0.154): очередь AddBlast разберёт DetailRenderer
+            // в первом LateUpdate — выжженное в _Global_BlastMap + нативная
+            // реакция травы (выцветание) и деревьев (вырубка).
+            TerrainDressing.OnMapEnabled(mapSettings, RuntimeMap.LastScatter,
+                RuntimeMap.LastTerrain, RuntimeMap.LastSeed);
             // Диагностика «юниты проваливаются» (плейтест 2026-10-29): физика должна
             // видеть Statics-коллайдеры клона; рейкаст — в точке базовой зоны.
             var colliders = mapSettings.GetComponentsInChildren<UnityEngine.MeshCollider>();

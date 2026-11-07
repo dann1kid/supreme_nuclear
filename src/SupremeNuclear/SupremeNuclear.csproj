@@ -38,6 +38,10 @@
     <Reference Include="UnityEngine.AssetBundleModule"><HintPath>$(ManagedDir)\UnityEngine.AssetBundleModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="UnityEngine.ImageConversionModule"><HintPath>$(ManagedDir)\UnityEngine.ImageConversionModule.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Unity.TextMeshPro"><HintPath>$(ManagedDir)\Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
+    <!-- DecalProjector (URP): декали дрессинга карт (v0.154, TerrainDressing) -->
+    <Reference Include="Unity.RenderPipelines.Universal.Runtime"><HintPath>$(ManagedDir)\Unity.RenderPipelines.Universal.Runtime.dll</HintPath><Private>false</Private></Reference>
+    <!-- Steam-лобби мода (v0.154, SnLobbyService): SteamMatchmaking/ELobbyType -->
+    <Reference Include="com.rlabrecque.steamworks.net"><HintPath>$(ManagedDir)\com.rlabrecque.steamworks.net.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
   <ItemGroup>
@@ -55,6 +59,9 @@
     <!-- Стратегические иконки юнитов (импорт из SupCom FA, tools/import_supcom_icons.py):
          репозиторий icons/supcom/ -> игра BepInEx/plugins/SupremeNuclear/Icons/supcom/ -->
     <IconPngs Include="..\..\icons\supcom\*.png" />
+    <!-- Собственные генерированные иконки (ядерные носители/платформы, tools/make_nuke_icons.py):
+         репозиторий icons/custom/ -> игра BepInEx/plugins/SupremeNuclear/Icons/custom/ -->
+    <IconCustomPngs Include="..\..\icons\custom\*.png" />
     <!-- Персональный маппинг иконок (code/имя → stem): icons/overrides.json -> Icons/ -->
     <IconOverrides Include="..\..\icons\overrides.json" />
   </ItemGroup>
@@ -65,6 +72,7 @@
     <Copy SourceFiles="@(LocaleJsons)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\Locales\" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(MapGenTemplates)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\MapGen\" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(IconPngs)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\Icons\supcom\" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(IconCustomPngs)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\Icons\custom\" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(IconOverrides)" DestinationFolder="$(GameDir)\BepInEx\plugins\SupremeNuclear\Icons\" SkipUnchangedFiles="true" />
   </Target>
 

@@ -11,10 +11,17 @@ namespace SupremeNuclear
     /// «на глобальной камере 3D-превью нечитабельны»): PNG-набор импортируется
     /// из набора Advanced strategic icons установки SupCom FA инструментом
     /// tools/import_supcom_icons.py в icons/supcom/ (деплой csproj — рядом с
-    /// Locales/). Загрузка ленивая по имени (File.ReadAllBytes → LoadImage →
-    /// Sprite), маппинг — категория юнита/здания + тир ростера (канон FA: тир
-    /// в имени иконки — land1_/land2_/land3_, откат на plain-имя), персональные
-    /// правки — Icons/overrides.json (code/имя юнита → stem).
+    /// Locales/). Собственные генерированные иконки (v0.154, ядерные носители/
+    /// платформы «чётко понятно что связано») — tools/make_nuke_icons.py в
+    /// icons/custom/ (кольцо-трёхлистник канона FA на силуэтах набора); ищется
+    /// СНАЧАЛА custom, затем supcom — чистка импорта их не трогает. Загрузка
+    /// ленивая по имени (File.ReadAllBytes → LoadImage → Sprite), маппинг —
+    /// категория юнита/здания + тир ростера (канон FA: тир в имени иконки —
+    /// land1_/land2_/land3_, откат на plain-имя); носители ЯО получают стем
+    /// cls_nuke первым (CandidatesOf/NukeStemOf — WarheadService: корабль
+    /// профиля/наземка/авиация с ядерной станцией, «Хранилище БЧ» — роль
+    /// storage → structure_nuke), промах файла — фолбэк на базовый стем;
+    /// персональные правки — Icons/overrides.json (code/имя юнита → stem).
     ///
     /// ЕДИНАЯ точка спрайта МИРА/миникарты — Of(Unit)/OfDef(def) (потребители:
     /// CommanderHud, MinimapPanel); фолбэки вызывающего — UnitPreview.PreviewOf →
@@ -76,7 +83,7 @@ namespace SupremeNuclear
             {
                 string category = CategoryOf(def, engineer);
                 if (category != null)
-                    foreach (string candidate in StemCandidates(category, UnitRoster.TierOf(def)))
+                    foreach (string candidate in CandidatesOf(category, NuclearOf(def), UnitRoster.TierOf(def)))
                     {
                         sprite = LoadSprite(candidate);
                         if (sprite != null)
@@ -85,6 +92,44 @@ namespace SupremeNuclear
             }
             _resolved[def] = sprite; // null тоже кэшим — горячий путь без диска
             return sprite;
+        }
+
+        /// <summary>Ядерный стем категории: cls_nuke (ship_directfire → ship_nuke).
+        /// Чистое ядро — тестируется; файла может не быть → фолбэк на базовые
+        /// кандидаты (CandidatesOf), набор не обязан покрывать все классы.</summary>
+        public static string NukeStemOf(string category)
+        {
+            int sep = category.IndexOf('_');
+            string cls = sep > 0 ? category.Substring(0, sep) : category;
+            return cls + "_nuke";
+        }
+
+        /// <summary>Кандидаты стема с ядерным приоритетом: носитель ЯО получает
+        /// cls_nuke первым (иконки icons/custom/), при промахе — базовая категория.
+        /// Чистое — тестируется.</summary>
+        public static string[] CandidatesOf(string category, bool nuclear, int tier)
+        {
+            string[] baseCandidates = StemCandidates(category, tier);
+            if (!nuclear)
+                return baseCandidates;
+            string[] all = new string[baseCandidates.Length + 1];
+            all[0] = NukeStemOf(category);
+            System.Array.Copy(baseCandidates, 0, all, 1, baseCandidates.Length);
+            return all;
+        }
+
+        /// <summary>Определение — носитель ЯО (иконка, v0.154): корабль профиля
+        /// или наземка/авиация с ядерной станцией; ЯО выключено профилем — ложь.
+        /// Здания мимо (Хранилище БЧ — прямой маппинг роли storage).</summary>
+        private static bool NuclearOf(UnitDefinition def)
+        {
+            if (!WarheadService.WarheadsEnabled)
+                return false;
+            if (def is ShipDefinition sd)
+                return WarheadService.IsNuclearCarrierShip(sd);
+            return def is VehicleDefinition || def is AircraftDefinition
+                ? WarheadService.DefHasNuclearWeapon(def)
+                : false;
         }
 
         /// <summary>Категория cls_role канона FA по типу определения (null — нет
@@ -102,7 +147,7 @@ namespace SupremeNuclear
                     case "gen": return "structure_energy";
                     case "depot": return "factory_land";
                     case "hangar": case "heliport": case "revetment": return "factory_air";
-                    case "storage": return "structure_generic";
+                    case "storage": return "structure_nuke"; // Хранилище БЧ (v0.154)
                     case "mg": case "atgm": case "pillbox": return "structure_directfire";
                     case "manpads": case "aaa": return "structure_antiair";
                     case "tower": return "structure_intel";
@@ -187,8 +232,13 @@ namespace SupremeNuclear
             Sprite sprite = null;
             try
             {
+                // Сначала icons/custom/ (собственные генерированные — make_nuke_icons.py,
+                // чистка import_supcom_icons.py их не трогает), затем набор FA.
                 string path = Path.Combine(Paths.PluginPath, "SupremeNuclear",
-                    "Icons", "supcom", "icon_" + stem + ".png");
+                    "Icons", "custom", "icon_" + stem + ".png");
+                if (!File.Exists(path))
+                    path = Path.Combine(Paths.PluginPath, "SupremeNuclear",
+                        "Icons", "supcom", "icon_" + stem + ".png");
                 if (File.Exists(path))
                 {
                     var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false, false)

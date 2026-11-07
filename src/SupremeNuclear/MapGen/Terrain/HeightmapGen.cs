@@ -176,9 +176,20 @@ namespace SupremeNuclear
                     if (h < min) min = h;
                     if (h > max) max = h;
                     Water[i, j] = h < SeaLevel;
+                    // Крутизна — СИММЕТРИЧНЫЙ градиент: среднее двух соседей по оси,
+                    // max по осям. Направленный расчёт «только правый/верхний» давал
+                    // зеркально несимметричную маску Steep (гребень: склон слева
+                    // «круче» правого) — рушил пары деревьев ScatterPlan (тест
+                    // «зеркальные пары по X») и выбор точек по SiteOk при
+                    // mirror/quadrant. Среднее (а не max соседей) не раздувает
+                    // бровки: на плоском склоне оба соседа дают ту же крутизну,
+                    // что направленный расчёт; клампы границ симметричны по
+                    // построению — зеркальная пара видит зеркальный набор соседей.
                     float dh = Math.Max(
-                        Math.Abs(h - Height[Math.Min(W - 1, i + 1), j]),
-                        Math.Abs(h - Height[i, Math.Min(H - 1, j + 1)]));
+                        (Math.Abs(h - Height[Math.Max(0, i - 1), j]) +
+                         Math.Abs(h - Height[Math.Min(W - 1, i + 1), j])) * 0.5f,
+                        (Math.Abs(h - Height[i, Math.Max(0, j - 1)]) +
+                         Math.Abs(h - Height[i, Math.Min(H - 1, j + 1)])) * 0.5f);
                     Steep[i, j] = !Water[i, j] && dh / Step > steepTan;
                     Plain[i, j] = !Water[i, j] && !Steep[i, j];
                     Edge[i, j] = i < edgeCells || j < edgeCells ||

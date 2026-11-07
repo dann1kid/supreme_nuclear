@@ -35,6 +35,13 @@ namespace SupremeNuclear
         /// согласованная со штампованным рельефом).</summary>
         internal static WorldGen LastWorld;
 
+        /// <summary>Ограничения дрессинга + шаблон/сид последней карты (v0.154):
+        /// патч №12 на включении карты кладёт шрамы в BlastManager — само
+        /// включение про seed не знает, а Built-мир мог строиться раньше.</summary>
+        internal static ScatterPlan.Constraints LastScatter;
+        internal static ScenarioTemplate.TerrainSettings LastTerrain;
+        internal static int LastSeed;
+
         public static bool IsOurKey(string mapName) =>
             !string.IsNullOrEmpty(mapName) && mapName.StartsWith(KeyPrefix);
 
@@ -52,7 +59,10 @@ namespace SupremeNuclear
             MapGenKey.Build(templateName, seed, terrain?.MorphHash(), sizeK, players);
 
         /// <summary>Построить карту по ключу (если ещё не построена) и зарегистрировать
-        /// в MapLoader. Идемпотентно; вызывается генератором и префиксом EnableMap.</summary>
+        /// в MapLoader. Идемпотентно; вызывается генератором и префиксом EnableMap.
+        /// СИНХРОННЫЙ драйвер: сливает все ступени MapBuildJob за один вызов
+        /// (поведение прежнее — кадр стоит); асинхронный — MapGenAsync через тот же
+        /// job с бюджетом времени на кадр.</summary>
         public static bool EnsureRegistered(string mapName,
             List<KeyValuePair<string, Vector3>> hq = null)
         {
@@ -63,100 +73,30 @@ namespace SupremeNuclear
                 RegisterInLoader(mapName);
                 return true;
             }
-
-            // Ключ разбирает MapGenKey: имя шаблона может содержать дефисы
-            // (Duel-Land) — фиксированные индексы Split не годились.
-            if (!MapGenKey.TryParse(mapName, out MapGenKey.Parsed parsed))
+            var job = new MapBuildJob(mapName, hq, null, null);
+            foreach (float _ in job.Steps())
             {
-                Log.Error("MapGen: не разобрать ключ спец-карты — " + mapName);
-                return false;
             }
-            ScenarioTemplate template = ScenarioTemplate.Load(parsed.Template);
-            if (template?.terrain == null)
-            {
-                Log.Error("MapGen: шаблон '" + parsed.Template + "' без секции terrain — спец-карта невозможна");
-                return false;
-            }
-            // Игроки из ключа (Скримиш): файл шаблона мог уйти вперёд/назад,
-            // мир обязан совпасть с раскладкой миссии — источник истины ключ.
-            if (parsed.Players != null && parsed.Players.Value != template.players)
-                template.players = parsed.Players.Value;
-            int seed = parsed.Seed;
+            if (job.Success)
+                RegisterInLoader(mapName);
+            return job.Success;
+        }
 
-            // ЕДИНЫЙ детерминированный пайплайн (как и при генерации в ScenarioBuild):
-            // выбор точек по маскам → ШТАМПЫ ровных площадок → пересчёт масок —
-            // иначе раскладка миссии разошлась бы с мешом (гарантия спавна 2026-10-31).
-            WorldGen world = ScenarioWorld.Generate(template, seed);
+        /// <summary>Карта уже построена (кэш Built)? — без пересборки.</summary>
+        public static bool IsBuilt(string mapName) =>
+            IsOurKey(mapName) && Built.ContainsKey(mapName);
+
+        /// <summary>Опубликовать «последний мир» (статики для AI/дрессинга/лофанов)
+        /// — общая ступень обоих драйверов сборки.</summary>
+        internal static void PublishLast(WorldGen world, int seed, ScenarioTemplate.TerrainSettings t)
+        {
             Heightmap hm = world.Hm;
             LastHeightmap = hm;
             LastWorld = world;
             LastPass = PassGraph.Build(hm.Height, hm.W, hm.H, hm.Step, hm.SeaLevel, hm.Step * 0.75f);
-            Texture2D colorTex = MapTextures.TerrainColor(hm, template.terrain);
-            Texture2D albedo = MapTextures.Albedo(hm, template.terrain);
-            Sprite mapImage = MapTextures.MapSprite(hm, template.terrain);
-
-            var root = new GameObject(mapName); // 3d-go
-            Object.DontDestroyOnLoad(root);
-            root.SetActive(false); // исходник: MapSettingsManager.LoadMap инстанцирует копию
-
-            var networkGo = new GameObject("NetworkMap"); // 3d-go
-            networkGo.transform.SetParent(root.transform, false);
-            NetworkMap networkMap = networkGo.AddComponent<NetworkMap>();
-            networkMap.MapPrefix = 0x53; // 'S' — уникальный префикс мода (0 запрещён)
-            // FactionHQ — SCENE-объекты карты: Mirage требует prefabHash/sceneId, ручной
-            // ServerObjectManager.Spawn динамического GO падал SendSpawnMessage'ом
-            // «Empty prefabHash» при рестарте хоста (плейтест 2026-10-29). NetworkMap
-            // спавнит их нативно с id (MapPrefix<<24)|index — как у стоковых карт.
-            networkMap.NetworkObjects = BuildFactionHQs(root, hq ?? HqFromMission());
-
-            MapSettings settings = root.AddComponent<MapSettings>();
-            settings.NetworkMap = networkMap;
-            settings.MapSize = new Vector2(template.terrain.sizeM, template.terrain.sizeM);
-            settings.GridSizeX = 4;
-            settings.GridSizeY = 4;
-            settings.Latitude = 35f;
-            settings.RoadNetwork = ScriptableObject.CreateInstance<RoadNetworkSO>(); // пустая сеть — юниты напрямую
-            settings.SeaLanes = ScriptableObject.CreateInstance<RoadNetworkSO>();
-            settings.OceanBasecolor = MapTextures.OceanBase(template.terrain);
-            settings.OceanDepthmap = MapTextures.OceanDepth(hm,
-                Mathf.Max(300f, -template.terrain.oceanFloorM)); // шкала глубины по факту дна стиля
-            settings.TerrainColorMap = colorTex;
-            settings.MapImage = mapImage;
-            settings.CameraPositionRotation = new PositionRotation
-            {
-                // Карто-локальная точка (GlobalPosition = мир − origin): карта строится
-                // до включения в сцену, вычет чужого origin редактора уносил камеру.
-                Position = new GlobalPosition(0f, 2500f, -template.terrain.sizeM * 0.3f),
-                Rotation = Quaternion.Euler(55f, 0f, 0f),
-            };
-            // TerrainHeightMap-заглушка (NRE-фикс TerrainHeightMapBlocker в
-            // редакторе) + ДЕТАЙЛ-СТЕК СТОКА: DetailRenderer/GrassRenderer/THM
-            // приезжают с ПРЕФАБОМ карты (диагностика 2026-11-03: в сценах их 0
-            // при живой ванильной траве) — клонируем живой стек, трава получает
-            // конвейер; деревья стока срезаны (чужие позиции).
-            TerrainHeightMap heightMap = root.AddComponent<TerrainHeightMap>();
-            heightMap.terrainPhysicMaterials = new PhysicMaterial[0];
-            TerrainGrass.AttachStockStack(root);
-
-            // Гибрид v4.20: albedo (зоны+пятна) + нормал-деталь field_n 1 м.
-            TerrainMaterial.RememberAlbedo(albedo);
-            MapTextures.RememberSplatSource(hm, template.terrain); // сплат-маска/тайлы по этой карте
-            TerrainMaterial.Plan plan = TerrainMaterial.ResolvePlan(albedo, albedo,
-                template.terrain.sizeM, 1f);
-            TerrainMesh.Build(root.transform, hm, plan.Mat, plan.UvTileM,
-                (x, z, h) => MapTextures.VertexColorZone(hm, template.terrain, x, z));
-
-            var details = ScriptableObject.CreateInstance<MapDetails>();
-            details.PrefabName = mapName;
-            details.MapName = "SN " + parsed.Template + " " + parsed.Seed.ToString("X8");
-            details.MapImage = mapImage;
-
-            Built[mapName] = settings;
-            Details[mapName] = details;
-            RegisterInLoader(mapName);
-            Log.Info($"MapGen: спец-карта '{mapName}' построена — {hm.W}×{hm.H} клеток по {hm.Step:F0} м, " +
-                     $"высоты {hm.Min:F0}..{hm.Max:F0} м");
-            return true;
+            LastScatter = ScatterPlan.From(hm, world, t);
+            LastTerrain = t;
+            LastSeed = seed;
         }
 
         /// <summary>Вписать MapDetails в MapLoader.Maps (SO в памяти живёт всегда).</summary>
@@ -192,9 +132,44 @@ namespace SupremeNuclear
             return true;
         }
 
+        /// <summary>Регистрация собранной карты + вытеснение старых (кэш Built
+        /// живёт сессию; рост без границ съедал память — cap 4, вытесненный корень
+        /// уничтожается, при обращении карта пересоберётся честным путём).</summary>
+        private const int BuiltCap = 4;
+        private static readonly List<string> BuiltOrder = new List<string>();
+
+        internal static void RegisterBuilt(string mapName, MapSettings settings, MapDetails details)
+        {
+            Built[mapName] = settings;
+            Details[mapName] = details;
+            // РЕГИСТРАЦИЯ В ЛОАДЕРЕ ОБЯЗАТЕЛЬНО (плейтест 2026-11-06 «после
+            // генерации остаётся старая карта»): редактор грузит карту через
+            // MapLoader.TryLoad НАПРЯМУЮ (без EnableMap) — без записи в
+            // MapLoader.Maps он «Could not find GameWorldPrefab» и остаётся
+            // на стоке. Стартовая ветка Скримиша не падала лишь потому, что
+            // EnableMap-префикс регистрирует позже.
+            RegisterInLoader(mapName);
+            BuiltOrder.Remove(mapName);
+            BuiltOrder.Add(mapName);
+            while (BuiltOrder.Count > BuiltCap)
+            {
+                string old = BuiltOrder[0];
+                BuiltOrder.RemoveAt(0);
+                if (old == mapName || !Built.TryGetValue(old, out MapSettings oldSettings))
+                    continue;
+                Built.Remove(old);
+                Details.Remove(old);
+                if (oldSettings != null)
+                {
+                    Object.Destroy(oldSettings.gameObject); // неактивный исходник-префаб
+                    Log.Info("MapGen: вытеснена из кэша карта — " + old);
+                }
+            }
+        }
+
         /// <summary>Собрать HQ-объекты в «префабе» карты (root неактивен — Awake и кэш
         /// компонентов Mirage произойдут на клоне после SetActive нативным LoadMap).</summary>
-        private static NetworkIdentity[] BuildFactionHQs(
+        internal static NetworkIdentity[] BuildHqs(
             GameObject root, List<KeyValuePair<string, Vector3>> hqs)
         {
             var identities = new List<NetworkIdentity>();

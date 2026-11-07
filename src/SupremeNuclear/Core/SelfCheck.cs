@@ -412,11 +412,137 @@ namespace SupremeNuclear
                 if (HarmonyLib.AccessTools.Field(typeof(UnityEngine.UI.Button), "m_OnClick") == null)
                     throw new System.Exception("Button.m_OnClick не найден (кнопка Скримиша)");
             });
+            // MapGen-дрессинг (v0.154): приватные поля, на которых стоят деревья
+            // (патч №14 подменяет буфер позиций) и воронки (DetailRenderer.Start
+            // читает массивы и blastManager) — правка игры молча убьёт их иначе.
+            Check("MapGen: TreeRenderer/DetailRenderer поля (деревья, шрамы)", () =>
+            {
+                foreach (string f in new[] { "mesh", "material", "viewRadius", "meshRadius",
+                             "clearTreeRadiusMultiplier", "treeColorCompute", "clearShader",
+                             "treePositionBuffer" })
+                    if (HarmonyLib.AccessTools.Field(typeof(NuclearOption.Effects.TreeRenderer), f) == null)
+                        throw new System.Exception("TreeRenderer." + f + " не найден — деревья/патч №14 мертвы");
+                if (HarmonyLib.AccessTools.Field(typeof(NuclearOption.Effects.DetailRenderer), "treeRenderers") == null ||
+                    HarmonyLib.AccessTools.Field(typeof(NuclearOption.Effects.DetailRenderer), "blastManager") == null)
+                    throw new System.Exception("DetailRenderer.treeRenderers/blastManager не найдены — деревья/воронки мертвы");
+                if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.Effects.BlastManager), "AddBlast") == null)
+                    throw new System.Exception("BlastManager.AddBlast не найден — шрамы мертвы");
+            });
+            // MP-лобби Ур.2 (v0.154): реплика нативного CreateLobbyModal.HostLobby
+            // + фаза лобби (патч №14) + занятие сторон (нативный SetFaction).
+            Check("MP-лобби: SteamLobby/StartHostAsync/SetFaction/preventJoin (Ур.2)", () =>
+            {
+                if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.Networking.Lobbies.SteamLobby),
+                        "HostLobby") == null)
+                    throw new System.Exception("SteamLobby.HostLobby не найден (хостинг лобби)");
+                if (HarmonyLib.AccessTools.Field(typeof(NuclearOption.Networking.Lobbies.SteamLobby),
+                        "instance") == null)
+                    throw new System.Exception("SteamLobby.instance не найден (менеджер лобби)");
+                if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.Networking.NetworkManagerNuclearOption),
+                        "SetModdedServer") == null)
+                    throw new System.Exception("SetModdedServer не найден (тег браузера)");
+                if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.Networking.NetworkManagerNuclearOption),
+                        "StartHostAsync") == null)
+                    throw new System.Exception("StartHostAsync не найден (MP-хост)");
+                var mpHost = new NuclearOption.Networking.HostOptions(
+                    NuclearOption.Networking.SocketType.Steam, GameState.Multiplayer,
+                    new NuclearOption.SceneLoading.MapKey())
+                {
+                    MaxConnections = 7,
+                    Password = "probe",
+                };
+                if (mpHost.MaxConnections != 7 || mpHost.Password != "probe")
+                    throw new System.Exception("HostOptions MaxConnections/Password не пишутся (Steam, Multiplayer)");
+                if (HarmonyLib.AccessTools.Method(typeof(MissionManager), "StartMission") == null)
+                    throw new System.Exception("MissionManager.StartMission не найден (патч №14 — фаза лобби)");
+                if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.Networking.Player), "SetFaction") == null)
+                    throw new System.Exception("Player.SetFaction не найден (занятие стороны)");
+                if (HarmonyLib.AccessTools.Property(typeof(FactionHQ), "NetworkpreventJoin") == null)
+                    throw new System.Exception("FactionHQ.NetworkpreventJoin не найден (закрытие стороны)");
+                if (HarmonyLib.AccessTools.Method(typeof(FactionRegistry), "GetAllHQs") == null)
+                    throw new System.Exception("FactionRegistry.GetAllHQs не найден (ростер сторон)");
+                if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.Networking.Lobbies.HostedLobbyInstance),
+                        "SetData") == null)
+                    throw new System.Exception("HostedLobbyInstance.SetData не найден (sn_lobby-данные)");
+                if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.SavedMission.MissionTag),
+                        "GetPvpTypeLobbyString") == null)
+                    throw new System.Exception("MissionTag.GetPvpTypeLobbyString не найден (данные лобби)");
+                if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.Networking.Lobbies.SteamLobby),
+                        "CheckRelayLocationTask") == null)
+                    throw new System.Exception("CheckRelayLocationTask не найден (пинг хоста в браузере)");
+                // Лобби v2 (комната в EMPTY): Mirage-сообщение мода (Writer/Reader —
+                // публичные статики, регистрируемые вивером игре; мы повторяем в рантайме).
+                if (HarmonyLib.AccessTools.Property(typeof(Mirage.Serialization.Writer<SnLobbyMessage>), "Write") == null)
+                    throw new System.Exception("Mirage Writer<T>.Write недоступен (кастомное сообщение лобби)");
+                if (HarmonyLib.AccessTools.Property(typeof(Mirage.Serialization.Reader<SnLobbyMessage>), "Read") == null)
+                    throw new System.Exception("Mirage Reader<T>.Read недоступен (кастомное сообщение лобби)");
+                if (HarmonyLib.AccessTools.Method(typeof(Mirage.Serialization.MessagePacker), "RegisterMessage") == null)
+                    throw new System.Exception("MessagePacker.RegisterMessage недоступен (id сообщения лобби)");
+                // Рецепт LoadNext (DedicatedServerManager): комната без карты → карта на СТАРТ.
+                if ((int)GameState.ServerWaiting != 2 && (int)GameState.ServerWaiting < 0)
+                    throw new System.Exception("GameState.ServerWaiting отсутствует");
+                var sysHost = new NuclearOption.Networking.HostOptions(
+                    NuclearOption.Networking.SocketType.Steam, GameState.ServerWaiting,
+                    NuclearOption.SceneLoading.MapLoader.Empty);
+                if (sysHost.GameState != GameState.ServerWaiting)
+                    throw new System.Exception("HostOptions(ServerWaiting, SystemScene) не собрался");
+                if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.SceneLoading.MapLoader), "LoadEmpty") == null)
+                    throw new System.Exception("MapLoader.LoadEmpty не найден (сцена EMPTY создаётся рантаймом)");
+                foreach (string m in new[] { "SendLoadWaitingMessage", "SendServerLoadingMessage",
+                             "SendLoadMapMessageAll", "Host_SceneLoaded" })
+                    if (HarmonyLib.AccessTools.Method(typeof(NetworkManagerNuclearOption), m) == null)
+                        throw new System.Exception("NetworkManagerNuclearOption." + m + " не найден (рецепт LoadNext)");
+                if (HarmonyLib.AccessTools.Method(typeof(NetworkManagerNuclearOption), "ServerLoadMapScene") == null)
+                    throw new System.Exception("ServerLoadMapScene не найден (загрузка карты на СТАРТ)");
+                if (HarmonyLib.AccessTools.Property(typeof(NetworkManagerNuclearOption), "ServerObjectManager") == null &&
+                    HarmonyLib.AccessTools.Field(typeof(NetworkManagerNuclearOption), "ServerObjectManager") == null)
+                    throw new System.Exception("ServerObjectManager недоступен (снос EMPTY-персонажа хоста)");
+                if (HarmonyLib.AccessTools.Method(typeof(NetworkManagerNuclearOption), "SpawnCharacter") == null)
+                    throw new System.Exception("SpawnCharacter не найден (патч №16 — фракция по плану)");
+                if (HarmonyLib.AccessTools.Property(typeof(NetworkManagerNuclearOption), "Server") == null ||
+                    HarmonyLib.AccessTools.Property(typeof(NetworkManagerNuclearOption), "Client") == null)
+                    throw new System.Exception("Server/Client недоступны (подписки лобби)");
+                // Лобби v3: рантайм-фракции N армий + командная победа.
+                if (HarmonyLib.AccessTools.Property(typeof(Faction), "factionName") == null &&
+                    HarmonyLib.AccessTools.Field(typeof(Faction), "factionName") == null)
+                    throw new System.Exception("Faction.factionName недоступен (рантайм-фракции армий)");
+                if (HarmonyLib.AccessTools.Property(typeof(Faction), "color") == null &&
+                    HarmonyLib.AccessTools.Field(typeof(Faction), "color") == null)
+                    throw new System.Exception("Faction.color недоступен (цвет-чип армии)");
+                if (HarmonyLib.AccessTools.Method(typeof(FactionHQ), "DeclareEndGame") == null)
+                    throw new System.Exception("FactionHQ.DeclareEndGame не найден (командная победа/уничтожение)");
+                if (HarmonyLib.AccessTools.Property(typeof(FactionHQ), "factionUnits") == null)
+                    throw new System.Exception("FactionHQ.factionUnits недоступен (проверка уничтожения)");
+                if (HarmonyLib.AccessTools.Property(typeof(Unit), "NetworkHQ") == null)
+                    throw new System.Exception("Unit.NetworkHQ недоступен (союзный гейт оружия)");
+                if (HarmonyLib.AccessTools.Property(typeof(NetworkManagerNuclearOption), "SetModdedServer") != null &&
+                    HarmonyLib.AccessTools.Method(typeof(NetworkManagerNuclearOption), "SetModdedServer") == null)
+                    throw new System.Exception("SetModdedServer пропал (инстанс-метод)");
+            });
+            // Сплат-бандл: раннее eager-подхват (правило 13 — проверка предположения
+            // «бандл читается рантаймом ЭТОЙ ревизии»): диагноз в лог сразу, в меню,
+            // а не молча в момент первой карты. Неготовность — НЕ провал (фолбэк).
+            Check("MapGen: сплат-бандл (eager, диагностика)", () =>
+            {
+                bool ready = TerrainSplat.Ready;
+                Log.Info("SelfCheck: сплат " + (ready ? "ГОТОВ" : "недоступен — гибрид"));
+            });
             Log.Info("SelfCheck(startup): " + (Failures.Count == 0 ? "все проверки пройдены" : "ПРОВАЛОВ: " + Failures.Count));
         }
 
         public static void RunActivation()
         {
+            // Стоковая дека́ль дрессинга карт (v0.154): GameAssets к миссии
+            // загружен — DecalSpawner работает по тому же полю.
+            Check("GameAssets.scorchMarkDecal (декали карт)", () =>
+            {
+                var assets = GameAssets.i;
+                if (assets == null || assets.scorchMarkDecal == null)
+                    throw new System.Exception("prefab выжженной декали отсутствует");
+                if (assets.scorchMarkDecal
+                        .GetComponent<UnityEngine.Rendering.Universal.DecalProjector>() == null)
+                    throw new System.Exception("на scorchMarkDecal нет DecalProjector — декали карт мертвы");
+            });
             Check("CameraStateManager в сцене", () =>
             {
                 if (GameApi.CamManager == null) throw new System.Exception("singleton отсутствует");

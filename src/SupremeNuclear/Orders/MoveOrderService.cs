@@ -1579,6 +1579,7 @@ namespace SupremeNuclear
             int n = units.Count;
             int cols = Mathf.CeilToInt(Mathf.Sqrt(n));
             float groundY = GameApi.GroundY(target.x, target.z);
+            int cancelledWaves = 0; // волны залпа, снятые движением без Shift
 
             for (int i = 0; i < n; i++)
             {
@@ -1630,15 +1631,19 @@ namespace SupremeNuclear
                     GroundOrders.Enqueue(unit, pos.ToGlobalPosition(), attackMove, _moveGroupId);
                 else
                 {
-                    // Явное движение (без Shift) СНИМАЕТ ждущие залпы НАЗЕМНОЙ
-                    // пусковой (v0.134: батарея уезжает — по точкам больше не бьёт;
-                    // кораблям канон оставляет «веду и обстреливаю параллельно»)
-                    if (unit is GroundVehicle)
-                        FleetSalvo.CancelWavesOf(unit);
+                    // Новый приказ движения без Shift = НОВАЯ ОЧЕРЕДЬ (канон SupCom):
+                    // снимает ждущие волны залпа у ЛЮБОГО участника — наземная ПУ
+                    // с v0.134, корабли уравнены 2026-11-06 (прежде «веду и
+                    // обстреливаю параллельно» — поведение точек залпа расходилось
+                    // с остальными вейпоинтами). Shift — дописывает движение, волны
+                    // живут. Приказ АТАКИ волны не снимает (обстрел совместим с боем).
+                    cancelledWaves += FleetSalvo.CancelWavesOf(unit);
                     GroundOrders.Set(unit, pos.ToGlobalPosition(), attackMove, _moveGroupId);
                 }
                 LastDestinations[unit] = pos.ToGlobalPosition();
             }
+            if (cancelledWaves > 0)
+                CommanderHud.Notice(Loc.F("Волны обстрела сняты: {0}", cancelledWaves));
         }
 
         public void PruneMarkers(float now, float lifetime = 2.5f)

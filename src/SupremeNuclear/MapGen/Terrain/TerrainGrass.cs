@@ -18,6 +18,12 @@ namespace SupremeNuclear
     /// </summary>
     internal static class TerrainGrass
     {
+        /// <summary>В пристроенном стеке есть BlastManager (с mapSettings,
+        /// заново нацеленной на НАШ MapSettings) — сплат-материалу можно
+        /// включать _BlastStrength: CommandSetup стека выставит глобал
+        /// _Global_BlastMap. Сбрасывается в AttachStockStack (транзитная
+        /// связка «сборка → ResolvePlan/UpgradeClone», не кэш).</summary>
+        public static bool StackBlastReady;
         /// <summary>Найти GO DetailRenderer-стека в сток-префабах карт.</summary>
         private static GameObject FindStockStack()
         {
@@ -43,6 +49,7 @@ namespace SupremeNuclear
         /// Возвращает true при успехе.</summary>
         public static bool AttachStockStack(GameObject root)
         {
+            StackBlastReady = false;
             try
             {
                 GameObject stackGo = FindStockStack();
@@ -53,13 +60,29 @@ namespace SupremeNuclear
                 }
                 GameObject clone = UnityEngine.Object.Instantiate(stackGo, root.transform, false);
                 clone.name = "SN-DetailStack";
-                // Деревья стока — по чужим позициям: срезаем (трава остаётся).
+                // Деревья стока — по чужим позициям: срезаем (наши ставит
+                // TerrainTrees с позициями по маскам этого рельефа).
                 foreach (TreeRenderer tree in clone.GetComponentsInChildren<TreeRenderer>(true))
                     if (tree != null)
                         UnityEngine.Object.Destroy(tree);
+                // BlastManager: mapSettings клонировался СО ССЫЛКОЙ на СТОК-префаб
+                // (вне нашей иерархии — remap невозможен), CommandSetup посчитал бы
+                // UV воронок по чужому MapSize. Нацеливаем на наш MapSettings —
+                // Instantiate клона карты remap'ит ссылку внутрь иерархии сам.
+                MapSettings ms = root.GetComponent<MapSettings>();
+                int blasts = 0;
+                foreach (BlastManager bm in clone.GetComponentsInChildren<BlastManager>(true))
+                {
+                    if (bm == null)
+                        continue;
+                    if (ms != null)
+                        bm.mapSettings = ms;
+                    blasts++;
+                }
+                StackBlastReady = blasts > 0;
                 int grass = clone.GetComponentsInChildren<GrassRenderer>(true).Length;
                 Log.Info("MapGrass: детайл-стек стока пристроен (GrassRenderer " + grass +
-                         ", деревья срезаны) из '" + stackGo.name + "'");
+                         ", деревья срезаны, BlastManager " + blasts + ") из '" + stackGo.name + "'");
                 return true;
             }
             catch (Exception e)

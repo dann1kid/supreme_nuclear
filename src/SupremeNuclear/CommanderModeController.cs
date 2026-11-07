@@ -60,21 +60,31 @@ namespace SupremeNuclear
             // Редактор миссий: Ctrl+<MapGenKey> — сгенерировать дуэльный сценарий
             // текущим шаблоном (MapGen, файл миссии в User-группе); Ctrl+Shift+
             // <MapGenKey> — цикл СТИЛЯ карты (land/coast/seas/islands, пишется в
-            // JSON шаблона) + СРАЗУ генерация — селектор шаблонов-файлов запутал
-            // юзера (плейтест 2026-11-02 «работает только один стиль»).
+            // JSON шаблона) + СРАЗУ генерация.
+            // v0.155.1: генерация — асинхронная лента (MapGenAsync) с прогресс-
+            // баром: на 8192² синхронный путь замораживал кадр на минуты.
             if (GameManager.gameState == GameState.Editor &&
                 RtsInput.Ctrl && RtsInput.KeyDown(Settings.MapGenKey))
             {
-                if (RtsInput.Shift)
+                if (MapGenAsync.Busy)
                 {
-                    CommanderHud.Notice(ScenarioBuild.CycleStyleAndGenerate(
-                        Settings.MapGenTemplate, Settings.MapGenSeed, out _));
+                    CommanderHud.Notice(Loc.Tr("Генерация уже идёт — прогресс внизу экрана"));
                     return;
                 }
-                bool ok = ScenarioBuild.Generate(Settings.MapGenTemplate, Settings.MapGenSeed, out string gen);
-                CommanderHud.Notice(gen);
-                if (!ok)
-                    return;
+                if (RtsInput.Shift)
+                {
+                    string cycle = ScenarioBuild.CycleStyle(
+                        Settings.MapGenTemplate, out string tpl);
+                    CommanderHud.Notice(cycle);
+                    if (tpl == null)
+                        return;
+                    Settings.MapGenTemplate = tpl;
+                }
+                if (MapGenAsync.RequestForEditor(Settings.MapGenTemplate, Settings.MapGenSeed))
+                    CommanderHud.Notice(Loc.Tr("Генерация карты запущена — прогресс внизу экрана"));
+                else
+                    CommanderHud.Notice(Loc.Tr("Не удалось запустить генерацию — см. лог"));
+                return;
             }
 
             if (!GameApi.InMission)

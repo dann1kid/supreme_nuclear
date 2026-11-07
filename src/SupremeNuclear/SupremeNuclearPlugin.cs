@@ -75,6 +75,10 @@ namespace SupremeNuclear
             gameObject.AddComponent<SupcomUi>();
             gameObject.AddComponent<MinimapPanel>();
             gameObject.AddComponent<SkirmishPanel>(); // «Скримиш» в главном меню (лобби v1)
+            gameObject.AddComponent<MapGenAsync>();   // асинхронная генерация карт (v0.154)
+            gameObject.AddComponent<LobbyPanel>();    // в-игре фаза MP-лобби (v0.154)
+            SnLobbyService.InitializeScenes();        // MP-лобби: сброс сеанса при возврате в меню
+            SnLobbyService.EnsureInitialized();        // MP-лобби: сеть (дожим — MapGenAsync.Update)
 
             Log.Info($"{PluginInfo.Name} {PluginInfo.Version} загружен — {Settings.ToggleCommanderKey} в миссии включает режим командира");
         }

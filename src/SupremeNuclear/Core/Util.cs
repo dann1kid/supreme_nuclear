@@ -238,6 +238,19 @@ namespace SupremeNuclear
             return s;
         }
 
+        /// <summary>Строгое вхождение значения в список-строку профиля («DDG, LHA,CV»):
+        /// разбор по запятой с тримом и сравнением без регистра —substring-Contains
+        /// ловил бы ложные пересечения коротких кодов (v0.154). Чистая — тестируется.</summary>
+        public static bool TypeListContains(string list, string value)
+        {
+            if (string.IsNullOrEmpty(list) || string.IsNullOrEmpty(value))
+                return false;
+            foreach (string part in list.Split(','))
+                if (string.Equals(part.Trim(), value.Trim(), System.StringComparison.OrdinalIgnoreCase))
+                    return true;
+            return false;
+        }
+
         /// <summary>Адаптивный фильтр курсора «one euro» (Vector2): в покое сильно
         /// сглаживает — гасит сенсорный дрожь мыши (±1-2 пикселя при удержании
         /// транслировались в камеру 1:1 в метры мира), при движении частота среза

@@ -14,7 +14,7 @@ namespace SupremeNuclear
         // 16×16 чанков: сетка 1024² (натив NO 81.9 км / 80 м) — это ~2.1 млн
         // треугольников; чанк 64×64 клеток (~8k трис) даёт кулингу и физике
         // разумные куски (8×8 на такой сетке было бы по 33k трис на коллайдер).
-        private const int ChunksPerSide = 16;
+        internal const int ChunksPerSide = 16;
 
         /// <param name="uvTileM">Метров на один UV-тик UV0: при sizeM — 0..1
         /// (макро-конвенция цветовой текстуры); при меньшем — «тайловый» UV
@@ -23,23 +23,52 @@ namespace SupremeNuclear
         public static void Build(Transform parent, Heightmap hm, Material material, float uvTileM,
             System.Func<float, float, float, Color> vertexColor = null)
         {
-            float tile = Mathf.Max(1f, uvTileM);
-            int cells = Mathf.Max(1, hm.W / ChunksPerSide);
             for (int cj = 0; cj < ChunksPerSide; cj++)
             {
-                int j0 = cj * cells;
-                int j1 = Mathf.Min(hm.H, j0 + cells);
-                if (j0 >= j1)
+                if (RowEmpty(hm, cj))
                     break;
                 for (int ci = 0; ci < ChunksPerSide; ci++)
                 {
-                    int i0 = ci * cells;
-                    int i1 = Mathf.Min(hm.W, i0 + cells);
-                    if (i0 >= i1)
+                    if (ColEmpty(hm, ci))
                         break;
-                    BuildChunk(parent, hm, material, tile, vertexColor, i0, i1, j0, j1, ci, cj);
+                    BuildChunkAt(parent, hm, material, uvTileM, vertexColor, ci, cj);
                 }
             }
+        }
+
+        /// <summary>Число чанков сетки (для прогресса ступенчатой сборки —
+        /// MapBuildJob): та же арифметика границ, что у Build.</summary>
+        internal static int ChunkCount(Heightmap hm)
+        {
+            int cells = Mathf.Max(1, hm.W / ChunksPerSide);
+            int cols = Mathf.Min(ChunksPerSide, (hm.W + cells - 1) / cells);
+            int rows = Mathf.Min(ChunksPerSide, (hm.H + cells - 1) / cells);
+            return cols * rows;
+        }
+
+        /// <summary>Один чанк по индексам (ci, cj) — ступень бюджетной сборки
+        /// MapBuildJob (грейд-запекание коллайдеров размазывается по кадрам).</summary>
+        internal static void BuildChunkAt(Transform parent, Heightmap hm, Material material,
+            float uvTileM, System.Func<float, float, float, Color> vertexColor, int ci, int cj)
+        {
+            int cells = Mathf.Max(1, hm.W / ChunksPerSide);
+            int i0 = ci * cells, i1 = Mathf.Min(hm.W, i0 + cells);
+            int j0 = cj * cells, j1 = Mathf.Min(hm.H, j0 + cells);
+            if (i0 >= i1 || j0 >= j1)
+                return;
+            BuildChunk(parent, hm, material, Mathf.Max(1f, uvTileM), vertexColor, i0, i1, j0, j1, ci, cj);
+        }
+
+        private static bool ColEmpty(Heightmap hm, int ci)
+        {
+            int cells = Mathf.Max(1, hm.W / ChunksPerSide);
+            return ci * cells >= hm.W;
+        }
+
+        private static bool RowEmpty(Heightmap hm, int cj)
+        {
+            int cells = Mathf.Max(1, hm.W / ChunksPerSide);
+            return cj * cells >= hm.H;
         }
 
         private static void BuildChunk(Transform parent, Heightmap hm, Material material,
@@ -86,14 +115,22 @@ namespace SupremeNuclear
                     tris[t++] = d;
                 }
 
+            // Сетка 4096² (stepM 20): чанк 257² = 66k вершин — за потолком
+            // 16-битных индексов (65535). indexFormat ОБЯЗАН ставиться ДО
+            // заливки triangles: сеттер triangles с индексами > 65535 при
+            // 16-битном формате молча отбрасывает треугольники — рельеф
+            // «прозрачный» (плейтест 2026-11-06). UInt32 всегда — буфер ×2,
+            // копейки против вершинных данных.
             var mesh = new Mesh
             {
                 name = $"SN-Terrain-{ci}-{cj}",
-                vertices = verts,
-                uv2 = uv2s,
-                colors = colors,
-                triangles = tris,
+                indexFormat = UnityEngine.Rendering.IndexFormat.UInt32,
             };
+            mesh.vertices = verts;
+            mesh.uv2 = uv2s;
+            if (colors != null)
+                mesh.colors = colors;
+            mesh.triangles = tris;
             mesh.RecalculateNormals();
             // ТАНГЕНТЫ обязательны: normal-деталь террейна (field_n в шейдере
             // Field) без них мёртвая — поверхность «пластилиновая» без

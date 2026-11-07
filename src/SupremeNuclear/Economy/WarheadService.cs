@@ -160,25 +160,37 @@ namespace SupremeNuclear
         {
             if (unit == null || unit.disabled || unit is Aircraft)
                 return false;
-            EconomyProfile p = EconomyService.Profile;
-            if (p == null || !p.warheadsEnabled)
-                return false;
             if (unit is Ship ship && ship.definition is ShipDefinition sd)
-            {
-                string types = p.nuclearCarrierShipTypes ?? "";
-                return types.Contains(sd.shipType.ToString());
-            }
-            return HasNuclearWeapon(unit);
+                return IsNuclearCarrierShip(sd);
+            return WarheadsEnabled && HasNuclearWeapon(unit);
         }
 
-        /// <summary>Есть ли у юнита ядерная станция (кэш по определению).</summary>
+        /// <summary>ЯО включено профилем экономики (v0.154): иконки носителей и
+        /// кнопки ЯО гаснут вместе с ним — геймплей мёртв, UI не врёт.</summary>
+        public static bool WarheadsEnabled =>
+            EconomyService.Profile is EconomyProfile p && p.warheadsEnabled;
+
+        /// <summary>Корабль — тип-носитель профиля (def-уровень, v0.154: нужен
+        /// StrategicIcons до появления юнита — призраки/иконки по определению).
+        /// Строгий матч списка типов — Util.TypeListContains (substring-Contains
+        /// ловил бы пересечения коротких кодов типов).</summary>
+        public static bool IsNuclearCarrierShip(ShipDefinition sd)
+        {
+            if (sd == null || !WarheadsEnabled)
+                return false;
+            return Util.TypeListContains(EconomyService.Profile.nuclearCarrierShipTypes,
+                sd.shipType.ToString());
+        }
+
+        /// <summary>Есть ли у ОПРЕДЕЛЕНИЯ ядерная станция (кэш по дефу; v0.154
+        /// вынесено из HasNuclearWeapon: иконки StrategicIcons считают по дефу —
+        /// юнит может не существовать).</summary>
         private static readonly Dictionary<UnitDefinition, bool> _nuclearDef =
             new Dictionary<UnitDefinition, bool>();
-        public static bool HasNuclearWeapon(Unit unit)
+        public static bool DefHasNuclearWeapon(UnitDefinition def)
         {
-            if (unit?.definition == null || unit.weaponStations == null)
+            if (def?.unitPrefab == null)
                 return false;
-            UnitDefinition def = unit.definition;
             if (_nuclearDef.TryGetValue(def, out bool nuclear))
                 return nuclear;
             nuclear = false;
@@ -190,6 +202,14 @@ namespace SupremeNuclear
                 }
             _nuclearDef[def] = nuclear;
             return nuclear;
+        }
+
+        /// <summary>Есть ли у юнита ядерная станция (кэш по определению).</summary>
+        public static bool HasNuclearWeapon(Unit unit)
+        {
+            if (unit?.definition == null || unit.weaponStations == null)
+                return false;
+            return DefHasNuclearWeapon(unit.definition);
         }
 
         // ---------- заряд юнита-носителя ----------
@@ -454,6 +474,7 @@ namespace SupremeNuclear
             _strikes.Clear();
             _cooldowns.Clear();
             _storeFill.Clear();
+            _nuclearDef.Clear(); // дефы перезагружаются сценой — кэш не переживёт (§4)
             Version++;
         }
     }

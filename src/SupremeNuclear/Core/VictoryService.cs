@@ -21,6 +21,24 @@ namespace SupremeNuclear
     {
         private const float CheckInterval = 2f;
 
+        /// <summary>Режим лобби v3: «уничтожение» — активен; «захват»/«бесконечная»
+        /// — сервис пассивен (захват везут objectives миссии). Ставит Launch.</summary>
+        internal static volatile bool AnnihilationMode;
+
+        /// <summary>Штаб → имя фракции-армии (для командных союзов).</summary>
+        private static readonly Dictionary<FactionHQ, string> FactionName = new Dictionary<FactionHQ, string>();
+
+        /// <summary>Конфигурация от лобби (хост, при СТАРТе): режим + имена фракций
+        /// армий (союзные команды различает SnLobbyService.AlliedFactions).</summary>
+        internal static void Configure(bool annihilation)
+        {
+            AnnihilationMode = annihilation;
+            FactionName.Clear();
+            foreach (FactionHQ hq in FactionRegistry.HQLookup.Values)
+                if (hq != null && hq.faction != null)
+                    FactionName[hq] = hq.faction.factionName;
+        }
+
         // Фракции, у которых хоть раз было имущество: защищает от ложного поражения
         // на старте (стартовый аирдроп спавнится секунды) и у пустых слотов-наблюдателей.
         private static readonly HashSet<FactionHQ> _hadAssets = new HashSet<FactionHQ>();
@@ -28,7 +46,7 @@ namespace SupremeNuclear
 
         public static void Tick()
         {
-            if (!GameApi.InMission)
+            if (!GameApi.InMission || !AnnihilationMode)
                 return;
             var net = NetworkManagerNuclearOption.i;
             if (net == null || net.Server == null || !net.Server.Active)
@@ -50,12 +68,53 @@ namespace SupremeNuclear
                 if (!_hadAssets.Contains(hq))
                     continue;
                 string name = hq.faction != null ? hq.faction.factionName : "?";
-                Log.Info("Victory: сторона '" + name + "' аннигилирована (не осталось " +
-                         "юнитов и зданий) — DeclareEndGame(Defeat)");
-                CommanderHud.Notice(Loc.F("Сторона «{0}» полностью уничтожена", name));
-                hq.DeclareEndGame(EndType.Defeat);
+                Log.Info("Victory: армия '" + name + "' аннигилирована (не осталось " +
+                         "юнитов и зданий)");
+                CommanderHud.Notice(Loc.F("Армия «{0}» полностью уничтожена", name));
+                // Лобби v3 — КОМАНДНАЯ победа без патча: гасим HQ погибшей армии
+                // (Defeat), а если её КОМАНДА умерла целиком — DeclareEndGame(Victory)
+                // на каждый живой HQ чужих команд: свой исход получит каждый клиент
+                // через свой HQ (FinishGame игнорирует повторы).
+                if (TeamAlive(hq))
+                    continue; // союзники ещё держатся — команда в игре
+                foreach (FactionHQ other in FactionRegistry.HQLookup.Values)
+                {
+                    if (other == null || other.faction == null)
+                        continue;
+                    bool sameTeam = AlliedHq(other, hq);
+                    bool otherAlive = other.factionUnits.Count > 0 || other.factionPlayers.Count > 0;
+                    if (sameTeam)
+                        other.DeclareEndGame(EndType.Defeat);
+                    else if (otherAlive)
+                        other.DeclareEndGame(EndType.Victory);
+                }
+                AnnihilationMode = false; // исход объявлен — петлю заглушить
+                return;
             }
         }
+
+        /// <summary>Жива ли команда HQ (есть живые армии-союзники или игроки).</summary>
+        private static bool TeamAlive(FactionHQ dead)
+        {
+            foreach (FactionHQ hq in FactionRegistry.HQLookup.Values)
+            {
+                if (hq == null || hq == dead || !AlliedHq(hq, dead))
+                    continue;
+                if (hq.factionUnits.Count > 0 || hq.factionPlayers.Count > 0)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool AlliedHq(FactionHQ a, FactionHQ b)
+        {
+            string na = NameOf(a), nb = NameOf(b);
+            return !string.IsNullOrEmpty(na) && !string.IsNullOrEmpty(nb) &&
+                   SnLobbyService.AlliedFactions(na, nb);
+        }
+
+        private static string NameOf(FactionHQ hq) =>
+            hq != null && hq.faction != null ? hq.faction.factionName : null;
 
         /// <summary>Сцена умерла — реестр «имевших имущество» тоже.</summary>
         public static void Reset()

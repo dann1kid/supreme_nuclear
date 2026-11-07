@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using BepInEx;
@@ -7,13 +8,10 @@ using NuclearOption.SavedMission;
 namespace SupremeNuclear
 {
     /// <summary>
-    /// «Скримиш» — запуск боя из главного меню, мимо редактора миссий. Генерация
-    /// спец-карты шаблоном-пресетом стиля (MapGen/*.json с секцией terrain) и
-    /// ПРЯМОЙ старт по нативному пути SinglePlayerMenu.StartMission: TryLoad из
-    /// User-группы → SetMission → StartHost(Offline, SinglePlayer, MapKey) —
-    /// дальше MissionManager.OnStartServer сам доводит до спавна юнитов.
-    /// MP v1 — тегом Multiplayer в нативном лобби (см. ScenarioBuild): панель
-    /// стартует только одиночный бой. Кнопка и панель — SkirmishPanel (UiRts).
+    /// «Скримиш» — пресеты стилей карт и сид-конвенция для ЕДИНОГО лобби (v3):
+    /// селект стилей (MapGen/*.json) и ParseSeed. Старт (и соло, и MP) идёт
+    /// через SnLobbyService.Launch (комната → карта → нативный каскад);
+    /// редакторский Ctrl+G — ScenarioBuild.Generate напрямую.
     /// </summary>
     public static class SkirmishService
     {
@@ -60,45 +58,57 @@ namespace SupremeNuclear
             return int.TryParse(text.Trim(), out int v) ? v : 0;
         }
 
-        /// <summary>Генерация + прямой старт. Вызов из главного меню (клиентских
-        /// ограничений нет — оффлайн-хост); false + причина — отказ в статус-строку
-        /// панели. Тумблер AI панель применяет отдельно (AiProfile.Save).</summary>
-        public static bool Start(string templateName, int seed, int players, out string error)
+        // ---------- библиотека сохранённых карт (лобби v3) ----------
+
+        /// <summary>Карта из библиотеки: тройка (шаблон, сид, пул позиций) из
+        /// имени SN-сейва. Миссия пересобирается под ТЕКУЩИЙ план армий, сейв
+        /// задаёт только детерминированный мир.</summary>
+        public sealed class SavedMap
         {
-            error = null;
+            public string Name;     // имя сейва (SN-Terrain-…)
+            public string Template;
+            public int Seed;
+            public int Players;     // пул позиций (2×пары); -1 — легаси-ключ без «-pN»
+        }
+
+        /// <summary>Парс имени SN-сейва → SavedMap (чистая логика — тест).
+        /// null — не SN-ключ (чужие миссии игнорируются).</summary>
+        public static SavedMap ParseSavedName(string saveName)
+        {
+            if (string.IsNullOrEmpty(saveName) ||
+                !saveName.StartsWith("SN-Terrain-", StringComparison.Ordinal) ||
+                !MapGenKey.TryParse(saveName, out MapGenKey.Parsed parsed))
+                return null;
+            return new SavedMap
+            {
+                Name = saveName,
+                Template = parsed.Template,
+                Seed = parsed.Seed,
+                Players = parsed.Players ?? -1, // легаси: пул из файла шаблона
+            };
+        }
+
+        /// <summary>Библиотека: SN-сейвы User-группы (нативный список
+        /// persistentDataPath/Missions), отсортированы по имени. Пусто —
+        /// папки нет/ни одной карты.</summary>
+        public static List<SavedMap> ListSavedMaps()
+        {
+            var result = new List<SavedMap>();
             try
             {
-                if (!ScenarioBuild.Generate(templateName, seed, out string gen,
-                        loadEditor: false, playersOverride: players, out string saveName))
+                foreach (MissionKey key in MissionGroup.User.GetMissions())
                 {
-                    error = gen;
-                    return false;
+                    SavedMap map = ParseSavedName(key.Name);
+                    if (map != null)
+                        result.Add(map);
                 }
-                // Нативный путь MissionsPicker: сейв с диска (AfterLoad заполняет
-                // RuntimeObjectives/LoadKey), затем ровно SinglePlayerMenu.StartMission.
-                // (MissionGroup.User — инстанс группы; UserGroup — только тип.)
-                var key = new MissionKey(saveName, MissionGroup.User);
-                if (!key.TryLoad(out Mission mission, out string loadError))
-                {
-                    error = Loc.F("Миссия не загрузилась: {0}", loadError);
-                    return false;
-                }
-                MissionManager.SetMission(mission, checkIfSame: false);
-                NetworkManagerNuclearOption.i.StartHost(
-                    new HostOptions(SocketType.Offline, GameState.SinglePlayer, mission.MapKey));
-                // Режим командира поднимется сам при входе в миссию
-                // (юзер-решение 2026-11-02; флаг с именем — самоинвалидируется).
-                CommanderModeController.PendingAutoActivateMission = mission.Name;
-                Log.Info("Skirmish: старт — " + mission.Name + " (шаблон " + templateName +
-                         ", сид " + seed + ", игроков " + players + ")");
-                return true;
             }
             catch (System.Exception e)
             {
-                Log.Error("Skirmish: старт не удался — " + e);
-                error = Loc.Tr("Старт не удался — подробности в логе");
-                return false;
+                Log.Error("Skirmish: библиотека карт не читается — " + e.Message);
             }
+            result.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+            return result;
         }
     }
 }
