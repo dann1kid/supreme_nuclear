@@ -228,6 +228,31 @@ namespace SupremeNuclear
             var sel = controller != null ? controller.Selection : null;
             GUI.Label(new Rect(10f, 200f, 1200f, 20f),
                 "клик: " + (sel != null ? sel.LastClickDebug : "-"), _small);
+            // Соло-плейтест на ИИ (v0.167.1): состояние ИИ-командиров (обновление
+            // раз в 15 с вместе с лог-снапшотом) + счётчик ошибок сцены — вердикт
+            // плейтеста «на глаз» заменяется показаниями (PLAYTEST.md).
+            float y = 220f;
+            if (AiCommanderService.DebugLines.Count > 0)
+            {
+                string age = Time.unscaledTime - AiCommanderService.DebugLinesAt > 20f
+                    ? " (обновление раз в 15 с…)"
+                    : "";
+                foreach (var kv in AiCommanderService.DebugLines)
+                {
+                    GUI.Label(new Rect(10f, y, 1200f, 20f), Util.FitLine(kv.Value, 118), _small);
+                    y += 20f;
+                }
+                GUI.Label(new Rect(10f, y, 1200f, 20f), "ИИ-снапшот" + age, _small);
+                y += 20f;
+            }
+            GUI.Label(new Rect(10f, y, 1200f, 20f),
+                $"log: ошибок {Log.SessionErrors}, warn {Log.SessionWarnings} за сцену", _small);
+            y += 20f;
+            for (int i = 0; i < Log.LastErrors.Count && i < 2; i++)
+            {
+                GUI.Label(new Rect(10f, y, 1200f, 20f), Util.FitLine("  ↳ " + Log.LastErrors[i], 118), _small);
+                y += 20f;
+            }
         }
 
         private static void EnsureStyles()

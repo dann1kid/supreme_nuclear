@@ -60,6 +60,13 @@ namespace SupremeNuclear
         private static AiProfile _profile;
         private static float _nextTick;
 
+        /// <summary>Снапшоты состояния ИИ-фракций для F11-оверлея (v0.167.1):
+        /// строка на фракцию, пишется вместе с 15-с логом — читает CommanderHud.DrawDebug.</summary>
+        internal static readonly Dictionary<FactionHQ, string> DebugLines =
+            new Dictionary<FactionHQ, string>();
+        /// <summary>Время последней записи в DebugLines (возраст строк в F11).</summary>
+        internal static float DebugLinesAt;
+
         public static void Reset()
         {
             States.Clear();
@@ -72,6 +79,7 @@ namespace SupremeNuclear
             Depots.Clear();
             ProfileCache.Clear();
             _profile = null;
+            DebugLines.Clear();
             _nextTick = 0f;
         }
 
@@ -250,6 +258,16 @@ namespace SupremeNuclear
                     minHp = Mathf.Min(minHp, GameApi.HpFraction(e));
                 Log.Info($"AI: {fname} — инженеров {Engineers.Count} (min hp {minHp:P0}), боевых {Combat.Count}, " +
                          $"депо {Depots.Count}, точек свободно {FreeSitesCount()}, заявок {st.wavesSent}");
+                // Дубль снапшота в F11-буфер (готовая строка — без аллокаций на OnGUI):
+                // деньги/тир живые на момент записи, обновление раз в 15 с.
+                int tier = 0;
+                foreach (VehicleDepot d in Depots)
+                    tier = Mathf.Max(tier, FactoryTierService.TierOf(d));
+                DebugLines[hq] = $"ИИ {fname} [{AiProfile.LabelOf(AiTypeOfArmy(hq))}]: " +
+                                 $"инженеров {Engineers.Count} (min hp {minHp:P0}), боевых {Combat.Count}, " +
+                                 $"депо {Depots.Count} (тир {tier}), денег {hq.factionFunds:F0}, " +
+                                 $"волн {st.wavesSent}" + (st.energyStall ? ", ЭНЕРГОСТОЛЛ" : "");
+                DebugLinesAt = Time.unscaledTime;
             }
 
             Vector3 bp = basePos.Value.ToLocalPosition();

@@ -879,6 +879,17 @@ namespace SupremeNuclear
                 if (HarmonyLib.AccessTools.Method(typeof(FactionHQ), "DeclareEndGame") == null)
                     throw new System.Exception("FactionHQ.DeclareEndGame не найден — поражение по annihilation мертво");
             });
+            Check("AI-командир: все пресеты профилей парсятся (AI/<type>.json)", () =>
+            {
+                foreach (string type in AiProfile.Types)
+                {
+                    AiProfile p = AiProfile.Load(type);
+                    if (p == null)
+                        throw new System.Exception("AI/" + type + ".json не парсится — ИИ этого слота мёртв");
+                    if (p.tickSec <= 0f)
+                        throw new System.Exception("AI/" + type + ".json: tickSec <= 0 — тик ИИ встанет");
+                }
+            });
             Log.Info("SelfCheck(activation): " + (Failures.Count == 0 ? "ОК" : "ПРОВАЛОВ: " + Failures.Count));
         }
 

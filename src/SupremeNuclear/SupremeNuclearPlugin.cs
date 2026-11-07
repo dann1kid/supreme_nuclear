@@ -14,6 +14,7 @@ namespace SupremeNuclear
         private void Awake()
         {
             Log.Init(Logger);
+            Log.SubscribeUnity(); // счётчик ошибок сессии для F11 (до патчей — видеть и свои провалы)
             Loc.Bootstrap(Settings.BindLanguage(Config)); // до Bind: описания настроек локализуются
             Settings.Bind(Config);
 
@@ -33,6 +34,7 @@ namespace SupremeNuclear
             {
                 // Статическое состояние мода переживает сцены: всё, что держит юнитов/точки
                 // умершей сцены, сбрасываем здесь (см. ARCHITECTURE §4).
+                Log.ResetSessionCounters(); // ошибки/предупреждения сцены не копятся
                 GameApi.ResetSceneCache();
                 EconomyService.Reset();
                 SalvageService.Reset(); // прогресс разбора обломков привязан к сцене
