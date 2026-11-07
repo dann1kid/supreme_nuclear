@@ -52,6 +52,16 @@ Nuclear Option (Assembly-CSharp)
 
 ## 2. Каталог модулей
 
+Крупные классы расщеплены на **partial-файлы** (2026-11-07, механический перенос — поведение
+не менялось, конвейер зелёный, вывод тест-раннера побайтово тот же): `Class.cs` держит
+состояние/сводку/точку входа, тематические части лежат рядом как `Class.Topic.cs`:
+SupcomUi → Build/Refresh/Commands/Tabs/Tiles/Loadout/Tips; CommanderHud →
+Icons/Markers/Routes/Air; BuildTasks → Taxi/Place/Sequences/Lifecycle/Spawn;
+GroundOrders → Patrol/Escort/Combat/Queue (+enum `GroundOrderKind.cs`); MoveOrderService →
+Issue/Modes/Weapons; ProductionTasks → Loadouts/Upgrade/Rally; тесты → `TestMain.*.cs`
+(15 методов `TestsXxx`, Main вызывает в исходном порядке). Новая логика пишется в часть
+СООТВЕТСТВУЮЩЕЙ темы; перенос членов между классами при правках — нет.
+
 | Путь | Класс | Ответственность | Природа |
 |---|---|---|---|
 | `SupremeNuclearPlugin.cs` | `SupremeNuclearPlugin` | Точка входа: лог, конфиг, SelfCheck, Harmony, `sceneLoaded`-хук, добавление компонентов | MonoBehaviour (BepInEx) |
@@ -772,14 +782,21 @@ Alt+D — цикл авто-защиты · Home — центр карты · F1
 - **Сборка — конвейер `python tools/build.py`**: полная пересборка с `-warnaserror` →
   линт накопленных классов багов (двойной `Text`; `new GameObject` без `typeof(RectTransform)`
   в UI-коде; застрявшая версия) → локали (`tools/check_locales.py`: ключи `Loc.*` в коде =
-  ключи каждого `locales/*.json`) → тесты чистой логики (`tests/SupremeNuclear.Tests`,
+  ключи каждого `locales/*.json`) → реестр долгов (`tools/check_registry.py`: номера §12
+  уникальны, новый = max+1) → тесты чистой логики (`tests/SupremeNuclear.Tests`,
   консольный раннер: серии `Util.Runs`, терцили `Catalog.ApplyTierFilter`, `Progress01`,
   `EconomyProfile.Rate`, JSON-шаблоны, плюрализация `Util.RuPlural`/`Loc.Plural`,
   локализация `Loc.Install/Tr/F`, сводка вооружения
   `WeaponTallyAccumulator`/домен-теги, границы объединения `Util.UnionBand`) → проверка версии (исходник → bin DLL → игровой DLL
-  байтами), идентичности bin/деплой и локалей в игре. `--fast` — без чистки obj. Автодеплой `AfterTargets=Build` копирует DLL
+  байтами), идентичности bin/деплой и локалей в игре. `--fast` — без чистки obj;
+  `--no-game` — ТОЛЬКО шаги без установленной игры (версия+линт+локали+реестр; для CI).
+  Автодеплой `AfterTargets=Build` копирует DLL
   и `locales/*.json` в `<GameDir>\BepInEx\plugins\SupremeNuclear\` (локали — в `Locales\`).
   Опции: `-p:GameDir="..."`, `-p:Deploy=false`.
+- **CI** (`.github/workflows/ci.yml`, с 2026-11-07): push/PR → ubuntu → `python tools/build.py
+  --no-game`. Сборка/тесты/деплой-сверки в облаке НЕ едут — им нужны reference-сборки
+  установленной игры (20 DLL вне репозитория, публиковать нельзя); релизы остаются
+  локальными (`tools/publish.py`).
 - **Локали:** `locales/*.json` в репозитории (исходник правды) → деплой в
   `BepInEx/plugins/SupremeNuclear/Locales/`; новая локаль = новый файл (AGENTS «Правила
   локализации»); ru-локали файлом нет — русский это исходные ключи.
