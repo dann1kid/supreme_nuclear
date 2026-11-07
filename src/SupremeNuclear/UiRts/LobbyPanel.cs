@@ -237,19 +237,20 @@ namespace SupremeNuclear
                 new Vector2(388f, -650f), new Vector2(712f, -40f), new Color(0f, 0f, 0f, 0f));
             _mapBlock = new MapSetupBlock(this, right, -30f); // ниже кнопки «Победа»
 
-            // Чат комнаты (§12-64е): лог (нижняя треть левой колонки) + строка
-            // ввода с кнопкой отправки. Журнал локальный, приходит ретрансляцией
+            // Чат комнаты (§12-64е): лог + строка ввода — НАД нижней полосой
+            // кнопок (СТАРТ/Распустить занимают нижние ~70 ед. панели; наслоение
+            // плейтест 2026-11-07). Журнал локальный, приходит ретрансляцией
             // хоста (req=chat мимо состояния).
             var chatLog = Label(left, "chatLog", "", 12, SupcomUi.TextMain,
                 TextAnchor.LowerLeft, multiLine: true);
             var clRt = (RectTransform)chatLog.transform;
             clRt.anchorMin = new Vector2(0f, 1f);
             clRt.anchorMax = new Vector2(1f, 1f);
-            clRt.offsetMin = new Vector2(2f, -608f);
-            clRt.offsetMax = new Vector2(-2f, -344f);
+            clRt.offsetMin = new Vector2(2f, -546f);
+            clRt.offsetMax = new Vector2(-2f, -356f);
             _chatLog = chatLog;
             var chatRow = Panel("chatRow", left, new Vector2(0f, 1f), new Vector2(1f, 1f),
-                new Vector2(2f, -648f), new Vector2(-2f, -612f), new Color(0f, 0f, 0f, 0f));
+                new Vector2(2f, -588f), new Vector2(-2f, -552f), new Color(0f, 0f, 0f, 0f));
             var chatGo = new GameObject("chatInput", typeof(RectTransform), typeof(Image), typeof(InputField));
             var ciRt = (RectTransform)chatGo.transform;
             ciRt.SetParent(chatRow, false);
@@ -272,7 +273,14 @@ namespace SupremeNuclear
             _clickables.Add(new KeyValuePair<RectTransform, System.Action>(ciRt,
                 () => _chatInput.ActivateInputField()));
             _chatInput.onSubmit.AddListener(_ => SendChatFromInput());
-            Button_(chatRow, "chatSend", "▶", SendChatFromInput, 15);
+            Button chatSend = Button_(chatRow, "chatSend", "▶", SendChatFromInput, 15);
+            // Button_ не ставит якоря (нулевой размер в центре строки —
+            // некликабельно) — правая кромка строки ввода, как у всех кнопок.
+            var csRt = (RectTransform)chatSend.transform;
+            csRt.anchorMin = new Vector2(1f, 0f);
+            csRt.anchorMax = new Vector2(1f, 1f);
+            csRt.offsetMin = new Vector2(-40f, 0f);
+            csRt.offsetMax = new Vector2(-2f, 0f);
 
             // Нижний ряд: СТАРТ/Распустить (хост), Готов/Покинуть (гость).
             _startButton = Button_(_root, "start", Loc.Tr("СТАРТ"), OnStartClicked, 22);
@@ -345,7 +353,16 @@ namespace SupremeNuclear
                     case 1: ShowContextMenu(armyId, cellRt); break; // ник → меню FAF-стиля
                     case 2: SnLobbyService.CycleTeam(armyId); break;
                     case 3: SnLobbyService.CycleColor(armyId); break;
-                    case 4: SnLobbyService.ToggleSlotReady(armyId); break; // готовность сидящего
+                    case 4:
+                        // Столбец «Занять/Готов»: свой слот — готовность, открытый
+                        // или ИИ-слот — хост пересаживается сам (плейтест
+                        // 2026-11-07: «занятие слотов не работает»).
+                        LobbyState.Army seat = SnLobbyService.State?.armies.Find(x => x.id == armyId);
+                        if (seat != null && seat.controller == LobbyState.CtrlHuman)
+                            SnLobbyService.ToggleSlotReady(armyId);
+                        else
+                            SnLobbyService.SeatHostAt(armyId);
+                        break;
                 }
             }
             else
@@ -605,18 +622,11 @@ namespace SupremeNuclear
             _mapBlock?.SetInteractive(_hostMode && waiting);
             if (_hostMode)
             {
+                // Единый гейт СТАРТА (карта/пул/валидность/«Готов» гостей):
+                // причина — в подсказку, зелёный СТАРТ сам проверяет то же.
                 string reason = SnLobbyService.LaunchBlockReason();
-                if (reason != null)
-                    SetHint(reason, SupcomUi.TextDim);
-                else
-                {
-                    // СТАРТ не блокируется готовностью (канон SupCom — хост вольен),
-                    // но неготовые показываются явно (§12-64д).
-                    string notReady = SnLobbyService.NotReadyNames();
-                    SetHint(notReady != null
-                        ? Loc.F("Не готовы: {0} (СТАРТ можно)", notReady)
-                        : Loc.Tr("Все готовые — можно стартовать"), SupcomUi.WarnYellow);
-                }
+                SetHint(reason ?? Loc.Tr("Все готовы — можно стартовать"),
+                    reason != null ? SupcomUi.TextDim : SupcomUi.WarnYellow);
             }
             else
             {

@@ -582,6 +582,31 @@ namespace SupremeNuclear
             Broadcast();
         }
 
+        /// <summary>Хост занимает слот сам (столбец «Занять», плейтест
+        /// 2026-11-07: «логика занятия слотов не работает» — хост-ветка
+        /// перезаписывалась готовностью мимо открытого слота): открытый —
+        /// сесть, ИИ — сесть вместо ИИ. Прежний слот хоста → Открыт.</summary>
+        internal static void SeatHostAt(int armyId)
+        {
+            if (!Hosting || State == null || State.status != LobbyState.StatusWaiting)
+                return;
+            LobbyState.Army target = State.armies.Find(a => a.id == armyId);
+            if (target == null ||
+                (target.controller != LobbyState.CtrlOpen && target.controller != LobbyState.CtrlAi))
+                return;
+            int hostId = HostIndex();
+            foreach (LobbyState.Army a in State.armies)
+                if (a.controller == LobbyState.CtrlHuman && a.humanId == hostId && a.id != armyId)
+                {
+                    a.controller = LobbyState.CtrlOpen; // один человек — один слот
+                    a.humanId = -1;
+                }
+            target.controller = LobbyState.CtrlHuman;
+            target.humanId = hostId;
+            Log.Info($"SnLobby: хост пересел в слот {armyId}");
+            Broadcast();
+        }
+
         /// <summary>Хост не усажен в слот (Broadcast шёл до auth LocalPlayer)? —
         /// пересадка и пересылка. Чинит «?» вместо ника хоста в столе.</summary>
         internal static void EnsureHostSeated()
@@ -821,6 +846,12 @@ namespace SupremeNuclear
             string invalid = LobbyState.ValidateForLaunch(State);
             if (invalid != null)
                 return Loc.F("План армий некорректен: {0}", invalid);
+            // СТАРТ ждёт «Готов» от всех сидящих людей (решение юзера 2026-11-07 —
+            // смена прежнего канона «хост вольен», §12-64д): флаг готовности
+            // реальный гейт, хост своего «Готова» не требует.
+            string notReady = NotReadyNames();
+            if (notReady != null)
+                return Loc.F("Не готовы: {0} — пусть нажмут «Готов»", notReady);
             return null;
         }
 
