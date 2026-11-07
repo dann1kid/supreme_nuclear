@@ -34,7 +34,14 @@ namespace SupremeNuclear
             public object rallyDepot;       // депо, которому ралли уже выставлено
             public bool energyStall;        // гистерезис энергосталла (M28-паттерн)
             public float defendAt;          // троттл реакции гарнизона на угрозу
+            public float econGuardAt;       // троттл скана рейдов по экономике (§12-49)
+            public float retreatCheckAt;    // троттл проверки потерь волны
             public GlobalPosition? reclaimPos; // стабильная цель сбора обломков
+            // Профиль пресета этой армии (aiType лобби); null — до ленивой загрузки.
+            public AiProfile profile;
+            // Волна в поле: состав и начальный размер — отступление при потерях.
+            public readonly List<Unit> waveUnits = new List<Unit>();
+            public int waveInitial;
             // Событийная телеметрия (лог «что изменилось», 2026-10-30): прошлые
             // значения счётчиков — изменение печатается сразу, не снапшотом.
             public int prevEngineers = -1, prevCombat = -1, prevDepots = -1, prevFree = -1;
@@ -44,8 +51,12 @@ namespace SupremeNuclear
         private static readonly List<FactionHQ> DeadHqs = new List<FactionHQ>();
         private static readonly List<Unit> Engineers = new List<Unit>();
         private static readonly List<Unit> Combat = new List<Unit>();
+        private static readonly List<Unit> Ships = new List<Unit>();
         private static readonly List<Unit> WavePool = new List<Unit>();
+        private static readonly List<Unit> EcoBuf = new List<Unit>();
         private static readonly List<VehicleDepot> Depots = new List<VehicleDepot>();
+        private static readonly Dictionary<string, AiProfile> ProfileCache =
+            new Dictionary<string, AiProfile>();
         private static AiProfile _profile;
         private static float _nextTick;
 
@@ -55,8 +66,11 @@ namespace SupremeNuclear
             DeadHqs.Clear();
             Engineers.Clear();
             Combat.Clear();
+            Ships.Clear();
             WavePool.Clear();
+            EcoBuf.Clear();
             Depots.Clear();
+            ProfileCache.Clear();
             _profile = null;
             _nextTick = 0f;
         }
@@ -94,7 +108,7 @@ namespace SupremeNuclear
                 return;
 
             if (_profile == null)
-                _profile = AiProfile.Load();
+                _profile = AiProfile.Load("commander");
             if (!_profile.enabled)
                 return;
             if (Time.time < _nextTick)
@@ -123,6 +137,14 @@ namespace SupremeNuclear
                     };
                     States[hq] = st;
                 }
+                // Профиль пресета армии (aiType лобби, §12-49): лениво, с кэшем —
+                // файл читается один раз на тип за миссию.
+                if (st.profile == null)
+                {
+                    string type = AiTypeOfArmy(hq);
+                    if (!ProfileCache.TryGetValue(type, out st.profile))
+                        ProfileCache[type] = st.profile = AiProfile.Load(type);
+                }
                 RunFaction(hq, st);
             }
 
@@ -136,6 +158,10 @@ namespace SupremeNuclear
 
         private static void RunFaction(FactionHQ hq, State st)
         {
+            // Профиль фракции в статик: все Run* читают _profile —
+            // каждый AI играет СВОИМ пресетом (aiType лобби, §12-49).
+            _profile = st.profile ?? _profile ?? AiProfile.Load("commander");
+
             // База фракции — АЭРОДРОМ миссии (GlobalPosition, floating-safe):
             // позиция сценского HQ ненадёжна (нативный код возвращает её после
             // телепортов — плейтесты 2026-10-30: HQ-спам в логе).
@@ -143,10 +169,12 @@ namespace SupremeNuclear
             if (basePos == null)
                 return;
 
-            // Сбор своих: инженеры / боевые / депо — один проход по реестру.
+            // Сбор своих: инженеры / боевые / флот / депо / эко-здания — один проход.
             Engineers.Clear();
             Combat.Clear();
+            Ships.Clear();
             Depots.Clear();
+            EcoBuf.Clear();
             AirBuf.Clear();
             int powers = 0;
             foreach (Unit unit in UnitRegistry.allUnits)
@@ -161,8 +189,12 @@ namespace SupremeNuclear
                     AirBuf.Add(unit);
                 else if (unit is GroundVehicle)
                     Combat.Add(unit);
+                else if (unit is Ship)
+                    Ships.Add(unit);
                 if (unit is VehicleDepot depot && depot != null)
                     Depots.Add(depot);
+                else if (unit is Building && !(unit is VehicleDepot))
+                    EcoBuf.Add(unit); // точки экономики (месы/генераторы) — скан рейдов
                 if (EconomyService.IsGenerator(unit))
                     powers++;
             }
@@ -223,7 +255,7 @@ namespace SupremeNuclear
             Vector3 bp = basePos.Value.ToLocalPosition();
             RunEconomy(hq, st, bp, Engineers, powers, Depots.Count > 0);
             RunProduction(hq, st, bp, Depots);
-            RunWaves(hq, st, bp, Combat);
+            RunWaves(hq, st, bp, Combat, Ships);
             RunAir(hq, st, bp, AirBuf);
         }
 
@@ -342,6 +374,20 @@ namespace SupremeNuclear
             return true; // фракция не из плана (нативные) — старое поведение
         }
 
+        /// <summary>aiType слота армии этого HQ («commander» вне лобби/без слота) —
+        /// пресет профиля AI/&lt;type&gt;.json. Зеркало IsAiArmy по поиску.</summary>
+        private static string AiTypeOfArmy(FactionHQ hq)
+        {
+            var state = SnLobbyService.State;
+            if (state?.armies == null || hq.faction == null)
+                return "commander";
+            string name = hq.faction.factionName;
+            foreach (LobbyState.Army a in state.armies)
+                if (FactionFactory.ArmyName(a.id) == name)
+                    return string.IsNullOrEmpty(a.aiType) ? "commander" : a.aiType;
+            return "commander";
+        }
+
         /// <summary>Союзная ли армия с армией AI (лобби v3: команда-союз).
         /// Вне SN-лобби всегда false — все чужие HQ враждебны.</summary>
         private static bool AlliedWith(FactionHQ a, FactionHQ b)
@@ -380,14 +426,18 @@ namespace SupremeNuclear
         }
 
         private static AircraftDefinition _fighterDef;
+        private static string _fighterDefKey;
 
         /// <summary>Борт авиакрыла: jsonKey профиля либо САМЫЙ ДЕШЁВЫЙ допустимый
         /// (IsAllowed(false) — ивентовый UFO Spawner молча режет) из каталога
-        /// ангаров своей базы. Ролей у самолётов нет — один универсал.</summary>
+        /// ангаров своей базы. Ролей у самолётов нет — один универсал. Кэш
+        /// ключуется jsonKey профиля: у разных пресетов (aiType) разные борта.</summary>
         private static AircraftDefinition FighterDefinition(Airbase airbase)
         {
-            if (_fighterDef != null)
+            if (_fighterDef != null && _fighterDefKey == _profile.fighterJsonKey)
                 return _fighterDef;
+            _fighterDefKey = _profile.fighterJsonKey;
+            _fighterDef = null;
             if (!string.IsNullOrEmpty(_profile.fighterJsonKey) && Encyclopedia.i?.aircraft != null)
                 foreach (AircraftDefinition a in Encyclopedia.i.aircraft)
                     if (a != null && a.jsonKey == _profile.fighterJsonKey)
@@ -606,14 +656,40 @@ namespace SupremeNuclear
             tier < 3 && !upgrading && engineers >= engineersMin &&
             nextTierMass > 0f && funds >= nextTierMass * 2f;
 
-        /// <summary>Волны: стоящие у сбора боевые сверх гарнизона идут на базу
-        /// противника (по достижении нативный CheckObstacles сам ведёт в бой).</summary>
-        private static void RunWaves(FactionHQ hq, State st, Vector3 basePos, List<Unit> combat)
+        /// <summary>Волны: стоящие у сбора боевые (и корабли — по флагу профиля,
+        /// руление флота нативное) сверх гарнизона идут на базу противника (по
+        /// достижении нативный CheckObstacles сам ведёт в бой). Волна в поле
+        /// трекается: потеряла больше (1 − retreatAliveFrac) — остатки отступают
+        /// к базе (§12-49, боевая реакция v2).</summary>
+        private static void RunWaves(FactionHQ hq, State st, Vector3 basePos,
+            List<Unit> combat, List<Unit> ships)
         {
             GlobalPosition? enemyBase = EnemyBasePosOf(hq);
             if (enemyBase == null)
                 return;
             Vector3 enemyPos = enemyBase.Value.ToLocalPosition();
+
+            // Отступление волны (троттл 5 с): живых меньше retreatAliveFrac от
+            // начального состава — survivors возвращаются (мёртвые из списка уходят).
+            if (st.waveUnits.Count > 0 && Time.time >= st.retreatCheckAt)
+            {
+                st.retreatCheckAt = Time.time + 5f;
+                for (int i = st.waveUnits.Count - 1; i >= 0; i--)
+                    if (st.waveUnits[i] == null || st.waveUnits[i].disabled)
+                        st.waveUnits.RemoveAt(i);
+                if (st.waveInitial > 0 &&
+                    st.waveUnits.Count < st.waveInitial * _profile.retreatAliveFrac)
+                {
+                    Log.Info($"AI-событие: волна обескровлена " +
+                             $"({st.waveUnits.Count}/{st.waveInitial}) — отступление к базе");
+                    foreach (Unit unit in st.waveUnits)
+                        unit.GetComponent<UnitCommand>()?.SetDestination(
+                            basePos.ToGlobalPosition(), false);
+                    st.waveUnits.Clear();
+                    st.waveInitial = 0;
+                    st.nextWaveAt = Time.time + _profile.waveIntervalSec;
+                }
+            }
 
             WavePool.Clear();
             foreach (Unit unit in combat)
@@ -627,10 +703,25 @@ namespace SupremeNuclear
                 if (idle && nearGather)
                     WavePool.Add(unit);
             }
+            if (_profile.fleetsInWaves && ships != null)
+                foreach (Unit unit in ships)
+                {
+                    if (unit == null)
+                        continue;
+                    Vector3 pos = unit.transform.position;
+                    bool idle = unit.rb != null && unit.rb.velocity.sqrMagnitude < 4f;
+                    bool nearGather = (pos - basePos).sqrMagnitude <
+                                      _profile.gatherRadiusM * _profile.gatherRadiusM;
+                    if (idle && nearGather)
+                        WavePool.Add(unit);
+                }
 
             if (!WaveDue(WavePool.Count, _profile.waveSize, _profile.garrisonSize,
                     Time.time, st.nextWaveAt))
+            {
+                RunEconGuard(hq, st, basePos);
                 return;
+            }
 
             // Адаптация Moho PickBestAttackVector/LeastDefended (OpenSupCom, MIT):
             // волна не бьётся в оборону заведомо сильнее себя — при перевесе врага
@@ -652,14 +743,17 @@ namespace SupremeNuclear
             }
 
             int sent = 0;
+            st.waveUnits.Clear();
             foreach (Unit unit in WavePool)
             {
                 if (WavePool.Count - sent <= _profile.garrisonSize)
                     break; // последние garrisonSize остаются гарнизоном
                 unit.GetComponent<UnitCommand>()?.SetDestination(
                     target.ToGlobalPosition(), false);
+                st.waveUnits.Add(unit);
                 sent++;
             }
+            st.waveInitial = st.waveUnits.Count;
 
             if (sent > 0)
             {
@@ -684,6 +778,47 @@ namespace SupremeNuclear
                     foreach (Unit unit in WavePool)
                         unit.GetComponent<UnitCommand>()?.SetDestination(
                             threat.transform.position.ToGlobalPosition(), false);
+            }
+
+            RunEconGuard(hq, st, basePos);
+        }
+
+        /// <summary>Охрана экономики (§12-49, боевая реакция v2): рейд игрока
+        /// за пределами гарнизона — враг рядом со СВОЕЙ точкой экономики (дальше
+        /// econGuardMinDistM от базы: близкие уже под гарнизон-реакцией) →
+        /// до econGuardMaxUnits стоящих боевых из сбора выдвигаются на угрозу.
+        /// Троттл econGuardScanSec. Игроку это читается как «ИИ защищает мексы».</summary>
+        private static void RunEconGuard(FactionHQ hq, State st, Vector3 basePos)
+        {
+            if (Time.time < st.econGuardAt)
+                return;
+            st.econGuardAt = Time.time + _profile.econGuardScanSec;
+            foreach (Unit eco in EcoBuf)
+            {
+                if (eco == null || eco.disabled)
+                    continue;
+                Vector3 ep = eco.transform.position;
+                float minDistSq = _profile.econGuardMinDistM * _profile.econGuardMinDistM;
+                if ((ep - basePos).sqrMagnitude < minDistSq)
+                    continue; // у базы — гарнизон-реакция не дублируется
+                Unit threat = NearestEnemyUnit(hq, ep, _profile.econGuardRadiusM);
+                if (threat == null)
+                    continue;
+                int sent = 0;
+                foreach (Unit unit in WavePool)
+                {
+                    if (sent >= _profile.econGuardMaxUnits)
+                        break;
+                    if (st.waveUnits.Contains(unit))
+                        continue; // волна в поле — её не отзываем на охрану
+                    unit.GetComponent<UnitCommand>()?.SetDestination(
+                        threat.transform.position.ToGlobalPosition(), false);
+                    sent++;
+                }
+                if (sent > 0)
+                    Log.Info($"AI-событие: рейд на экономику ({ep.x:F0},{ep.z:F0}) — " +
+                             $"перехват {sent} юнитов");
+                return; // одна точка за скан — следующий тик возьмёт следующую
             }
         }
 

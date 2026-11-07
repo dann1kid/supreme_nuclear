@@ -427,7 +427,9 @@ namespace SupremeNuclear
             _ctxArmyId = armyId;
 
             var observers = LobbyState.Observers(SnLobbyService.State);
-            int itemCount = 3 + (observers.Count > 0 ? 1 + observers.Count : 0);
+            LobbyState.Army menuArmy = SnLobbyService.State.armies.Find(x => x.id == armyId);
+            bool isAiSlot = menuArmy != null && menuArmy.controller == LobbyState.CtrlAi;
+            int itemCount = 3 + (isAiSlot ? 1 : 0) + (observers.Count > 0 ? 1 + observers.Count : 0);
             float w = 240f, h = itemCount * 30f + 10f;
             _ctxMenu = Panel("ctxMenu", _canvas.transform, new Vector2(0f, 0f), new Vector2(0f, 0f),
                 Vector2.zero, new Vector2(w, h), SupcomUi.PanelBg);
@@ -455,6 +457,15 @@ namespace SupremeNuclear
             iy += 30f;
             MenuItem(Loc.Tr("ИИ-командир"), () => { SnLobbyService.SetArmyController(armyId, LobbyState.CtrlAi); CloseContextMenu(); }, iy);
             iy += 30f;
+            if (isAiSlot)
+            {
+                // Цикл пресета ИИ (§12-49): Стандарт → Лёгкий → Жёсткий →
+                // Экономист → Агрессор → …; aiType уходит гостям с Broadcast.
+                string cur = string.IsNullOrEmpty(menuArmy.aiType) ? "commander" : menuArmy.aiType;
+                MenuItem(Loc.F("Профиль ИИ: {0}", AiProfile.LabelOf(cur)),
+                    () => { SnLobbyService.CycleAiType(armyId); CloseContextMenu(); }, iy);
+                iy += 30f;
+            }
             if (observers.Count > 0)
             {
                 var hdr = Label(_ctxMenu, "ctxHdr", Loc.Tr("Назначить наблюдателя:"), 12,
@@ -560,7 +571,10 @@ namespace SupremeNuclear
                 if (!inPool)
                     continue;
                 string who = a.controller == LobbyState.CtrlHuman ? HumanName(state, a.humanId)
-                    : a.controller == LobbyState.CtrlAi ? Loc.Tr("ИИ") : "";
+                    : a.controller == LobbyState.CtrlAi
+                        ? Loc.F("ИИ · {0}", AiProfile.LabelOf(
+                            string.IsNullOrEmpty(a.aiType) ? "commander" : a.aiType))
+                    : "";
                 // Столбцы: 0 № позиции | 1 Ник (меню) | 2 Команда | 3 Цвет |
                 // 4 Игрок + «Готов» (синк перед стартом).
                 bool seatedReady = a.controller == LobbyState.CtrlHuman && SeatReady(state, a.humanId);

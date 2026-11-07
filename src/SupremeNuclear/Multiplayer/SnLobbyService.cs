@@ -565,6 +565,23 @@ namespace SupremeNuclear
             Broadcast();
         }
 
+        /// <summary>Хост циклит профиль ИИ-слота (aiType → AI/&lt;type&gt;.json,
+        /// §12-49): пресеты AiProfile.Types. В миссию aiType не запекается
+        /// (только поведение AI) — регенерация карты не нужна.</summary>
+        internal static void CycleAiType(int armyId)
+        {
+            if (!Hosting || State == null || State.status != LobbyState.StatusWaiting)
+                return;
+            LobbyState.Army a = State.armies.Find(x => x.id == armyId);
+            if (a == null || a.controller != LobbyState.CtrlAi)
+                return;
+            string cur = string.IsNullOrEmpty(a.aiType) ? "commander" : a.aiType;
+            int idx = System.Array.IndexOf(AiProfile.Types, cur);
+            a.aiType = AiProfile.Types[(idx + 1) % AiProfile.Types.Length];
+            Log.Info($"SnLobby: профиль ИИ слота {armyId} → {a.aiType}");
+            Broadcast();
+        }
+
         /// <summary>Хост не усажен в слот (Broadcast шёл до auth LocalPlayer)? —
         /// пересадка и пересылка. Чинит «?» вместо ника хоста в столе.</summary>
         internal static void EnsureHostSeated()

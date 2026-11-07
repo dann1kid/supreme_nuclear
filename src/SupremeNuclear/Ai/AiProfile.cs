@@ -53,33 +53,122 @@ namespace SupremeNuclear
         public float airStrikeIntervalSec = 240f;
         public int airStrikeSize = 2;       // бортов в авиаударе по экономике
 
-        public static AiProfile Load()
+        // Боевая реакция v2 (§12-49, v0.160): защита экономики и отступление волн.
+        public float econGuardRadiusM = 1400f; // враг ближе к своей точке экономики — перехват гарнизоном дальних точек
+        public float econGuardScanSec = 8f;    // троттл скана рейдов (пойдя по всем своим зданиям)
+        public float econGuardMinDistM = 1200f; // точки ближе к базе уже под гарнизоном — не дублируем реакцию
+        public int econGuardMaxUnits = 3;      // сколько стоящих юнитов посылать на перехват
+        public float retreatAliveFrac = 0.35f; // волна потеряла больше (1 − frac) — остатки отступают к базе
+        public bool fleetsInWaves = false;     // корабли в волнах (руление флота нативное; эксперимент — плейтеста не было)
+
+        /// <summary>Пресеты лобби (aiType слота, DESIGN §2.12 ветки 2–3): файл
+        /// AI/&lt;type&gt;.json, «commander» — базовый. Значения — осознанные
+        /// пресеты сложности/доктрины, тюнятся игроком правкой JSON (§7.11).</summary>
+        public static readonly string[] Types =
         {
+            "commander", "commander-easy", "commander-hard",
+            "commander-econ", "commander-rush"
+        };
+
+        /// <summary>Метка пресета для UI лобби (контекст-меню ИИ-слота).</summary>
+        public static string LabelOf(string type)
+        {
+            switch (type)
+            {
+                case "commander-easy": return Loc.Tr("Лёгкий");
+                case "commander-hard": return Loc.Tr("Жёсткий");
+                case "commander-econ": return Loc.Tr("Экономист");
+                case "commander-rush": return Loc.Tr("Агрессор");
+                default: return Loc.Tr("Стандарт");
+            }
+        }
+
+        /// <summary>Профиль пресета: AI/&lt;type&gt;.json; нет файла — дефолты
+        /// класса С ЗНАЧЕНИЯМИ ПРЕСЕТА (образцы файлов создаются на диск, чтобы
+        /// игрок видел и правил все пресеты). Неизвестный тип — commander.json.</summary>
+        public static AiProfile Load(string type)
+        {
+            if (string.IsNullOrEmpty(type) || System.Array.IndexOf(Types, type) < 0)
+                type = "commander";
+            AiProfile profile = PresetDefaults(type);
             string dir = Path.Combine(Paths.PluginPath, "SupremeNuclear", "AI");
-            string path = Path.Combine(dir, "commander.json");
+            string path = Path.Combine(dir, type + ".json");
             try
             {
                 if (File.Exists(path))
                 {
-                    var profile = JsonConvert.DeserializeObject<AiProfile>(File.ReadAllText(path));
-                    if (profile != null)
+                    var loaded = JsonConvert.DeserializeObject<AiProfile>(File.ReadAllText(path));
+                    if (loaded != null)
                     {
                         Log.Info("AI: профиль загружен — " + path);
-                        return profile;
+                        return loaded;
                     }
                 }
-
-                var fallback = new AiProfile();
                 Directory.CreateDirectory(dir);
-                File.WriteAllText(path, JsonConvert.SerializeObject(fallback, Formatting.Indented));
-                Log.Info("AI: профиль не найден, создан образец с дефолтами — " + path);
-                return fallback;
+                File.WriteAllText(path, JsonConvert.SerializeObject(profile, Formatting.Indented));
+                Log.Info("AI: профиль '" + type + "' не найден — создан образец пресета: " + path);
+                return profile;
             }
             catch (System.Exception e)
             {
-                Log.Warn("AI: профиль не прочитан (" + e.Message + ") — работаю на дефолтах");
-                return new AiProfile();
+                Log.Warn("AI: профиль '" + type + "' не прочитан (" + e.Message + ") — пресет-дефолты");
+                return profile;
             }
+        }
+
+        /// <summary>Значения-пресеты по типу (осознанные, не «все дефолты»):
+        /// сложность = темп решений/экономики/волн; доктрина = вес эко против атаки.</summary>
+        private static AiProfile PresetDefaults(string type)
+        {
+            var p = new AiProfile();
+            switch (type)
+            {
+                case "commander-easy": // лёгкий: медленный, экономит меньше, волн редко
+                    p.tickSec = 1.5f;
+                    p.maxQueue = 2;
+                    p.extractorsTarget = 2;
+                    p.powersInitial = 1;
+                    p.waveSize = 8;
+                    p.waveIntervalSec = 300f;
+                    p.garrisonSize = 3;
+                    p.airCap = 2;
+                    p.airStrikeIntervalSec = 360f;
+                    break;
+                case "commander-hard": // жёсткий: быстрый темп, ранние частые волны
+                    p.tickSec = 0.5f;
+                    p.maxQueue = 4;
+                    p.extractorsTarget = 4;
+                    p.powersInitial = 3;
+                    p.waveSize = 5;
+                    p.waveIntervalSec = 150f;
+                    p.garrisonSize = 2;
+                    p.airCap = 6;
+                    p.airStrikeIntervalSec = 180f;
+                    break;
+                case "commander-econ": // «Экономист» (§2.12 ветка 2): эко-приоритет, поздние волны
+                    p.tickSec = 0.75f;
+                    p.extractorsTarget = 5;
+                    p.powersInitial = 3;
+                    p.powersPerWave = 2;
+                    p.waveSize = 8;
+                    p.waveIntervalSec = 300f;
+                    p.garrisonSize = 3;
+                    p.engineersMin = 3;
+                    p.airCap = 4;
+                    break;
+                case "commander-rush": // «Агрессор» (§2.12 ветка 3): ранние мелкие волны, малый гарнизон
+                    p.tickSec = 0.5f;
+                    p.extractorsTarget = 2;
+                    p.powersInitial = 1;
+                    p.maxQueue = 3;
+                    p.waveSize = 4;
+                    p.waveIntervalSec = 120f;
+                    p.garrisonSize = 1;
+                    p.airCap = 2;
+                    p.airStrikeIntervalSec = 200f;
+                    break;
+            }
+            return p;
         }
 
         /// <summary>Сохранить профиль (тумблер «AI-командир» панели Скримиша).
