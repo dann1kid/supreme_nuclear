@@ -360,16 +360,12 @@ namespace SupremeNuclear
                         ShowContextMenu(armyId, cellRt);
                         break;
                     case 4:
-                        // Бинарный столбец «Занять/Готов» только для СВОЕГО
-                        // игрока (плейтест: чужая готовность не правится):
-                        // открытый — занять, свой слот — своя готовность;
-                        // чужие строки — только отображение.
-                        if (seat == null)
-                            break;
-                        if (seat.controller == LobbyState.CtrlOpen)
-                            SnLobbyService.SeatHostAt(armyId);
-                        else if (seat.controller == LobbyState.CtrlHuman &&
-                                 seat.humanId == SnLobbyService.LocalPlayerIndex())
+                        // Столбец «Готов» — БИНАРНЫЙ и только СВОЙ: кликает лишь
+                        // игрок, подтверждающий СВОЮ готовность (юзер 2026-11-07:
+                        // ИИ готовность не требует, чужие не правятся). Занятие
+                        // открытых слотов — меню (хост) / клик по строке (гость).
+                        if (seat != null && seat.controller == LobbyState.CtrlHuman &&
+                            seat.humanId == SnLobbyService.LocalPlayerIndex())
                             SnLobbyService.ToggleHostReady();
                         break;
                     case 2: SnLobbyService.CycleTeam(armyId); break;
@@ -380,11 +376,11 @@ namespace SupremeNuclear
             {
                 if (seat == null)
                     return;
-                if (seat.controller == LobbyState.CtrlOpen && (col == 1 || col == 4))
-                    SnLobbyService.RequestTakeSlot(armyId); // занять слот
+                if (seat.controller == LobbyState.CtrlOpen && col == 1)
+                    SnLobbyService.RequestTakeSlot(armyId); // занять слот (по строке)
                 if (col == 4 && seat.controller == LobbyState.CtrlHuman &&
                     seat.humanId == SnLobbyService.LocalPlayerIndex())
-                    SnLobbyService.ToggleReady(); // свой «Готов» кликом по столбцу
+                    SnLobbyService.ToggleReady(); // свой «Готов» — только свой
             }
         }
 
@@ -621,18 +617,17 @@ namespace SupremeNuclear
                     a.controller == LobbyState.CtrlOpen && !_hostMode ? SupcomUi.Accent : SupcomUi.TextMain);
                 SetCell(b[2], "Кмд " + a.team, _hostMode, SupcomUi.TextMain);
                 SetCell(b[3], "■", _hostMode, FactionFactory.Palette[((a.colorIdx % 4) + 4) % 4]);
-                string readyCell = a.controller == LobbyState.CtrlHuman
-                    ? (seatedReady ? Loc.Tr("✓ готов") : Loc.Tr("не готов"))
-                    : a.controller == LobbyState.CtrlAi ? Loc.Tr("—")
-                    : Loc.Tr("Занять");
-                // Столбец «Занять/Готов» кликабелен ТОЛЬКО для открытого слота
-                // и СВОЕЙ строки (плейтест 2026-11-07: бинарный, чужая
-                // готовность не правится).
+                // Столбец «Готов»: текст — только готовность сидящего человека;
+                // ИИ и открытые слоты — «—» (готовность не требуется). Кликабелен
+                // ТОЛЬКО свой сидящий слот (бинарный тумблер, юзер 2026-11-07).
                 bool ownSeat = a.controller == LobbyState.CtrlHuman &&
                                a.humanId == SnLobbyService.LocalPlayerIndex();
-                SetCell(b[4], readyCell, a.controller == LobbyState.CtrlOpen || ownSeat,
+                string readyCell = a.controller == LobbyState.CtrlHuman
+                    ? (seatedReady ? Loc.Tr("✓ готов") : Loc.Tr("не готов"))
+                    : Loc.Tr("—");
+                SetCell(b[4], readyCell, ownSeat,
                     seatedReady ? SupcomUi.BtnActive
-                    : a.controller == LobbyState.CtrlOpen && !_hostMode ? SupcomUi.Accent : SupcomUi.TextDim);
+                    : ownSeat ? SupcomUi.TextMain : SupcomUi.TextDim);
             }
 
             bool waiting = state.status == LobbyState.StatusWaiting;
@@ -660,7 +655,7 @@ namespace SupremeNuclear
                         me = m;
                 if (readyImg != null)
                     readyImg.color = me != null && me.ready ? SupcomUi.BtnActive : SupcomUi.BtnBg;
-                SetHint(Loc.Tr("Возьми открытый слот (клик по «Открыт — взять») и жми «Готов». «×» прячет панель. Асы-лётчики присоединяются после старта."), SupcomUi.TextDim);
+                SetHint(Loc.Tr("Возьми открытый слот (клик по его строке) и жми «Готов». «×» прячет панель. Асы-лётчики присоединяются после старта."), SupcomUi.TextDim);
             }
         }
 
