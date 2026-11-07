@@ -133,6 +133,8 @@ namespace SupremeNuclear
 
             State = new LobbyState { armies = LobbyState.ArmiesForPool(2) }; // дефолт-пул 2
             ReadyIds.Clear();
+            ChatLines.Clear(); // журнал прошлой комнаты не тащим
+            ChatVersion++;
             Log.Info($"SnLobby: хостинг комнаты — '{lobbyName}', слотов {slots}, " +
                      $"{(hasPassword ? "с паролем" : "без пароля")}, {visibility}");
             var options = new HostOptions(SocketType.Steam, GameState.ServerWaiting, MapLoader.Empty)
@@ -318,11 +320,137 @@ namespace SupremeNuclear
             nm.Client.Send(new SnLobbyMessage { Json = request.ToJson() });
         }
 
+        // ---------- чат комнаты (§12-64е) ----------
+
+        /// <summary>Локальный журнал строк чата (живёт у каждого клиента;
+        /// в состояние лобби НЕ входит — Broadcast его не таскает).</summary>
+        internal static readonly List<string> ChatLines = new List<string>();
+        /// <summary>Растёт на каждую новую строку — панель сравнением видит свежак.</summary>
+        internal static int ChatVersion;
+        private const int ChatCap = 80;
+
+        /// <summary>Отправка строки: хост — себе + всем (от себя); гость — запрос
+        /// хосту, раздачу ведёт хост (имя автора проставляет хост по auth).</summary>
+        internal static void SendChat(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return;
+            var nm = NetworkManagerNuclearOption.i;
+            if (nm == null)
+                return;
+            string clean = text.Trim().SanitizeRichText(200);
+            if (Hosting)
+            {
+                string from = LocalName();
+                AppendChat(from, clean);
+                if (nm.Server != null && nm.Server.Active)
+                    nm.Server.SendToAll(
+                        new SnLobbyMessage { Json = new LobbyRequest
+                            { req = LobbyRequest.Chat, from = from, text = clean }.ToJson() },
+                        authenticatedOnly: true, excludeLocalPlayer: true);
+            }
+            else
+                SendRequest(new LobbyRequest { req = LobbyRequest.Chat, text = clean });
+        }
+
+        private static void AppendChat(string from, string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return;
+            ChatLines.Add((string.IsNullOrWhiteSpace(from) ? "?" : from) + ": " + text);
+            if (ChatLines.Count > ChatCap)
+                ChatLines.RemoveRange(0, ChatLines.Count - ChatCap);
+            ChatVersion++;
+        }
+
+        /// <summary>Ник локального игрока (по member-списку состояния).</summary>
+        private static string LocalName()
+        {
+            int id = LocalPlayerIndex();
+            if (State != null)
+                foreach (LobbyState.Member m in State.members)
+                    if (m.id == id)
+                        return m.name;
+            return id == HostIndex() ? Loc.Tr("хост") : "Player " + id;
+        }
+
+        /// <summary>Живые люди в слотах, не нажавшие «Готов» (предупреждение
+        /// хосту перед СТАРТОМ; канон SupCom — СТАРТ не блокируется, §12-64д).</summary>
+        internal static string NotReadyNames()
+        {
+            if (!Hosting || State == null || State.status != LobbyState.StatusWaiting)
+                return null;
+            var names = new List<string>();
+            foreach (LobbyState.Army a in State.armies)
+                if (a.controller == LobbyState.CtrlHuman && a.humanId >= 0 &&
+                    a.humanId != HostIndex() && !ReadyIds.Contains(a.humanId))
+                    names.Add(HumanNameById(a.humanId));
+            return names.Count > 0 ? string.Join(", ", names) : null;
+        }
+
+        private static string HumanNameById(int id)
+        {
+            if (State != null)
+                foreach (LobbyState.Member m in State.members)
+                    if (m.id == id)
+                        return m.name;
+            return "Player " + id;
+        }
+
+        /// <summary>Пересадка человека хостом (drag-assign, §12-64а): в открытый
+        /// слот — сесть, на ИИ — высадить ИИ в освободившийся, к человеку —
+        /// обмен слотами. Закрытый слот — no-op.</summary>
+        internal static void MovePlayer(int fromArmyId, int toArmyId)
+        {
+            if (!Hosting || State == null || fromArmyId == toArmyId ||
+                State.status != LobbyState.StatusWaiting)
+                return;
+            LobbyState.Army from = State.armies.Find(a => a.id == fromArmyId);
+            LobbyState.Army to = State.armies.Find(a => a.id == toArmyId);
+            if (from == null || to == null || to.controller == LobbyState.CtrlClosed ||
+                from.controller != LobbyState.CtrlHuman)
+                return;
+            int mover = from.humanId;
+            if (to.controller == LobbyState.CtrlOpen)
+            {
+                to.controller = LobbyState.CtrlHuman;
+                to.humanId = mover;
+                from.controller = LobbyState.CtrlOpen;
+                from.humanId = -1;
+            }
+            else if (to.controller == LobbyState.CtrlAi)
+            {
+                to.controller = LobbyState.CtrlHuman;
+                to.humanId = mover;
+                from.controller = LobbyState.CtrlAi;
+                from.humanId = -1;
+            }
+            else
+            {
+                int other = to.humanId;
+                to.humanId = mover;
+                from.humanId = other; // человек ↔ человек: обмен слотами
+            }
+            Log.Info($"SnLobby: пересадка хостом — Player {mover}: слот {fromArmyId} → {toArmyId}");
+            Broadcast();
+        }
+
         /// <summary>Хендлер гостя: снапшот состояния; карта/армии изменились —
         /// перегенерация локально (превью + мгновенная загрузка; HQ — scene-
-        /// объекты карты, набор обязан совпасть с хостом).</summary>
+        /// объекты карты, набор обязан совпасть с хостом). JSON чат-рассылки
+        /// (req=chat) — отдельный путь: журнал локально, состояние не трогаем.</summary>
         internal static void OnClientLobbyMessage(SnLobbyMessage message)
         {
+            if (!string.IsNullOrEmpty(message.Json) &&
+                message.Json.Contains("\"req\":\"" + LobbyRequest.Chat + "\""))
+            {
+                LobbyRequest chat = LobbyRequest.FromJson(message.Json);
+                if (chat != null && chat.req == LobbyRequest.Chat)
+                {
+                    AppendChat(chat.from, chat.text);
+                    return;
+                }
+            }
             LobbyState state = LobbyState.FromJson(message.Json);
             if (state == null)
                 return;
@@ -387,6 +515,24 @@ namespace SupremeNuclear
                     else
                         ReadyIds.Remove(id);
                     break;
+                case LobbyRequest.Chat:
+                {
+                    string text = (req.text ?? "").Trim();
+                    if (text.Length == 0)
+                        return; // пустую строку не ретранслируем и не журналируем
+                    string from = null;
+                    try { from = player.GetAuthData().ClientReportedSteamName; }
+                    catch (System.Exception) { }
+                    from = string.IsNullOrWhiteSpace(from) ? "Player " + id : from.SanitizeRichText(64);
+                    AppendChat(from, text.SanitizeRichText(200));
+                    // Ретрансляция ВСЕМ включая автора: гость слал запрос — его
+                    // локального журнала эта строка ещё не касается.
+                    NetworkManagerNuclearOption.i.Server.SendToAll(
+                        new SnLobbyMessage { Json = new LobbyRequest
+                            { req = LobbyRequest.Chat, from = from, text = text }.ToJson() },
+                        authenticatedOnly: true, excludeLocalPlayer: false);
+                    return; // чат не в состоянии — Broadcast не нужен
+                }
             }
             Broadcast();
         }
@@ -742,6 +888,8 @@ namespace SupremeNuclear
         {
             Log.Info(Hosting ? "SnLobby: роспуск лобби (Stop сервера)"
                              : "SnLobby: выход из лобби (Stop клиента)");
+            ChatLines.Clear(); // журнал комнаты умер вместе с ней
+            ChatVersion++;
             NetworkManagerNuclearOption.i.Stop(setDisconnectReason: false);
         }
     }

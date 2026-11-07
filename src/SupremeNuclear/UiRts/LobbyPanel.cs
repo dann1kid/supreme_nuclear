@@ -53,6 +53,17 @@ namespace SupremeNuclear
         private bool _navWasEnabled = true;
         private float _nextErrLogAt = -10f;
 
+        // Чат комнаты (§12-64е): лог + строка ввода; обновление по ChatVersion.
+        private Text _chatLog;
+        private InputField _chatInput;
+        private int _seenChatVersion = -1;
+
+        // Drag-рассадка (§12-64а): нажатие на ник сидящего человека (хост) —
+        // кандидат драга; > 6 px — призрак следует за курсором, бросок на строку
+        // стола пересаживает. Клик (< 6 px) — прежний путь (контекст-меню).
+        private int _dragArmyId = -1;
+        private Text _dragGhost;
+
         private void Update()
         {
             try
@@ -98,6 +109,7 @@ namespace SupremeNuclear
                 if (SnLobbyService.Hosting)
                     SnLobbyService.EnsureHostSeated(); // «?» вместо ника хоста
                 RefreshTable();
+                RefreshChat();
                 _mapBlock?.RefreshDynamic();
                 _mapBlock?.RefreshGenUi();
                 SyncHostMap();
@@ -225,6 +237,43 @@ namespace SupremeNuclear
                 new Vector2(388f, -650f), new Vector2(712f, -40f), new Color(0f, 0f, 0f, 0f));
             _mapBlock = new MapSetupBlock(this, right, -30f); // ниже кнопки «Победа»
 
+            // Чат комнаты (§12-64е): лог (нижняя треть левой колонки) + строка
+            // ввода с кнопкой отправки. Журнал локальный, приходит ретрансляцией
+            // хоста (req=chat мимо состояния).
+            var chatLog = Label(left, "chatLog", "", 12, SupcomUi.TextMain,
+                TextAnchor.LowerLeft, multiLine: true);
+            var clRt = (RectTransform)chatLog.transform;
+            clRt.anchorMin = new Vector2(0f, 1f);
+            clRt.anchorMax = new Vector2(1f, 1f);
+            clRt.offsetMin = new Vector2(2f, -608f);
+            clRt.offsetMax = new Vector2(-2f, -344f);
+            _chatLog = chatLog;
+            var chatRow = Panel("chatRow", left, new Vector2(0f, 1f), new Vector2(1f, 1f),
+                new Vector2(2f, -648f), new Vector2(-2f, -612f), new Color(0f, 0f, 0f, 0f));
+            var chatGo = new GameObject("chatInput", typeof(RectTransform), typeof(Image), typeof(InputField));
+            var ciRt = (RectTransform)chatGo.transform;
+            ciRt.SetParent(chatRow, false);
+            ciRt.anchorMin = new Vector2(0f, 0f);
+            ciRt.anchorMax = new Vector2(1f, 1f);
+            ciRt.offsetMin = new Vector2(0f, 0f);
+            ciRt.offsetMax = new Vector2(-44f, 0f);
+            chatGo.GetComponent<Image>().color = SupcomUi.BtnBg;
+            _chatInput = chatGo.GetComponent<InputField>();
+            _chatInput.contentType = InputField.ContentType.Standard;
+            _chatInput.caretColor = SupcomUi.Accent;
+            Text chatText = MakeInputText("text", SupcomUi.TextMain, 14);
+            chatText.transform.SetParent(chatGo.transform, false);
+            _chatInput.textComponent = chatText;
+            var chatPh = MakeInputText("ph", SupcomUi.TextDim, 13);
+            chatPh.transform.SetParent(chatGo.transform, false);
+            chatPh.fontStyle = FontStyle.Italic;
+            chatPh.text = Loc.Tr("сообщение (Enter — отправить)");
+            _chatInput.placeholder = chatPh;
+            _clickables.Add(new KeyValuePair<RectTransform, System.Action>(ciRt,
+                () => _chatInput.ActivateInputField()));
+            _chatInput.onSubmit.AddListener(_ => SendChatFromInput());
+            Button_(chatRow, "chatSend", "▶", SendChatFromInput, 15);
+
             // Нижний ряд: СТАРТ/Распустить (хост), Готов/Покинуть (гость).
             _startButton = Button_(_root, "start", Loc.Tr("СТАРТ"), OnStartClicked, 22);
             var sRt = (RectTransform)_startButton.transform;
@@ -296,7 +345,7 @@ namespace SupremeNuclear
                     case 1: ShowContextMenu(armyId, cellRt); break; // ник → меню FAF-стиля
                     case 2: SnLobbyService.CycleTeam(armyId); break;
                     case 3: SnLobbyService.CycleColor(armyId); break;
-                    case 5: SnLobbyService.ToggleSlotReady(armyId); break; // готовность сидящего
+                    case 4: SnLobbyService.ToggleSlotReady(armyId); break; // готовность сидящего
                 }
             }
             else
@@ -304,9 +353,9 @@ namespace SupremeNuclear
                 LobbyState.Army a = SnLobbyService.State?.armies.Find(x => x.id == armyId);
                 if (a == null)
                     return;
-                if (a.controller == LobbyState.CtrlOpen && (col == 1 || col == 5))
+                if (a.controller == LobbyState.CtrlOpen && (col == 1 || col == 4))
                     SnLobbyService.RequestTakeSlot(armyId); // занять слот
-                if (col == 5 && a.controller == LobbyState.CtrlHuman &&
+                if (col == 4 && a.controller == LobbyState.CtrlHuman &&
                     a.humanId == SnLobbyService.LocalPlayerIndex())
                     SnLobbyService.ToggleReady(); // свой «Готов» кликом по столбцу
             }
@@ -331,6 +380,7 @@ namespace SupremeNuclear
         private void Hide()
         {
             CloseContextMenu();
+            EndDrag();
             _root.gameObject.SetActive(false);
             _backdrop.gameObject.SetActive(false);
             if (EventSystem.current != null)
@@ -544,6 +594,15 @@ namespace SupremeNuclear
                 string reason = SnLobbyService.LaunchBlockReason();
                 if (reason != null)
                     SetHint(reason, SupcomUi.TextDim);
+                else
+                {
+                    // СТАРТ не блокируется готовностью (канон SupCom — хост вольен),
+                    // но неготовые показываются явно (§12-64д).
+                    string notReady = SnLobbyService.NotReadyNames();
+                    SetHint(notReady != null
+                        ? Loc.F("Не готовы: {0} (СТАРТ можно)", notReady)
+                        : Loc.Tr("Все готовые — можно стартовать"), SupcomUi.WarnYellow);
+                }
             }
             else
             {
@@ -594,6 +653,106 @@ namespace SupremeNuclear
             ? Loc.Tr("Победа: захват всех баз врага")
             : victory == LobbyState.VictoryAnnihilate ? Loc.Tr("Победа: уничтожение")
             : Loc.Tr("Победа: бесконечная");
+
+        /// <summary>Отправка чат-строки: поле не пустое → SendChat и очистка
+        /// (фокус снимается — Enter в пустом поле просто мигнёт).</summary>
+        private void SendChatFromInput()
+        {
+            if (_chatInput == null)
+                return;
+            string text = _chatInput.text;
+            _chatInput.text = "";
+            if (_chatInput.isFocused)
+                _chatInput.DeactivateInputField();
+            if (!string.IsNullOrWhiteSpace(text))
+                SnLobbyService.SendChat(text);
+        }
+
+        /// <summary>Лог чата: новая строка (ChatVersion) — перечитать хвост
+        /// журнала (канвас-лейбл не тянет тысячи строк — последние 24).</summary>
+        private void RefreshChat()
+        {
+            if (_chatLog == null || _seenChatVersion == SnLobbyService.ChatVersion)
+                return;
+            _seenChatVersion = SnLobbyService.ChatVersion;
+            var lines = SnLobbyService.ChatLines;
+            int from = Mathf.Max(0, lines.Count - 24);
+            var sb = new System.Text.StringBuilder();
+            for (int i = from; i < lines.Count; i++)
+            {
+                if (sb.Length > 0)
+                    sb.Append('\n');
+                sb.Append(lines[i]);
+            }
+            _chatLog.text = sb.ToString();
+        }
+
+        // ---------- drag-рассадка (§12-64а, правило 18: IPointer-события в этой
+        // игре не доставляются — перетаскивание из IPointerDown/Up-аналогов опроса
+        // PollClicks: нажатие > 6 px = драг, иначе клик) ----------
+
+        /// <summary>Строка под курсором (хит-тест панелей строк) или −1.</summary>
+        private int HitArmyRow(Vector2 screenPoint)
+        {
+            for (int i = 0; i < _armyRows.Count; i++)
+                if (_armyRows[i] != null && _armyRows[i].gameObject.activeSelf &&
+                    RectTransformUtility.RectangleContainsScreenPoint(_armyRows[i], screenPoint, null))
+                    return i;
+            return -1;
+        }
+
+        /// <summary>Ник-ячейка (столбец 1) сидящего человека под курсором —
+        /// кандидат драга; хост-only. −1 — мимо.</summary>
+        private int HitHumanNickCell(Vector2 screenPoint)
+        {
+            if (!SnLobbyService.Hosting || SnLobbyService.State == null)
+                return -1;
+            for (int i = 0; i < _armyButtons.Count && i < SnLobbyService.State.armies.Count; i++)
+            {
+                LobbyState.Army a = SnLobbyService.State.armies[i];
+                if (a == null || a.controller != LobbyState.CtrlHuman ||
+                    _armyRows[i] == null || !_armyRows[i].gameObject.activeSelf)
+                    continue;
+                if (RectTransformUtility.RectangleContainsScreenPoint(
+                        (RectTransform)_armyButtons[i][1].transform, screenPoint, null))
+                    return i;
+            }
+            return -1;
+        }
+
+        /// <summary>Призрак драга (ник под курсором; ленивая сборка).</summary>
+        private void DragGhost(string name)
+        {
+            if (_dragGhost == null)
+            {
+                var go = new GameObject("dragGhost", typeof(RectTransform), typeof(Text));
+                var rt = (RectTransform)go.transform;
+                rt.SetParent(_canvas.transform, false);
+                rt.anchorMin = new Vector2(0.5f, 0.5f);
+                rt.anchorMax = new Vector2(0.5f, 0.5f);
+                rt.sizeDelta = new Vector2(240f, 26f);
+                _dragGhost = go.GetComponent<Text>();
+                _dragGhost.font = _font;
+                _dragGhost.fontSize = 14;
+                _dragGhost.color = SupcomUi.Accent;
+                _dragGhost.alignment = TextAnchor.MiddleLeft;
+                _dragGhost.raycastTarget = false;
+                _dragGhost.horizontalOverflow = HorizontalWrapMode.Overflow;
+            }
+            _dragGhost.gameObject.SetActive(true);
+            _dragGhost.text = name;
+            // ScreenSpaceOverlay: мировые координаты канваса = экранные пиксели,
+            // призрак ставится прямо под курсор (смещение — не закрывать ячейку).
+            _dragGhost.transform.position = new Vector3(
+                Input.mousePosition.x + 14f, Input.mousePosition.y - 14f, 0f);
+        }
+
+        private void EndDrag()
+        {
+            _dragArmyId = -1;
+            if (_dragGhost != null)
+                _dragGhost.gameObject.SetActive(false);
+        }
 
         private void SetHint(string text, Color color)
         {
@@ -699,13 +858,37 @@ namespace SupremeNuclear
             {
                 _pressAt = Input.mousePosition;
                 _pressValid = true;
+                // Кандидат драга: нажатие на ник сидящего человека (хост).
+                _dragArmyId = HitHumanNickCell(Input.mousePosition);
+            }
+            // Драг в процессе: призрак следует за курсором; пока тянем (> 6 px) —
+            // клики не диспетчерятся, отпускание будет броском.
+            if (_dragArmyId >= 0 && Input.GetMouseButton(0))
+            {
+                LobbyState.Army a = SnLobbyService.State?.armies.Find(x => x.id == _dragArmyId);
+                DragGhost(a != null && a.controller == LobbyState.CtrlHuman
+                    ? HumanName(SnLobbyService.State, a.humanId) : "?");
+                if (((Vector2)Input.mousePosition - _pressAt).sqrMagnitude > 36f)
+                    return;
             }
             if (!Input.GetMouseButtonUp(0) || !_pressValid)
                 return;
             _pressValid = false;
             Vector2 up = Input.mousePosition;
             if ((up - _pressAt).sqrMagnitude > 36f)
+            {
+                // Бросок драга: строка под курсором — пересадка (хост).
+                if (_dragArmyId >= 0)
+                {
+                    int from = _dragArmyId;
+                    EndDrag();
+                    int target = HitArmyRow(up);
+                    if (target >= 0 && target != from)
+                        SnLobbyService.MovePlayer(from, target);
+                }
                 return;
+            }
+            EndDrag(); // клик (< 6 px) — драг не состоялся
             // Контекстное меню — приоритет: клик по пункту исполняет, клик мимо
             // закрывает меню и НЕ проваливается в строки стола. Хит-тест в
             // координатах канваса (те же, что у позиции меню — плейтест

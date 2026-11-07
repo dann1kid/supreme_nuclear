@@ -395,13 +395,19 @@ namespace SupremeNuclear
             // СВОЕЙ миссии — на чужом сейве панель падала NRE (плейтест 2026-10-29).
             // Полный сид в имени (X8): короткие имена срезали его до 16 бит —
             // разные миры перезаписывали друг друга, а ключ карты расходился с
-            // сидом генерации (см. RuntimeMap.MakeKey).
-            saveName = $"{(terrainMode ? "SN-Terrain-" + p.TemplateName : "SN-Duel")}-{seed & 0xFFFFFFFF:X8}";
+            // сидом генерации (см. RuntimeMap.MakeKey). Морф-хеш шаблона в имени
+            // (§12-65): правка JSON при том же сиде — НОВОЕ имя сейва, старые
+            // карты не перезаписываются молча (ключ v3 терпит морф-токен).
+            saveName = terrainMode
+                ? $"SN-Terrain-{p.TemplateName}-{seed & 0xFFFFFFFF:X8}-{p.Template.terrain.MorphHash()}"
+                : $"SN-Duel-{seed & 0xFFFFFFFF:X8}";
             MissionSaveLoad.ValidateName(ref saveName, allowEmpty: false);
             mission.BeforeSave();
             MissionGroup.UserGroup.SaveMission(saveName, mission);
             if (mission.SaveErrors != null && mission.SaveErrors.ErrorAndExceptionsCount > 0)
                 Log.Warn($"MapGen: сохранено с ошибками ({mission.SaveErrors.ErrorAndExceptionsCount}) — см. лог игры");
+            if (terrainMode)
+                CleanupSavedMaps(keep: 12);
             Vector2 mirrorA = ScenarioLayout.Mirror(p.Bases[0].Pos, c);
             Log.Info($"MapGen: сценарий сохранён — '{saveName}' на карте " +
                      $"{(terrainKey ?? (current != null ? current.MapKey.Path : "меню"))}, игроков {template.players} (баз/сторону {perSide}), " +
@@ -769,6 +775,36 @@ namespace SupremeNuclear
                 }
                 default:
                     return null;
+            }
+        }
+
+        /// <summary>LRU-чистка библиотеки SN-карт (§12-65): сверх keep свежайших
+        /// (по времени правки папки) — удалить. Касается ТОЛЬКО своих сейвов
+        /// SN-Terrain-* (чужие миссии не трогаем). Сбой файловой — лог, не падение.
+        /// Без return-статуса: чистка сервисная, генерация уже удалась.</summary>
+        private static void CleanupSavedMaps(int keep)
+        {
+            try
+            {
+                string dir = MissionGroup.UserGroup.UserMissionDirectory;
+                if (string.IsNullOrEmpty(dir) || !System.IO.Directory.Exists(dir))
+                    return;
+                var saves = new List<(string name, System.DateTime at)>();
+                foreach (string d in System.IO.Directory.GetDirectories(dir, "SN-Terrain-*"))
+                    saves.Add((System.IO.Path.GetFileName(d), System.IO.Directory.GetLastWriteTimeUtc(d)));
+                if (saves.Count <= keep)
+                    return;
+                saves.Sort((a, b) => b.at.CompareTo(a.at)); // свежие первыми
+                for (int i = keep; i < saves.Count; i++)
+                {
+                    string folder = MissionGroup.UserGroup.GetFolder(saves[i].name);
+                    System.IO.Directory.Delete(folder, recursive: true);
+                    Log.Info("MapGen: LRU-чистка библиотеки — удалён " + saves[i].name);
+                }
+            }
+            catch (System.Exception e)
+            {
+                Log.Warn("MapGen: LRU-чистка не удалась — " + e.Message);
             }
         }
     }

@@ -229,16 +229,23 @@ namespace SupremeNuclear
     }
 
     /// <summary>Запрос гостя хосту (гость → хост, JSON в SnLobbyMessage):
-    /// занять открытый слот / покинуть слот / готовность.</summary>
+    /// занять открытый слот / покинуть слот / готовность / чат-строка
+    /// (хост ретранслирует всем — чат не в состоянии лобби, §12-64е).</summary>
     internal sealed class LobbyRequest
     {
         public const string TakeSlot = "take_slot";
         public const string LeaveSlot = "leave_slot";
         public const string Ready = "ready";
+        public const string Chat = "chat";
 
         public string req;
         public int armyId = -1;
         public bool on;
+        /// <summary>Chat: текст строки (гость заполняет только текст; имя
+        /// проставляет хост по auth-данным — клиенту не доверяем).</summary>
+        public string text;
+        /// <summary>Chat: автор строки (заполняет хост при ретрансляции).</summary>
+        public string from;
 
         public string ToJson() => JsonConvert.SerializeObject(this);
 
