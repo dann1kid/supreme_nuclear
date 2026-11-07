@@ -213,8 +213,12 @@ namespace SupremeNuclear
 
         private static int HostIndex()
         {
-            var local = NetworkManagerNuclearOption.i.Server.LocalPlayer;
-            return local != null ? PlayerIndexOf(local) : -1;
+            // Хост и его клиент — одно локальное соединение (LocalPipe): индекс
+            // хоста ВСЕГДА = индексу локального игрока. Раньше читали
+            // Server.LocalPlayer, а «свой слот» в панели сравнивала с
+            // Client.Player — два независимых пути давали рассинхрон, и хост
+            // не мог кликнуть свой флаг готовности (плейтест 2026-11-07).
+            return LocalPlayerIndex();
         }
 
         // ---------- команды армий (союз/враг в бою) ----------
@@ -301,16 +305,13 @@ namespace SupremeNuclear
 
         internal static int LocalPlayerIndex()
         {
-            if (_localIndex >= 0)
-                return _localIndex;
-            var local = NetworkManagerNuclearOption.i.Client.Player;
-            if (local == null)
-                return -1;
-            _localIndex = PlayerIndexOf(local);
-            return _localIndex;
+            // БЕЗ кэша (плейтест 2026-11-07): ранний вызов до завершения auth
+            // возвращал ДЕФОЛТНЫЙ PlayerIndex и навсегда закэшировал неверный
+            // id — «свой слот» не совпадал, флаг готовности не кликался. Вызов
+            // дешёвый (рефреш 0.4 с × ≤8 строк), корректность дороже.
+            var local = NetworkManagerNuclearOption.i?.Client?.Player;
+            return local != null ? PlayerIndexOf(local) : -1;
         }
-
-        private static int _localIndex = -1;
 
         private static void SendRequest(LobbyRequest request)
         {
@@ -374,8 +375,9 @@ namespace SupremeNuclear
             return id == HostIndex() ? Loc.Tr("хост") : "Player " + id;
         }
 
-        /// <summary>Живые люди в слотах, не нажавшие «Готов» (предупреждение
-        /// хосту перед СТАРТОМ; канон SupCom — СТАРТ не блокируется, §12-64д).</summary>
+        /// <summary>Сидящие люди, не нажавшие «Готов» (гейт СТАРТА, юзер
+        /// 2026-11-07: «флаги готовности у ВСЕХ игроков, кроме ИИ, допускают
+        /// запуск» — хост не исключён; ИИ готовность не требует).</summary>
         internal static string NotReadyNames()
         {
             if (!Hosting || State == null || State.status != LobbyState.StatusWaiting)
@@ -383,7 +385,7 @@ namespace SupremeNuclear
             var names = new List<string>();
             foreach (LobbyState.Army a in State.armies)
                 if (a.controller == LobbyState.CtrlHuman && a.humanId >= 0 &&
-                    a.humanId != HostIndex() && !ReadyIds.Contains(a.humanId))
+                    !ReadyIds.Contains(a.humanId))
                     names.Add(HumanNameById(a.humanId));
             return names.Count > 0 ? string.Join(", ", names) : null;
         }
