@@ -464,8 +464,15 @@ namespace SupremeNuclear
                 if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.Networking.Lobbies.HostedLobbyInstance),
                         "SetData") == null)
                     throw new System.Exception("HostedLobbyInstance.SetData не найден (sn_lobby-данные)");
+                // GetPvpTypeLobbyString перегружен с обновления игры 2026-11-07
+                // ((Mission)/(MissionPvpType)): AccessTools.Method по имени без
+                // параметров бросает AmbiguousMatchException («Ambiguous match in
+                // Harmony patch for …») — проверяем обе перегрузки явными типами
+                // (GetMethod с параметрами не бросает).
                 if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.SavedMission.MissionTag),
-                        "GetPvpTypeLobbyString") == null)
+                        "GetPvpTypeLobbyString", new[] { typeof(NuclearOption.SavedMission.Mission) }) == null &&
+                    HarmonyLib.AccessTools.Method(typeof(NuclearOption.SavedMission.MissionTag),
+                        "GetPvpTypeLobbyString", new[] { typeof(NuclearOption.Networking.Lobbies.MissionPvpType) }) == null)
                     throw new System.Exception("MissionTag.GetPvpTypeLobbyString не найден (данные лобби)");
                 if (HarmonyLib.AccessTools.Method(typeof(NuclearOption.Networking.Lobbies.SteamLobby),
                         "CheckRelayLocationTask") == null)
