@@ -31,34 +31,37 @@ and weapon gates. UI ships in English and Russian (`General.Language` in the Bep
 config). Full controls — in the **Controls** section below (RU/EN).
 Controls/UX feedback is welcome — GitHub Issues (feedback template).
 
-## Скримиш и мультиплеер (v0.154)
+## Скримиш и мультиплеер (v0.167)
 
-- **Одиночная**: кнопка **«Скримиш»** в главном меню → вкладка «Одиночная» →
-  стиль карты / сид / стороны 1×1–4×4 / AI-противник → **«В БОЙ»**. Генерация
-  идёт в фоне с превью и прогрессом (игра не виснет), старт — мгновенно после
-  готовности.
-- **Мультиплеер** («командир + асы»): вкладка **«Мультиплеер»** → сгенерируй
-  карту (превью) → **«Создать лобби»** (имя / публичное-друзья-приватное /
-  пароль / слоты). Игроки входят через **список серверов игры** или
-  **Steam-инвайт** (у всех должен стоять мод той же версии). В лобби все
-  видят сгенерированную карту; асы занимают сторону A или B кнопкой,
-  хост открывает/закрывает стороны и жмёт **«СТАРТ»**. Хост — командир
-  стороны A (RTS), остальные летают бортами своей стороны; свободная
-  сторона играет под AI-командиром.
+- **Одно лобби на всё** (вкладка «Одиночная» убрана, v0.156): кнопка **«Скримиш»**
+  в главном меню → имя / видимость / пароль → **создать лобби**. В лобби: выбор
+  источника карт (**SN** — генератор стилей/сидов, **ванильные** — миссии игры),
+  рассадка сторон (клик по слоту: закрыт/открыт/занять/**ИИ-профиль**:
+  Стандарт/Лёгкий/Жёсткий/Экономист/Агрессор), чат, флаги «Готов».
+- **Соло против ИИ** = то же лобби: оставь себя на стороне A, стороне B поставь ИИ,
+  жми свой **«Готов»** и **СТАРТ** (готовность у ИИ не спрашивается). Полный
+  прогон — чек-лист [PLAYTEST.md](PLAYTEST.md).
+- **Мультиплеер** («командир + асы»): игроки входят через **список серверов игры**
+  или **Steam-инвайт** (у всех одинаковая версия мода); в лобби все видят выбранную
+  карту, СТАРТ гейтят «Готов» всех сидящих людей. Хост — командир стороны A (RTS),
+  остальные летают бортами своей стороны; свободная/ИИ сторона играет AI-командир.
 
-## Skirmish & multiplayer (v0.154, English)
+## Skirmish & multiplayer (v0.167, English)
 
-- **Singleplayer**: the **Skirmish** button in the main menu → the "Singleplayer"
-  tab → map style / seed / 1v1–4v4 sides / AI opponent → **LAUNCH**. Generation
-  runs in the background with a live preview (no freeze); the battle starts
-  as soon as the map is ready.
-- **Multiplayer** ("commander + aces"): the **Multiplayer** tab → generate the
-  map (preview) → **Create lobby** (name / public-friends-private / password /
-  slots). Players join via the **in-game server browser** or a **Steam invite**
-  (everyone needs the same mod version). In the lobby everyone sees the generated
-  map; aces claim side A or B with a button, the host opens/closes sides and
-  presses **LAUNCH**. The host commands side A in RTS mode, everyone else flies
-  their side's aircraft; an empty side is played by the AI commander.
+- **One lobby for everything** (the "Singleplayer" tab was removed, v0.156): the
+  **Skirmish** button in the main menu → name / visibility / password → **create
+  the lobby**. In the lobby: pick the map source (**SN** — style/seed generator,
+  **vanilla** — the game's own missions), seat the sides (click a slot:
+  closed/open/take/**AI profile**: Standard/Easy/Hard/Economist/Aggressor), chat,
+  "Ready" flags.
+- **Solo vs AI** = the same lobby: keep yourself on side A, set side B to an AI,
+  press your **Ready** and **START** (AI requires no readiness). A full solo
+  checklist lives in [PLAYTEST.md](PLAYTEST.md) (Russian).
+- **Multiplayer** ("commander + aces"): players join via the **in-game server
+  browser** or a **Steam invite** (everyone needs the same mod version); everyone
+  sees the chosen map, and START waits for every seated human's "Ready". The host
+  commands side A in RTS mode, everyone else flies their side's aircraft; a free
+  or AI side is played by the AI commander.
 
 ## Известные ограничения
 
@@ -68,7 +71,9 @@ Controls/UX feedback is welcome — GitHub Issues (feedback template).
   снос недостроев и плавучесть Jackknife ещё не обкатаны плейтестами.
 - Смена профиля высоты/скорости посреди Shift-серии патруля может создать
   «недостижимый» второй цикл (в разработке — [ARCHITECTURE §12](ARCHITECTURE.md#12-реестр-известных-долгов), долг 32).
-- Диагностика (логи, SelfCheck, F11-оверлей) — только по-русски.
+- Диагностика (логи, SelfCheck, F11-оверлей) — только по-русски. F11 дополнительно
+  показывает состояние ИИ-командиров (обновление раз в 15 с) и счётчик ошибок сцены.
+  Как тестировать мод соло против ИИ — [PLAYTEST.md](PLAYTEST.md).
 
 ## Языки / Languages
 
@@ -564,6 +569,7 @@ src/SupremeNuclear/
 
 Очередь работ — в [ARCHITECTURE.md §12](ARCHITECTURE.md#12-реестр-известных-долгов),
 план развития — в [DESIGN.md §4](DESIGN.md#4-порядок-реализации-mvp--далее)
-(потоковая экономика, генератор карт, AI-командир).
+(потоковая экономика, генератор карт, AI-командир). Чек-лист плейтестов (соло
+против ИИ) — [PLAYTEST.md](PLAYTEST.md).
 
 </details>
