@@ -41,7 +41,6 @@ namespace SupremeNuclear
         private MapSetupBlock _mapBlock;
         private RectTransform _ctxMenu;       // контекстное меню слота (FAF-стиль)
         private Vector2 _ctxPos;              // позиция меню в координатах канваса
-        private Vector2 _ctxSize;
         private int _ctxArmyId = -1;
         private readonly List<KeyValuePair<RectTransform, Action>> _menuClickables =
             new List<KeyValuePair<RectTransform, Action>>();
@@ -479,7 +478,6 @@ namespace SupremeNuclear
             float mx = Mathf.Clamp(cellLeft, 10f, refW - w - 10f);
             float my = Mathf.Clamp(cellTop - 4f, h + 10f, refH - h - 10f); // верх меню (y от низа)
             _ctxPos = new Vector2(mx, my);
-            _ctxSize = new Vector2(w, h);
             rt.anchoredPosition = _ctxPos;
 
             float iy = 5f;
@@ -941,20 +939,17 @@ namespace SupremeNuclear
             }
             EndDrag(); // клик (< 6 px) — драг не состоялся
             // Контекстное меню — приоритет: клик по пункту исполняет, клик мимо
-            // закрывает меню и НЕ проваливается в строки стола. Хит-тест в
-            // координатах канваса (те же, что у позиции меню — плейтест
-            // 2026-11-06: экранные пиксели при CanvasScaler не совпадали).
+            // закрывает меню и НЕ проваливается в строки стола.
+            // Хит-тест — RectangleContainsScreenPoint (как _clickables ниже):
+            // API сам решает скейл канваса. Ручной пересчёт «экран/scale −
+            // пол-экрана» считал клик в ЦЕНТР-относительных координатах, а меню
+            // стоит от НИЖНЕГО ЛЕВОГО угла (anchor 0,0) — сдвиг на пол-экрана,
+            // пункты НЕ МОГЛИ попасть никогда (плейтесты 2026-11-07: «меню
+            // открывается, но ничего не делает» — занятие/ИИ/наблюдатели шли
+            // только через мёртвые пункты).
             if (_ctxMenu != null)
             {
-                // Хит-тест пунктов — в тех же центр-относительных координатах,
-                // что и позиция меню: экран/scale − центр экрана. Прежние
-                // варианты давали другую систему координат, чем у меню.
-                float scale = Mathf.Max(0.01f, _canvas.scaleFactor);
-                Vector2 upLocal = new Vector2(up.x / scale - Screen.width / (2f * scale),
-                    up.y / scale - Screen.height / (2f * scale));
-                bool inside = upLocal.x >= _ctxPos.x && upLocal.x <= _ctxPos.x + _ctxSize.x &&
-                              upLocal.y >= _ctxPos.y - _ctxSize.y && upLocal.y <= _ctxPos.y;
-                if (!inside)
+                if (!RectTransformUtility.RectangleContainsScreenPoint(_ctxMenu, up, null))
                 {
                     CloseContextMenu();
                     return;
@@ -964,16 +959,7 @@ namespace SupremeNuclear
                     var kv = _menuClickables[i];
                     if (kv.Key == null)
                         continue;
-                    var rt = (RectTransform)kv.Key.transform;
-                    // Пункты растянуты по x (anchor 0..1): лево = меню.лево +
-                    // offsetMin.x, право = меню.право + offsetMax.x (он отрицательный).
-                    // Прежний r = _ctxPos.x + offsetMax.x давал диапазон
-                    // [лево, лево-12] — вывернутый и пустой, клики «не работали».
-                    float l = _ctxPos.x + rt.offsetMin.x;
-                    float r = _ctxPos.x + _ctxSize.x + rt.offsetMax.x;
-                    float bottom = _ctxPos.y + rt.offsetMin.y;
-                    float top = _ctxPos.y + rt.offsetMax.y;
-                    if (upLocal.x >= l && upLocal.x <= r && upLocal.y >= bottom && upLocal.y <= top)
+                    if (RectTransformUtility.RectangleContainsScreenPoint(kv.Key, up, null))
                     {
                         kv.Value?.Invoke();
                         return;
