@@ -549,19 +549,18 @@ namespace SupremeNuclear
 
         // ---------- хост: правки лобби ----------
 
-        /// <summary>Хост переключает готовность сидящего в слоте (стол, клик по
-        /// столбцу «Готов») — синхронизация перед стартом.</summary>
-        internal static void ToggleSlotReady(int armyId)
+        /// <summary>Готовность ХОСТА (бинарный столбец «Готов» — плейтест
+        /// 2026-11-07: готовность правит только игрок своей строки, чужую
+        /// хост не переключает; гости жмут свою кнопку «Готов»).</summary>
+        internal static void ToggleHostReady()
         {
             if (!Hosting || State == null || State.status != LobbyState.StatusWaiting)
                 return;
-            LobbyState.Army a = State.armies.Find(x => x.id == armyId);
-            if (a == null || a.controller != LobbyState.CtrlHuman || a.humanId < 0)
+            int hostId = HostIndex();
+            if (hostId < 0)
                 return;
-            if (ReadyIds.Contains(a.humanId))
-                ReadyIds.Remove(a.humanId);
-            else
-                ReadyIds.Add(a.humanId);
+            if (!ReadyIds.Remove(hostId))
+                ReadyIds.Add(hostId);
             Broadcast();
         }
 

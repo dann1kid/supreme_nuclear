@@ -346,20 +346,32 @@ namespace SupremeNuclear
 
         private void OnArmyCell(int armyId, int col, RectTransform cellRt)
         {
+            LobbyState.Army seat = SnLobbyService.State?.armies.Find(x => x.id == armyId);
             if (SnLobbyService.Hosting)
             {
                 switch (col)
                 {
                     case 1:
-                    case 4:
-                        // Ник и столбец состояния открывают FAF-дропдаун слота;
-                        // исключение — СВОЙ сидящий слот в col 4: клик = готовность
-                        // (быстрый путь, как клик по кнопке «Готов» у гостя).
-                        LobbyState.Army seat = SnLobbyService.State?.armies.Find(x => x.id == armyId);
-                        if (col == 4 && seat != null && seat.controller == LobbyState.CtrlHuman)
-                            SnLobbyService.ToggleSlotReady(armyId);
+                        // Ник: открытый слот — занять НАПРЯМУЮ (плейтест
+                        // 2026-11-07: «строка не занимается игроком или ии»);
+                        // сидящий человек/ИИ — FAF-дропдаун состояния слота.
+                        if (seat != null && seat.controller == LobbyState.CtrlOpen)
+                            SnLobbyService.SeatHostAt(armyId);
                         else
                             ShowContextMenu(armyId, cellRt);
+                        break;
+                    case 4:
+                        // Бинарный столбец «Занять/Готов» только для СВОЕГО
+                        // игрока (плейтест: чужая готовность не правится):
+                        // открытый — занять, свой слот — своя готовность;
+                        // чужие строки — только отображение.
+                        if (seat == null)
+                            break;
+                        if (seat.controller == LobbyState.CtrlOpen)
+                            SnLobbyService.SeatHostAt(armyId);
+                        else if (seat.controller == LobbyState.CtrlHuman &&
+                                 seat.humanId == SnLobbyService.LocalPlayerIndex())
+                            SnLobbyService.ToggleHostReady();
                         break;
                     case 2: SnLobbyService.CycleTeam(armyId); break;
                     case 3: SnLobbyService.CycleColor(armyId); break;
@@ -367,13 +379,12 @@ namespace SupremeNuclear
             }
             else
             {
-                LobbyState.Army a = SnLobbyService.State?.armies.Find(x => x.id == armyId);
-                if (a == null)
+                if (seat == null)
                     return;
-                if (a.controller == LobbyState.CtrlOpen && (col == 1 || col == 4))
+                if (seat.controller == LobbyState.CtrlOpen && (col == 1 || col == 4))
                     SnLobbyService.RequestTakeSlot(armyId); // занять слот
-                if (col == 4 && a.controller == LobbyState.CtrlHuman &&
-                    a.humanId == SnLobbyService.LocalPlayerIndex())
+                if (col == 4 && seat.controller == LobbyState.CtrlHuman &&
+                    seat.humanId == SnLobbyService.LocalPlayerIndex())
                     SnLobbyService.ToggleReady(); // свой «Готов» кликом по столбцу
             }
         }
@@ -568,7 +579,8 @@ namespace SupremeNuclear
             var hash = new System.Text.StringBuilder(sb + "|" + _hostMode + "|" + victory +
                 (state.map != null ? state.map.seed + ":" + state.map.players : "-"));
             foreach (LobbyState.Army a in state.armies)
-                hash.Append("|").Append(a.controller).Append(a.humanId).Append(".").Append(a.team).Append(".").Append(a.pos);
+                hash.Append("|").Append(a.controller).Append(a.humanId).Append(".").Append(a.team)
+                    .Append(".").Append(a.pos).Append(".").Append(a.aiType);
             foreach (LobbyState.Member m in state.members)
                 hash.Append(";").Append(m.id).Append(m.ready ? "r" : "");
             if (hash.ToString() == _lastHash)
@@ -615,7 +627,12 @@ namespace SupremeNuclear
                     ? (seatedReady ? Loc.Tr("✓ готов") : Loc.Tr("не готов"))
                     : a.controller == LobbyState.CtrlAi ? Loc.Tr("—")
                     : Loc.Tr("Занять");
-                SetCell(b[4], readyCell, _hostMode || a.controller == LobbyState.CtrlOpen,
+                // Столбец «Занять/Готов» кликабелен ТОЛЬКО для открытого слота
+                // и СВОЕЙ строки (плейтест 2026-11-07: бинарный, чужая
+                // готовность не правится).
+                bool ownSeat = a.controller == LobbyState.CtrlHuman &&
+                               a.humanId == SnLobbyService.LocalPlayerIndex();
+                SetCell(b[4], readyCell, a.controller == LobbyState.CtrlOpen || ownSeat,
                     seatedReady ? SupcomUi.BtnActive
                     : a.controller == LobbyState.CtrlOpen && !_hostMode ? SupcomUi.Accent : SupcomUi.TextDim);
             }
