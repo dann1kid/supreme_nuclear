@@ -506,21 +506,25 @@ namespace SupremeNuclear
                     throw new System.Exception("ServerObjectManager недоступен (снос EMPTY-персонажа хоста)");
                 if (HarmonyLib.AccessTools.Method(typeof(NetworkManagerNuclearOption), "SpawnCharacter") == null)
                     throw new System.Exception("SpawnCharacter не найден (патч №16 — фракция по плану)");
-                // Server/Client — УНАСЛЕДОВАННЫЕ инстанс-свойства Mirage-базы:
-                // AccessTools.Property по производному типу их НЕ находит
-                // (FlattenHierarchy тянет только статику) — поиск по цепочке баз.
-                System.Reflection.PropertyInfo InstanceProp(System.Type t, string name)
+                // Server/Client — УНАСЛЕДОВАННЫЕ члены Mirage-базы (поля, не
+                // свойства): AccessTools по производному типу их НЕ находит
+                // (FlattenHierarchy тянет только статику) — поиск Property/Field
+                // по цепочке баз (плейтест 2026-11-07: Property-only не нашёл).
+                System.Reflection.MemberInfo InstanceMember(System.Type t, string name)
                 {
                     for (var b = t; b != null; b = b.BaseType)
                     {
                         var p = HarmonyLib.AccessTools.Property(b, name);
                         if (p != null)
                             return p;
+                        var f = HarmonyLib.AccessTools.Field(b, name);
+                        if (f != null)
+                            return f;
                     }
                     return null;
                 }
-                if (InstanceProp(typeof(NetworkManagerNuclearOption), "Server") == null ||
-                    InstanceProp(typeof(NetworkManagerNuclearOption), "Client") == null)
+                if (InstanceMember(typeof(NetworkManagerNuclearOption), "Server") == null ||
+                    InstanceMember(typeof(NetworkManagerNuclearOption), "Client") == null)
                     throw new System.Exception("Server/Client недоступны (подписки лобби)");
                 // Лобби v3: рантайм-фракции N армий + командная победа.
                 if (HarmonyLib.AccessTools.Property(typeof(Faction), "factionName") == null &&

@@ -311,8 +311,10 @@ namespace SupremeNuclear
             var hRt = (RectTransform)_hint.transform;
             hRt.anchorMin = new Vector2(0.5f, 0f);
             hRt.anchorMax = new Vector2(1f, 0f);
-            hRt.offsetMin = new Vector2(0f, 18f);
-            hRt.offsetMax = new Vector2(-16f, 58f);
+            // НАД полосой кнопок (14..60): наслоение на «Распустить» —
+            // плейтест 2026-11-07 (скриншот).
+            hRt.offsetMin = new Vector2(0f, 64f);
+            hRt.offsetMax = new Vector2(-16f, 104f);
         }
 
         /// <summary>Строка слота (столбцы как у FAF, юзер 2026-11-06):
