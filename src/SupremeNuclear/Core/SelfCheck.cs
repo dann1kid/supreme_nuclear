@@ -506,8 +506,21 @@ namespace SupremeNuclear
                     throw new System.Exception("ServerObjectManager недоступен (снос EMPTY-персонажа хоста)");
                 if (HarmonyLib.AccessTools.Method(typeof(NetworkManagerNuclearOption), "SpawnCharacter") == null)
                     throw new System.Exception("SpawnCharacter не найден (патч №16 — фракция по плану)");
-                if (HarmonyLib.AccessTools.Property(typeof(NetworkManagerNuclearOption), "Server") == null ||
-                    HarmonyLib.AccessTools.Property(typeof(NetworkManagerNuclearOption), "Client") == null)
+                // Server/Client — УНАСЛЕДОВАННЫЕ инстанс-свойства Mirage-базы:
+                // AccessTools.Property по производному типу их НЕ находит
+                // (FlattenHierarchy тянет только статику) — поиск по цепочке баз.
+                System.Reflection.PropertyInfo InstanceProp(System.Type t, string name)
+                {
+                    for (var b = t; b != null; b = b.BaseType)
+                    {
+                        var p = HarmonyLib.AccessTools.Property(b, name);
+                        if (p != null)
+                            return p;
+                    }
+                    return null;
+                }
+                if (InstanceProp(typeof(NetworkManagerNuclearOption), "Server") == null ||
+                    InstanceProp(typeof(NetworkManagerNuclearOption), "Client") == null)
                     throw new System.Exception("Server/Client недоступны (подписки лобби)");
                 // Лобби v3: рантайм-фракции N армий + командная победа.
                 if (HarmonyLib.AccessTools.Property(typeof(Faction), "factionName") == null &&
