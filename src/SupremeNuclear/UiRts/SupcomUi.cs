@@ -135,6 +135,7 @@ namespace SupremeNuclear
             new (Button, Image, int)[4];     // Все / T1 / T2 / T3
         private int _prodTier;               // 0 — все, 1..3 — фильтр-просмотр каталога
         private int _ctxTier = 3;            // тир контекста: фабрика/аэродром или ЛУЧШИЙ инженер выделения
+        private int _ctxTierActual = 3;      // ФАКТИЧЕСКИЙ тир без апгрейдов очереди — суффикс «T1→T2», пока наливается (плейтест 2026-11-08 «мгновенно прокачивается»)
         private readonly (Button btn, Image img)[] _tabButtons = new (Button, Image)[4];
         private int _activeTab = TabRoster;
         private int _contextHash = -1;

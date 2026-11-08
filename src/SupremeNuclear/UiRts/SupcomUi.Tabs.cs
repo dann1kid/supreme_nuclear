@@ -107,21 +107,34 @@ namespace SupremeNuclear
             // каталога строек); фабрики → МИНИМАЛЬНЫЙ «пендящий» тир выделения
             // (с учётом апгрейдов в их очередях — очередь программируется
             // наперёд: за →T2 сразу видны T2-юниты); контекст аэродрома —
-            // «пендящий» тир базы. Нет контекста — 3.
+            // «пендящий» тир базы. Нет контекста — 3. ФАКТИЧЕСКИЙ тир — рядом
+            // (суффикс панели «T1→T2», пока апгрейд наливается: мгновенный
+            // скачок заголовка читался как «прокачалось сразу», плейтест 2026-11-08).
             _ctxTier = 3;
+            _ctxTierActual = 3;
             if (hasEngineer)
+            {
                 _ctxTier = engTier;
+                _ctxTierActual = engTier;
+            }
             else
             {
                 foreach (object f in _ctxFactories)
+                {
                     _ctxTier = Mathf.Min(_ctxTier, ProductionTasks.PendingTierOf(f));
+                    _ctxTierActual = Mathf.Min(_ctxTierActual, FactoryTierService.TierOf(f));
+                }
                 // Контекст аэродрома (вышка/авианосец): фабрики РАЗДЕЛЕНЫ — тир
                 // контекста = минимум по ЕГО ангарам (аэродром больше не фабрика).
                 if (airbase != null && airbase.hangars != null)
                     foreach (Hangar hangar in airbase.hangars)
                         if (hangar != null)
+                        {
                             _ctxTier = Mathf.Min(_ctxTier,
                                 ProductionTasks.PendingTierOf(hangar));
+                            _ctxTierActual = Mathf.Min(_ctxTierActual,
+                                FactoryTierService.TierOf(hangar));
+                        }
             }
             if (_prodTier > _ctxTier)
                 _prodTier = 0; // фильтр-просмотр выше нового контекста — в «Все»
@@ -864,9 +877,11 @@ namespace SupremeNuclear
         private void FillProductionTab(FactionHQ hq, VehicleDepot depot, Building navalDock,
             Airbase airbase, bool hasEngineer, List<Hangar> hangars = null)
         {
-            // Суффикс заголовка — ФАКТИЧЕСКИЙ тир контекста: фабрика («T2» после
-            // апгрейда) или лучший инженер выделения (потолок строек).
-            string tierName = " · T" + _ctxTier;
+            // Суффикс заголовка — ФАКТИЧЕСКИЙ тир контекста; стоит апгрейд в
+            // очереди — «T1→T2» (налив видно в очереди, заголовок не врёт).
+            string tierName = _ctxTierActual < _ctxTier
+                ? " · T" + _ctxTierActual + "→T" + _ctxTier
+                : " · T" + _ctxTier;
             // АНГАР(Ы) — индивидуальные авиафабрии (v0.88): каталог — юнион списков
             // выделенных; клик по плитке = +1 КАЖДОМУ выделенному, кто умеет строить
             // (паттерн SupCom «выделил пачку фабрик — скормил заказ всем»).
