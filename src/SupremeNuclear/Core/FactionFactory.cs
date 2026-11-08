@@ -59,5 +59,27 @@ namespace SupremeNuclear
         {
             Cache.Clear();
         }
+
+        private const string NamePrefix = "SN Армия ";
+
+        /// <summary>Зарегистрировать рантайм-фракции миссии по именам «SN Армия N» —
+        /// детерминированно на любом пиле, до разрешения фракций игрой. Без ассета
+        /// в Encyclopedia имя не резолвится: юниты фолбэчатся в нативную фракцию,
+        /// все стартеры и игрок оказываются под ОДНИМ HQ (плейтест 2026-11-08:
+        /// «управляю инженерами союзника», ИИ-командир — Boscali). Цвет — по номеру
+        /// армии (детерминизм между пирами важнее палитры слота).</summary>
+        internal static void EnsureMissionFactions(NuclearOption.SavedMission.Mission mission)
+        {
+            if (mission?.factions == null)
+                return;
+            foreach (NuclearOption.SavedMission.MissionFaction mf in mission.factions)
+            {
+                string name = mf?.factionName;
+                if (name == null || !name.StartsWith(NamePrefix))
+                    continue;
+                if (int.TryParse(name.Substring(NamePrefix.Length), out int n) && n >= 1)
+                    GetOrCreate(name, n - 1);
+            }
+        }
     }
 }

@@ -394,6 +394,58 @@ namespace SupremeNuclear.Tests
         }
         // стили карт v3, залп-домены, Скримиш-сид, туман войны (перенос серии секций Main,
         // расщепление без изменения логики 2026-11-07).
+        /// <summary>SmoothFine (v0.155.2): проходимость мелкой сетки 10 м —
+        /// октавы шума на мелкой сетке отрисовались и давали уклоны 40-60°
+        /// («наземка не проезжает, авиация разбивается»).</summary>
+        private static void TestsTerrainSmooth()
+        {
+            var smT = new ScenarioTemplate.TerrainSettings
+            {
+                sizeM = 12800f, stepM = 10f, edgeM = 640f, coastFlatM = 0f,
+            };
+            var hm = HeightmapGen.Generate(smT, 977);
+            int w = hm.W;
+
+            double SteepShare(float[,] h)
+            {
+                double steep = 0, land = 0;
+                double tan = Math.Tan(smT.steepDeg * Math.PI / 180.0);
+                for (int j = 1; j < w - 1; j++)
+                    for (int i = 1; i < w - 1; i++)
+                    {
+                        if (h[i, j] < hm.SeaLevel)
+                            continue;
+                        land++;
+                        float dh = Math.Max(
+                            Math.Abs(h[i, j] - h[i + 1, j]),
+                            Math.Abs(h[i, j] - h[i, j + 1]));
+                        if (dh / smT.stepM > tan)
+                            steep++;
+                    }
+                return land > 0 ? steep / land : 0;
+            }
+
+            double before = SteepShare(hm.Height);
+            Check("TerrainSmooth: генератор сгладил Steep-долю до <25% суши",
+                before < 0.25, "Steep " + before.ToString("P1"));
+
+            // После сглаживания доминируют каноничные уступы террас (шлифовать
+            // их нельзя — canon SupCom), поэтому доп. проходы проверяем на
+            // СТАБИЛЬНОСТЬ: не должны увеличивать Steep-долю.
+            var copy = (float[,])hm.Height.Clone();
+            Heightmap.SmoothFine(copy, w, 3);
+            double after = SteepShare(copy);
+            Check("TerrainSmooth: доп. проходы не увеличивают Steep",
+                after <= before + 0.02, before.ToString("P1") + " → " + after.ToString("P1"));
+
+            bool sym = true;
+            for (int j = 0; j < w && sym; j++)
+                for (int i = 0; i < w; i++)
+                    if (Math.Abs(copy[i, j] - copy[w - 1 - i, j]) > 1e-3f)
+                    { sym = false; break; }
+            Check("TerrainSmooth: зеркальная симметрия цела", sym);
+        }
+
         private static void TestsMapGenFog()
         {
             // ---------- FleetSalvo.FitsDomain: домен станции для ручной волны ----------

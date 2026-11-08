@@ -81,6 +81,12 @@ namespace SupremeNuclear
                      $"проба (8000,0): {(hit ? "земля(глоб) " + (rh.point.y - op.y).ToString("F0") + " м" : "МИМО")}, " +
                      $"origin {op.x.ToString("F0")},{op.y.ToString("F0")},{op.z.ToString("F0")}, " +
                      $"root карты {mapSettings.transform.position.ToString("F0")}");
+            // Рантайм-фракции армий («SN Армия N»): регистрируем ДО резолва фракций
+            // — и на пиле, который только ЗАГРУЖАЕТ готовую карту (сейв/MP-гость:
+            // генерация не гонялась, ассетов нет). Без них PositionHqAtBases ниже
+            // молча пропускает базы, юниты падают в нативный фолбэк-HQ
+            // (плейтест 2026-11-08: «управляю войсками союзника», §12-64в).
+            FactionFactory.EnsureMissionFactions(MissionManager.CurrentMission);
             PositionHqAtBases();
         }
 

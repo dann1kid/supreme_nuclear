@@ -33,6 +33,8 @@ namespace SupremeNuclear.Tests
 
             TestsScenario();
 
+            TestsTerrainSmooth();
+
             TestsOrdersAndPlural();
 
             TestsLocAndFitLine();

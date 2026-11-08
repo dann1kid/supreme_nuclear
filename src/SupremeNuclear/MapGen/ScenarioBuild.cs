@@ -283,11 +283,17 @@ namespace SupremeNuclear
                 // имена армий (FactionFactory). Победа — по командам (ниже).
                 foreach (LobbyState.Army a in p.Armies)
                     if (a != null && a.controller != LobbyState.CtrlClosed)
+                    {
+                        // Рантайм-фракция армии — ДО старта: без ассета в Encyclopedia
+                        // имя не резолвится игрой, юниты фолбэчатся в нативную фракцию
+                        // под один HQ (плейтест 2026-11-08 «управляю войсками союзника»).
+                        FactionFactory.GetOrCreate(FactionFactory.ArmyName(a.id), a.id);
                         mission.factions.Add(new MissionFaction(FactionFactory.ArmyName(a.id))
                         {
                             startingBalance = template.startFunds,
                             regularIncome = 0f, // потоком владеет мод (EconomyService)
                         });
+                    }
                 var ownerByPos = new Dictionary<int, LobbyState.Army>();
                 foreach (LobbyState.Army a in p.Armies)
                     if (a != null && a.controller != LobbyState.CtrlClosed)
