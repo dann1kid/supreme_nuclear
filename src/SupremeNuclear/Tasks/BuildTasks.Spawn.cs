@@ -28,7 +28,6 @@ namespace SupremeNuclear
             float dt = Time.deltaTime;
             var focus = FocusMap; // Clear — при пересборке ниже (первая задача всегда собирает)
             bool focusBuilt = false;
-            HashSet<Task> seqTasks = null; // лениво: площадки, стоящие в чьих-то очередях
             for (int i = Active.Count - 1; i >= 0; i--)
             {
                 Task t = Active[i];
@@ -38,27 +37,11 @@ namespace SupremeNuclear
                         t.ApproachBearings.Remove(t.Builders[b]);
                         t.Builders.RemoveAt(b);
                     }
-                // СИРОТА (юзер-канон 2026-11-04): строителей нет и ни в одной
-                // очереди записей с площадкой — призрак висит вечно после
-                // ПКМ-переключения инженеров. Отменяем (ghost гасит Cancel).
-                if (t.Builders.Count == 0)
-                {
-                    if (seqTasks == null)
-                    {
-                        seqTasks = new HashSet<Task>();
-                        foreach (List<SeqEntry> sq in Sequences.Values)
-                            foreach (SeqEntry e in sq)
-                                if (e.Task != null)
-                                    seqTasks.Add(e.Task);
-                    }
-                    if (!seqTasks.Contains(t))
-                    {
-                        Cancel(t); // снимет призрак/маркер и Version++
-                        Log.Info("Build: площадка-сирота снята (без строителей и очередей) — " +
-                                 (t.Definition != null ? t.Definition.unitName : "ВПП"));
-                        continue;
-                    }
-                }
+                // ПЛОЩАДКА БЕЗ СТРОИТЕЛЕЙ ЖИВЁТ (юзер-канон 2026-11-08, сменил
+                // «сирота-снос» 2026-11-04): инженер ушёл по новому приказу —
+                // недострой и налитая масса ОСТАЮТСЯ; достройка — ПКМ по призраку
+                // (TryResume), явный снос — Ctrl+Shift+ПКМ (WaypointOps, без
+                // возврата). Умирает только с гибелью фракции (Faction==null ниже).
 
                 focusBuilt = false; // состав меняется по ходу — пересобираем фокус каждый тик
 
