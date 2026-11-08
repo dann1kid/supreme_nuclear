@@ -238,6 +238,32 @@ namespace SupremeNuclear.Tests
                 !AircraftOrders.CanAppend(legSame, AirOrderMode.Salvo, flightProfile, SpeedMode.Full));
             Check("Ноги: другой режим приказа — новая нога",
                 !AircraftOrders.CanAppend(legSame, AirOrderMode.AttackMove, flightProfile, SpeedMode.Full));
+
+            // ---------- AircraftOrders.RestampProfile: перештамповка живого патруля (§12-32) ----------
+            var patrol = new AircraftOrders.OrderSegment
+            {
+                Mode = AirOrderMode.Patrol,
+                AltAgl = 800f,
+                FollowTerrain = false,
+                Speed = SpeedMode.Full
+            };
+            patrol.Points.Add(new UnityEngine.Vector3(10f, 800f, 20f).ToGlobalPosition());
+            patrol.Points.Add(new UnityEngine.Vector3(30f, 800f, 40f).ToGlobalPosition());
+            patrol.PointGroups.Add(0);
+            patrol.PointGroups.Add(7);
+            AircraftOrders.RestampProfile(patrol,
+                new AircraftOrders.FlightProfile(150f, true, "Низко"), SpeedMode.Cruise);
+            bool restamped = patrol.AltAgl == 150f && patrol.FollowTerrain && patrol.Speed == SpeedMode.Cruise;
+            for (int i = 0; i < patrol.Points.Count; i++)
+            {
+                UnityEngine.Vector3 l = patrol.Points[i].ToLocalPosition();
+                restamped &= UnityEngine.Mathf.Approximately(l.y, 150f) &&
+                             UnityEngine.Mathf.Approximately(l.x, i == 0 ? 10f : 30f) &&
+                             UnityEngine.Mathf.Approximately(l.z, i == 0 ? 20f : 40f);
+            }
+            Check("Патруль §12-32: перештамповка цикла переписывает штамп и AGL точек (x/z живы)",
+                restamped && patrol.Points.Count == 2 && patrol.PointGroups.Count == 2 &&
+                patrol.PointGroups[1] == 7);
         }
     }
 }

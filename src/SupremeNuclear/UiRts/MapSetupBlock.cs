@@ -403,7 +403,10 @@ namespace SupremeNuclear
         // ---------- выбор ----------
 
         private string _template;
-        private int _players = 2;
+        // Дефолт — персистентный выбор из конфига (долг §12-67(д), как шаблон/сид):
+        // Settings грузит запись уже отклампленной, кламп здесь — защита от вручную
+        // правленого конфига. Ключ карты строится от выбранного players при генерации.
+        private int _players = LobbyState.ClampPlayers(Settings.MapGenPlayers);
 
         internal string Template => _template;
         internal int Players => _players;

@@ -170,22 +170,5 @@ namespace SupremeNuclear
             }
             return p;
         }
-
-        /// <summary>Сохранить профиль (тумблер «AI-командир» панели Скримиша).
-        /// Перечитывается сервисом при следующем входе в миссию (Reset в sceneLoaded).</summary>
-        public static void Save(AiProfile profile)
-        {
-            try
-            {
-                string dir = Path.Combine(Paths.PluginPath, "SupremeNuclear", "AI");
-                Directory.CreateDirectory(dir);
-                string path = Path.Combine(dir, "commander.json");
-                File.WriteAllText(path, JsonConvert.SerializeObject(profile, Formatting.Indented));
-            }
-            catch (System.Exception e)
-            {
-                Log.Warn("AI: профиль не записан (" + e.Message + ")");
-            }
-        }
     }
 }

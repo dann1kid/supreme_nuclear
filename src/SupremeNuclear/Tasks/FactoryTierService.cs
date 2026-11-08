@@ -11,10 +11,10 @@ namespace SupremeNuclear
     /// апгрейдом НА МЕСТЕ; с v0.136 апгрейд — ПОЗИЦИЯ ОЧЕРЕДИ ProductionTasks
     /// (голова, занимает производство), этот сервис — только реестр тиров и цен
     /// (`Production/factory.json`). Тир фабрики рулит каталогом выпуска
-    /// (CanProduce). Владельцы тира: депо (техника), верфь (флот), АЭРОДРОМ
-    /// целиком (авиация: все его ангары наследуют — канон «фабрика одна»;
-    /// авианосцы тем же путём через attached-airbase), площадка-недострой
-    /// (AdoptSite переносит тир на живую здание). Ключи те же, что у
+    /// (CanProduce). Владельцы тира: депо (техника), верфь (флот), КАЖДЫЙ ангар
+    /// отдельно (фабрики разделены, юзер-канон 2026-11-03; авианосцы — их
+    /// ангары как отдельные фабрики), площадка-недострой (AdoptSite переносит
+    /// тир на живое здание). Ключи те же, что у
     /// ProductionTasks.Factories/Rally. Host-only; сцены состояние не переживает
     /// (Reset в sceneLoaded, §4).
     /// </summary>
@@ -61,8 +61,8 @@ namespace SupremeNuclear
         /// (EnqueueUpgrade/UpgradeItemOf).</summary>
         public static object KeyOfFactory(object factory) => factory;
 
-        /// <summary>Тир фабрики (1..3; нет записи — 1). Ангар спрашивает тир
-        /// своего аэродрома; площадка-недострой — свой (Adopt перенесёт).</summary>
+        /// <summary>Тир фабрики (1..3; нет записи — 1) по ключу фабрики
+        /// (ангар — сам ключ); площадка-недострой — свой (Adopt перенесёт).</summary>
         public static int TierOf(object factory)
         {
             object key = KeyOfFactory(factory);
@@ -105,7 +105,6 @@ namespace SupremeNuclear
             switch (key)
             {
                 case Hangar _:
-                case Airbase _:
                     return "air";
                 case VehicleDepot _:
                     return "land";
@@ -261,14 +260,6 @@ namespace SupremeNuclear
                         ? hangar.attachedUnit.NetworkHQ : null;
                 case BuildTasks.Task site:
                     return site?.Faction;
-                case Airbase airbase:
-                    // Тир авиации живёт на аэродроме: владелец — первый живой ангар.
-                    if (airbase?.hangars == null)
-                        return null;
-                    foreach (Hangar hangar in airbase.hangars)
-                        if (hangar != null && hangar.attachedUnit != null)
-                            return hangar.attachedUnit.NetworkHQ;
-                    return null;
                 default:
                     return null;
             }
@@ -303,13 +294,6 @@ namespace SupremeNuclear
             {
                 case BuildTasks.Task site:
                     return BuildTasks.IsActive(site);
-                case Airbase airbase:
-                    if (airbase?.hangars == null)
-                        return false;
-                    foreach (Hangar hangar in airbase.hangars)
-                        if (hangar != null)
-                            return true;
-                    return false;
                 case UnityEngine.Object u:
                     return u != null && !OwnerChangedDead(u);
                 default:
@@ -326,7 +310,6 @@ namespace SupremeNuclear
         {
             switch (key)
             {
-                case Airbase _: return "аэродром";
                 case BuildTasks.Task _: return "площадка";
                 case Building _: return "верфь";
                 default: return "фабрика";

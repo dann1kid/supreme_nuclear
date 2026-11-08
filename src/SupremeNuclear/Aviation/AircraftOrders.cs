@@ -255,13 +255,20 @@ namespace SupremeNuclear
 
             if (mode == AirOrderMode.Patrol)
             {
+                // Долг §12-32: патрульный цикл вечен (Step его не завершает) —
+                // второго не заводим. При несовпадении профиля живой цикл
+                // перештамповывается на текущий выбор игрока (последний выбор
+                // выигрывает — так же тихо живут статические предпочтения) и
+                // точка дописывается в него же.
                 for (int i = plan.Count - 1; i >= 0; i--)
                 {
-                    if (plan[i].Mode == AirOrderMode.Patrol && SameFlightModes(plan[i]))
-                    {
-                        AppendPoint(plan[i], groundPoint, groupId);
-                        return;
-                    }
+                    if (plan[i].Mode != AirOrderMode.Patrol)
+                        continue;
+                    OrderSegment patrol = plan[i];
+                    if (!SameFlightModes(patrol))
+                        RestampProfile(patrol, EffectiveProfile, SpeedIndex);
+                    AppendPoint(patrol, groundPoint, groupId);
+                    return;
                 }
                 var seg = new OrderSegment
                 {
@@ -291,6 +298,22 @@ namespace SupremeNuclear
             Mathf.Approximately(seg.AltAgl, EffectiveProfile.AltitudeAgl) &&
             seg.FollowTerrain == EffectiveProfile.FollowTerrain &&
             seg.Speed == SpeedIndex;
+
+        /// <summary>Перештамповка профиля высоты/скорости СУЩЕСТВУЮЩЕГО сегмента на
+        /// данные значения (штамп — как у новых сегментов). Точки хранят AGL в y —
+        /// переписываем под новый профиль (x/z не меняются). Чистая от статов и
+        /// юнитов — тестируется. Вызовы бампят Version сами (правка планов).</summary>
+        internal static void RestampProfile(OrderSegment seg, FlightProfile profile, SpeedMode speed)
+        {
+            seg.AltAgl = profile.AltitudeAgl;
+            seg.FollowTerrain = profile.FollowTerrain;
+            seg.Speed = speed;
+            for (int i = 0; i < seg.Points.Count; i++)
+            {
+                Vector3 l = seg.Points[i].ToLocalPosition();
+                seg.Points[i] = new Vector3(l.x, seg.AltAgl, l.z).ToGlobalPosition();
+            }
+        }
 
         public static void SetPatrol(Unit aircraft, Vector3 groundPoint, int groupId = 0)
         {
@@ -555,15 +578,7 @@ namespace SupremeNuclear
             if (!changed)
                 return false;
             Version++;
-            seg.AltAgl = EffectiveProfile.AltitudeAgl;
-            seg.FollowTerrain = EffectiveProfile.FollowTerrain;
-            seg.Speed = SpeedIndex;
-            // Точки хранят AGL в y — переписываем под новый профиль (x/z не меняются).
-            for (int i = 0; i < seg.Points.Count; i++)
-            {
-                Vector3 l = seg.Points[i].ToLocalPosition();
-                seg.Points[i] = new Vector3(l.x, seg.AltAgl, l.z).ToGlobalPosition();
-            }
+            RestampProfile(seg, EffectiveProfile, SpeedIndex);
             return true;
         }
 

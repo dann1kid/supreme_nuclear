@@ -25,8 +25,6 @@ namespace SupremeNuclear
             object key = FactoryTierService.KeyOfFactory(factory);
             if (key == null || key is UnityEngine.Object u && u == null)
                 return false;
-            if (key is Airbase ab && !AirbaseAlive(ab))
-                return false;
             int from = PendingTierOf(key);
             // Ветка выбрана (тир ≥2 или апгрейд уже стоит) — следующие переходы
             // ТОЛЬКО её ветки (юзер-канон 2026-11-03): ШТАБ→ШТАБ, дешёвая→дешёвая.
@@ -59,7 +57,7 @@ namespace SupremeNuclear
             });
             Version++;
             Log.Info("FactoryTier: апгрейд до T" + (from + 1) + (hq ? " ШТАБ" : "") +
-                     " в очередь фабрики (" + (key is Airbase ? "аэродром" : "фабрика") + ")");
+                     " в очередь фабрики");
             return true;
         }
 
@@ -235,7 +233,6 @@ namespace SupremeNuclear
                     item.Depot = depot;
                     item.Hangar = hangar;
                     item.Dock = dock;
-                    item.Base = null;
                     continue;
                 }
                 if (depot != null && item.GroundDef != null)

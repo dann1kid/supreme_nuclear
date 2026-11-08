@@ -23,8 +23,6 @@ namespace SupremeNuclear
             public BuildTasks.Task Site;        // ...или НЕДОСТРОЙ (v0.107): очередь копится
                                                 // до завершения стройки, затем AdoptSite
                                                 // переносит позиции на живую фабрику
-            public Airbase Base;                // ...или АЭРОДРОМ целиком: апгрейд тира
-                                                // авиации (v0.136) — тир/очередь живут на базе
             public bool IsUpgrade;              // позиция = АПГРЕЙД ТИРА фабрики (не юнит):
                                                 // встаёт ГОЛОВОЙ и занимает производство (SupCom)
             public int ToTier;                  // ...целевой тир апгрейда
@@ -50,8 +48,7 @@ namespace SupremeNuclear
             public object Factory => Depot != null ? (object)Depot
                 : Hangar != null ? (object)Hangar
                 : Dock != null ? (object)Dock
-                : Site != null ? (object)Site
-                : (object)Base;
+                : (object)Site;
             public UnitDefinition UnitDef => (UnitDefinition)GroundDef
                 ?? (UnitDefinition)AirDef ?? NavalDef;
             public float Progress01 => Cost > 0f ? Mathf.Clamp01(PaidMass / Cost) : 0f;
@@ -70,9 +67,9 @@ namespace SupremeNuclear
         /// new Dictionary на каждый кадр при непустой очереди).</summary>
         private static readonly Dictionary<(object factory, UnitDefinition def), int> PaidSlotsMap =
             new Dictionary<(object factory, UnitDefinition def), int>();
-        /// <summary>Аэродромы с идущим апгрейдом тира (кадровый набор): их ангары
-        /// не наливаются — апгрейд занимает производство базы (SupCom).</summary>
-        private static float _nextUpgradeDiag; // троттл диагностики апгрейд-позиций (5 с)
+        /// <summary>Троттл диагностики апгрейд-позиций (5 с); фабрики наливаются
+        /// независимо — склейки через аэродром нет с 2026-11-03.</summary>
+        private static float _nextUpgradeDiag;
         private static float _nextStallNotice; // троттл Notice энергостолла (10 с)
         private static readonly Dictionary<object, FactoryState> Factories =
             new Dictionary<object, FactoryState>();
@@ -352,30 +349,7 @@ namespace SupremeNuclear
             item.Depot != null ? item.Depot.NetworkHQ
                 : item.Hangar != null ? item.Hangar?.attachedUnit?.NetworkHQ
                 : item.Dock != null ? item.Dock?.NetworkHQ
-                : item.Base != null ? AirbaseFaction(item.Base)
                 : item.Site?.Faction;
-
-        /// <summary>Фракция аэродрома — по первому живому ангару (Airbase — не Unit).</summary>
-        private static FactionHQ AirbaseFaction(Airbase airbase)
-        {
-            if (airbase?.hangars == null)
-                return null;
-            foreach (Hangar hangar in airbase.hangars)
-                if (hangar != null && hangar.attachedUnit != null)
-                    return hangar.attachedUnit.NetworkHQ;
-            return null;
-        }
-
-        /// <summary>Аэродром жив, пока жив хоть один его ангар.</summary>
-        private static bool AirbaseAlive(Airbase airbase)
-        {
-            if (airbase == null || airbase.hangars == null)
-                return false;
-            foreach (Hangar hangar in airbase.hangars)
-                if (hangar != null)
-                    return true;
-            return false;
-        }
 
         /// <summary>Групповая пауза (мультивыделение фабрик): состояние УНИФИЦИРУЕТСЯ —
         /// все на паузу либо все сняты, а не инверсия каждого (смешанное выделение

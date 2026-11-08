@@ -189,12 +189,10 @@ namespace SupremeNuclear
                 FactionHQ hq = FactionOf(item);
                 bool dead = hq == null ||
                             (item.Depot == null && item.Hangar == null &&
-                             item.Dock == null && item.Site == null &&
-                             item.Base == null) ||
+                             item.Dock == null && item.Site == null) ||
                             (item.Depot != null && item.Depot.disabled) ||
                             (item.Hangar != null && item.Hangar.Disabled) ||
-                            (item.Dock != null && item.Dock.disabled) ||
-                            (item.Base != null && !AirbaseAlive(item.Base));
+                            (item.Dock != null && item.Dock.disabled);
                 if (dead)
                 {
                     Refund(item); // фабрика умерла — возврат
@@ -229,8 +227,7 @@ namespace SupremeNuclear
                 // плейтест v0.96: верфь с разными типами кораблей платилась в 2+).
                 object factory = item.Factory;
                 var slotKey = (factory: factory,
-                    def: item.Depot != null || item.Dock != null || item.Base != null
-                        ? null : item.UnitDef);
+                    def: item.Depot != null || item.Dock != null ? null : item.UnitDef);
                 paidSlots.TryGetValue(slotKey, out int usedSlot);
                 // Фабрики РАЗДЕЛЕНЫ (юзер-канон 2026-11-03): каждый ангар — своя
                 // фабрика со своим потоком; былой «апгрейд базы занимает все
@@ -491,7 +488,8 @@ namespace SupremeNuclear
                 return;
             // Патрульное ралли (§12-30): Enqueue(Patrol) дописывает точки в ОДИН
             // патрульный сегмент (слияние SameFlightModes) — второй вечный цикл
-            // не заводится (долг §12-32 не воспроизводится).
+            // не заводится. Долг §12-32 не воспроизводится НА ПУТИ РАЛЛИ (Set
+            // заменяет план до серии Enqueue); фикс Enqueue-пути — v0.169.0.
             AirOrderMode mode = route.Patrol ? AirOrderMode.Patrol : AirOrderMode.Transit;
             AircraftOrders.Set(aircraft, mode,
                 route.Points[0].ToLocalPosition(), route.Groups[0]);
