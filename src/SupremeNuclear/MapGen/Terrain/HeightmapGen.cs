@@ -541,6 +541,103 @@ namespace SupremeNuclear
     /// </summary>
     public static class HeightmapGen
     {
+        /// <summary>Бутты (v0.173): изолированные возвышенности-укрытия.
+        /// Плоская вершина (35% радиуса) на butteHeightM (выше снега — белая
+        /// шапка), smoothstep-склон к основанию. Позиции детерминированы
+        /// seed'ом, кольцо 28..60% половины стороны, вне осевой полосы баз
+        /// (|z| ≥ 8 км), primary симметрии + образы.</summary>
+        private static bool RampPrimary(int i, int j, int w, string symmetry)
+        {
+            switch (symmetry)
+            {
+                case "quadrant": return i < w / 2 && j < w / 2;
+                case "rotational": return j < w / 2;
+                case "none": return true;
+                default: return i < w / 2;
+            }
+        }
+
+        private static IEnumerable<Vector2> RampImages(int i, int j, int w, string symmetry)
+        {
+            var list = new List<Vector2> { new Vector2(i, j) };
+            switch (symmetry)
+            {
+                case "quadrant":
+                    list.Add(new Vector2(w - 1 - i, j));
+                    list.Add(new Vector2(i, w - 1 - j));
+                    list.Add(new Vector2(w - 1 - i, w - 1 - j));
+                    break;
+                case "rotational":
+                    list.Add(new Vector2(w - 1 - i, w - 1 - j));
+                    break;
+            }
+            return list;
+        }
+
+        private static float Smoothstep01(float t)
+        {
+            t = t < 0f ? 0f : t > 1f ? 1f : t;
+            return t * t * (3f - 2f * t);
+        }
+
+        private static void StampButtes(float[,] height, int w, float cellM,
+            ScenarioTemplate.TerrainSettings t, int seed)
+        {
+            var rng = new System.Random(seed + 9151);
+            float halfM = w * cellM * 0.5f;
+            float rIn = t.butteRadiusM * 0.35f;
+            int placed = 0;
+            for (int attempt = 0; attempt < 80 && placed < t.butteCount; attempt++)
+            {
+                float ang = (float)rng.NextDouble() * 2f * Mathf.PI;
+                float rad = halfM * (0.28f + 0.32f * (float)rng.NextDouble());
+                float x = Mathf.Cos(ang) * rad;
+                float z = Mathf.Sin(ang) * rad;
+                // зеркальные правки под primary-область симметрии
+                if (t.symmetry != "none" && t.symmetry != "rotational")
+                    x = -Mathf.Abs(x);
+                if (t.symmetry == "quadrant")
+                    z = -Mathf.Abs(z);
+                if (Mathf.Abs(z) < 8000f)
+                    continue; // осевая полоса баз/коридоров свободна
+                int ci = Mathf.Clamp((int)((x + halfM) / cellM), 0, w - 1);
+                int cj = Mathf.Clamp((int)((z + halfM) / cellM), 0, w - 1);
+                if (!RampPrimary(ci, cj, w, t.symmetry))
+                    continue;
+                var center = new Vector2(ci, cj);
+                StampButte(height, w, ci, cj, t.butteHeightM, rIn, t.butteRadiusM, cellM);
+                foreach (var im in RampImages(ci, cj, w, t.symmetry))
+                {
+                    if (im.x == ci && im.y == cj)
+                        continue;
+                    StampButte(height, w, (int)im.x, (int)im.y,
+                        t.butteHeightM, rIn, t.butteRadiusM, cellM);
+                }
+                placed++;
+            }
+        }
+
+        /// <summary>Купол бутты: плато 35% радиуса на plateauH, smoothstep-спуск
+        /// к основанию (дистанции в метрах; di/dj — клетки).</summary>
+        private static void StampButte(float[,] height, int w, int ci, int cj,
+            float plateauH, float rIn, float rOut, float cellM)
+        {
+            int reach = Mathf.CeilToInt(rOut / cellM) + 1;
+            for (int dj = -reach; dj <= reach; dj++)
+                for (int di = -reach; di <= reach; di++)
+                {
+                    int x = ci + di, y = cj + dj;
+                    if (x < 0 || x >= w || y < 0 || y >= w)
+                        continue;
+                    float dist = Mathf.Sqrt(di * di + dj * dj) * cellM;
+                    if (dist > rOut)
+                        continue;
+                    float fall = Mathf.Clamp01((dist - rIn) / Mathf.Max(1f, rOut - rIn));
+                    float profile = 1f - Smoothstep01(fall);
+                    height[x, y] = Mathf.Lerp(height[x, y], plateauH, profile);
+                }
+        }
+
         /// <summary>Нормализация стиля шаблона (неизвестный → land).</summary>
         public static string StyleOf(string style)
         {
@@ -715,6 +812,17 @@ namespace SupremeNuclear
                             1f - Smoothstep(0f, 1f, d / edgeFall));
                 }
             });
+
+            // БУТТЫ (v0.173, юзер «приподнять элементы — укрытия для бункеров
+            // и баз»): изолированные возвышенности с ПЛОСКОЙ вершиной выше
+            // снеговой линии (белая шапка) и плавными склонами. Позиции —
+            // детерминированно от seed, кольцо 28..60% половины стороны
+            // (не в краевых горах, не в осевой полосе баз/коридоров — |z| ≥ 8 км),
+            // primary область симметрии + зеркальные образы (Symmetrize
+            // затем дочищает). Профиль: плато 35% радиуса, smoothstep к
+            // основанию — уклон склона ~30°, читается как столовая гора.
+            if (t.butteCount > 0 && t.butteHeightM > 0f && t.butteRadiusM > 0f)
+                StampButtes(map.Height, w, map.Step, t, seed);
 
             // СИММЕТРИЯ (юзер-канон 2026-11-03 «несколько осей, бесшовно»):
             // усреднение с отражением — паттерн Neroxis: строгая симметрия по

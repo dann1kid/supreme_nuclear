@@ -52,7 +52,10 @@
     "battleScars": 0.7,
     "decalAmount": 0.7,
     "symmetry": "rotational",
-    "rampDensity": 0.6
+    "rampDensity": 0.6,
+    "butteCount": 8,
+    "butteHeightM": 950.0,
+    "butteRadiusM": 2900.0
   },
   "baseInset": 0.4,
   "depositCount": 14,

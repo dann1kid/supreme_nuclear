@@ -131,6 +131,12 @@ namespace SupremeNuclear
                                                 // съезды между уровнями террас — по обрывам
                                                 // бленд к неготорцованным холмам ≈10°;
                                                 // нижние ярусы плато становятся играбельными
+            public int butteCount = 0;          // изолированные возвышенности-укрытия (шт,
+                                                // 0 = выкл; в пресетах 8): плоская вершина
+                                                // выше снеговой линии (белая шапка) — бункера,
+                                                // плавные склоны-укрытия для манёвров
+            public float butteHeightM = 950f;   // высота вершины над уровнем моря (> snowHeightM)
+            public float butteRadiusM = 2900f;  // радиус основания; плато ~35% радиуса
 
             /// <summary>Хеш морфологии (все поля стиля/рельефа, FNV-1a): входит в
             /// ключ карты — правка JSON-шаблона не коллизирует миры в реестре Built
@@ -160,6 +166,7 @@ namespace SupremeNuclear
                     Mix(ref h, treeDensity); Mix(ref h, wearAmount);
                     Mix(ref h, wetBandM); Mix(ref h, battleScars); Mix(ref h, decalAmount);
                     Mix(ref h, rampDensity); // рампы запекаются в префаб — урок дрессинга
+                    Mix(ref h, butteCount); Mix(ref h, butteHeightM); Mix(ref h, butteRadiusM);
                     Mix(ref h, style); Mix(ref h, symmetry); Mix(ref h, waterColor); Mix(ref h, shallowColor);
                     Mix(ref h, beachColor); Mix(ref h, cliffColor);
                     if (palette != null)
