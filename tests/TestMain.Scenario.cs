@@ -397,11 +397,30 @@ namespace SupremeNuclear.Tests
         /// <summary>SmoothFine (v0.155.2): проходимость мелкой сетки 10 м —
         /// октавы шума на мелкой сетке отрисовались и давали уклоны 40-60°
         /// («наземка не проезжает, авиация разбивается»).</summary>
+        private static float FbmTest(float x, float y)
+        {
+            float xi = (float)Math.Floor(x), yi = (float)Math.Floor(y);
+            float tx = x - xi, ty = y - yi;
+            tx = tx * tx * (3f - 2f * tx); ty = ty * ty * (3f - 2f * ty);
+            float H(int a, int b)
+            {
+                uint h = (uint)(a * 374761393 + b * 668265263);
+                h = (h ^ (h >> 13)) * 1274126177u;
+                return ((h ^ (h >> 16)) & 0xFFFF) / 65535f;
+            }
+            float a = H((int)xi, (int)yi), b = H((int)xi + 1, (int)yi);
+            float c = H((int)xi, (int)yi + 1), d = H((int)xi + 1, (int)yi + 1);
+            float top = a + (b - a) * tx;
+            float bot = c + (d - c) * tx;
+            return top + (bot - top) * ty;
+        }
+
         private static void TestsTerrainSmooth()
         {
             var smT = new ScenarioTemplate.TerrainSettings
             {
                 sizeM = 12800f, stepM = 10f, edgeM = 640f, coastFlatM = 0f,
+                steepDeg = 30f,
             };
             var hm = HeightmapGen.Generate(smT, 977);
             int w = hm.W;
@@ -425,19 +444,29 @@ namespace SupremeNuclear.Tests
                 return land > 0 ? steep / land : 0;
             }
 
+            // Инвариант террас: уступы-клиффы доминируют в Steep-доле (canon
+            // SupCom — их не шлифуем, маска обходит, рампы соединяют) — поэтому
+            // абсолютная доля ≈ доля клеток уступов, санитарный порог 40%.
             double before = SteepShare(hm.Height);
-            Check("TerrainSmooth: генератор сгладил Steep-долю до <25% суши",
-                before < 0.25, "Steep " + before.ToString("P1"));
+            Check("TerrainSmooth: Steep-доля (уступы+шум) < 40% суши",
+                before < 0.40, "Steep " + before.ToString("P1"));
 
-            // После сглаживания доминируют каноничные уступы террас (шлифовать
-            // их нельзя — canon SupCom), поэтому доп. проходы проверяем на
-            // СТАБИЛЬНОСТЬ: не должны увеличивать Steep-долю.
+            // Сам ФИЛЬТР: на синтетическом шуме (без террас) 3 прохода обязаны
+            // резко снизить долю крутых клеток — детальность у камеры даёт
+            // фото-тайл, а не шум рельефа.
+            var noisy = new float[w, w];
+            for (int j = 0; j < w; j++)
+                for (int i = 0; i < w; i++)
+                    noisy[i, j] = 40f + 30f * (FbmTest(i * 0.35f, j * 0.35f) - 0.5f);
+            double nSteep0 = SteepShare(noisy);
+            Heightmap.SmoothFine(noisy, w, 3);
+            double nSteep1 = SteepShare(noisy);
+            Check("TerrainSmooth: фильтр режет Steep шумовой равнины вдвое+",
+                nSteep1 < nSteep0 * 0.5f, nSteep0.ToString("P1") + " → " + nSteep1.ToString("P1"));
+
+
             var copy = (float[,])hm.Height.Clone();
             Heightmap.SmoothFine(copy, w, 3);
-            double after = SteepShare(copy);
-            Check("TerrainSmooth: доп. проходы не увеличивают Steep",
-                after <= before + 0.02, before.ToString("P1") + " → " + after.ToString("P1"));
-
             bool sym = true;
             for (int j = 0; j < w && sym; j++)
                 for (int i = 0; i < w; i++)

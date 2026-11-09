@@ -127,6 +127,10 @@ namespace SupremeNuclear
             public float decalAmount = 0.7f;    // плотность декалей 0..1: грязь у кромки
                                                 // воды, потёртости вдоль коридоров,
                                                 // проталины на равнинах (DecalProjector)
+            public float rampDensity = 0.6f;    // плотность рамп Neroxis 0..1 (0 = выкл):
+                                                // съезды между уровнями террас — по обрывам
+                                                // бленд к неготорцованным холмам ≈10°;
+                                                // нижние ярусы плато становятся играбельными
 
             /// <summary>Хеш морфологии (все поля стиля/рельефа, FNV-1a): входит в
             /// ключ карты — правка JSON-шаблона не коллизирует миры в реестре Built
@@ -155,6 +159,7 @@ namespace SupremeNuclear
                     // «иногда остаётся старая карта»)
                     Mix(ref h, treeDensity); Mix(ref h, wearAmount);
                     Mix(ref h, wetBandM); Mix(ref h, battleScars); Mix(ref h, decalAmount);
+                    Mix(ref h, rampDensity); // рампы запекаются в префаб — урок дрессинга
                     Mix(ref h, style); Mix(ref h, symmetry); Mix(ref h, waterColor); Mix(ref h, shallowColor);
                     Mix(ref h, beachColor); Mix(ref h, cliffColor);
                     if (palette != null)

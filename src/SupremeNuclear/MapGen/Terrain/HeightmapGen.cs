@@ -337,9 +337,11 @@ namespace SupremeNuclear
         internal static void SmoothFine(float[,] height, int w, int passes)
         {
             // Чтение из БУФЕРА ИСХОДНЫХ значений: in-place проход слева-направо
-            // ломал зеркальную симметрию (урок SmoothRamps, 2026-10-30). Пара
-            // левый/правый суммируется как min+max — float-сложение у зеркальной
-            // пары идёт в разном порядке, канонизация даёт байт-в-байт равенство.
+            // ломал зеркальную симметрию (урок SmoothRamps, 2026-10-30). Ядро
+            // 3×3 (8 соседей)/9 — сильней гашение мелких частот, чем кросс/6.
+            // Каждая зеркальная ПАРА соседей суммируется как min+max — float-
+            // сложение у пары идёт в разном порядке, канонизация даёт
+            // байт-в-байт равенство симметрии.
             var src = new float[w, w];
             for (int pass = 0; pass < passes; pass++)
             {
@@ -351,10 +353,121 @@ namespace SupremeNuclear
                         float r = i < w - 1 ? src[i + 1, j] : src[i, j];
                         float u = j > 0 ? src[i, j - 1] : src[i, j];
                         float d = j < w - 1 ? src[i, j + 1] : src[i, j];
-                        height[i, j] = (src[i, j] + u + d
-                            + Math.Min(l, r) + Math.Max(l, r)) / 6f;
+                        float lu = i > 0 && j > 0 ? src[i - 1, j - 1] : src[i, j];
+                        float rd = i < w - 1 && j < w - 1 ? src[i + 1, j + 1] : src[i, j];
+                        float ld = i > 0 && j < w - 1 ? src[i - 1, j + 1] : src[i, j];
+                        float ru = i < w - 1 && j > 0 ? src[i + 1, j - 1] : src[i, j];
+                        // ПАРЫ — строго зеркальные: (l,r) и (ld+ru, lu+rd) —
+                        // сумма min+max канонична для зеркальной клетки (порядок
+                        // сложения совпадает), иначе сглаживание асимметрично и
+                        // само шумит (плейтест 2026-11-08: симметрия ломалась)
+                        float lr = Math.Min(l, r) + Math.Max(l, r);
+                        float dg1 = ld + ru, dg2 = lu + rd;
+                        float dg = Math.Min(dg1, dg2) + Math.Max(dg1, dg2);
+                        height[i, j] = (src[i, j] + u + d + lr + dg) / 9f;
                     }
             }
+        }
+
+        /// <summary>Рампы Neroxis (v0.155.3): по обрывам между уровнями террас
+        /// вырезаются съезды — в кружке радиуса ~6 ступеней высоты блендятся к
+        /// неготорцованным гладким холмам (уклон съезда ≈ уклону холмов, ~10°).
+        /// Детерминизм — хэш клетки; выбор — в первичной области симметрии,
+        /// образы штампуются отдельно; минимальная дистанция между рампами.
+        /// Подводные обрывы пропускаются (шельф/глубинный жим пологят сами).</summary>
+        internal static int StampTerraceRamps(float[,] h, float[,] hSmooth, int w,
+            float cellM, float terraceStepM, float seaLevel, string symmetry,
+            int seed, float density)
+        {
+            float cliff = terraceStepM * 0.9f;
+            // Радиус 3 ступени (120 м при 40 м ступени): уклон съезда 40/120 ≈ 18°,
+            // играбельно (<30°). Радиус В КЛЕТКАХ = метры/cellM БЕЗ мин-клампа:
+            // кламп «3 клетки» на крупной сетке (80 м) раздувал рампу до 240 м
+            // и выедал плоские плато (тест «плоских ≥15%», 2026-11-08).
+            int radius = Math.Max(1, (int)(terraceStepM * 3f / cellM));
+            int minDist = Math.Max(radius, (int)(2500f / cellM));
+            int half = w / 2;
+            var centers = new List<Vector2>();
+            int total = 0;
+            for (int j = 1; j < w - 1; j++)
+                for (int i = 1; i < w - 1; i++)
+                {
+                    float d1 = Math.Abs(h[i + 1, j] - h[i, j]);
+                    float d2 = Math.Abs(h[i, j + 1] - h[i, j]);
+                    if (Math.Max(d1, d2) < cliff)
+                        continue;
+                    if (Math.Min(h[i, j], Math.Min(h[i + 1, j], h[i, j + 1])) < seaLevel + 1f)
+                        continue; // подводный обрыв — пологят шельф/жим
+                    if (!RampPrimary(i, j, w, symmetry))
+                        continue;
+                    if (RampHash(i, j, seed) > density)
+                        continue;
+                    var pnt = new Vector2(i, j);
+                    bool tooClose = false;
+                    foreach (var c in centers)
+                        if (Vector2.Distance(c, pnt) < minDist)
+                        { tooClose = true; break; }
+                    if (tooClose)
+                        continue;
+                    centers.Add(pnt);
+                    foreach (var im in RampImages(i, j, w, symmetry))
+                    {
+                        StampRamp(h, hSmooth, w, (int)im.x, (int)im.y, radius);
+                        total++;
+                    }
+                }
+            return total;
+        }
+
+        private static bool RampPrimary(int i, int j, int w, string symmetry)
+        {
+            switch (symmetry)
+            {
+                case "quadrant": return i < w / 2 && j < w / 2;
+                case "rotational": return j < w / 2;
+                case "none": return true;
+                default: return i < w / 2; // mirror — канон дуэлей
+            }
+        }
+
+        private static IEnumerable<Vector2> RampImages(int i, int j, int w, string symmetry)
+        {
+            var list = new List<Vector2> { new Vector2(i, j) };
+            switch (symmetry)
+            {
+                case "quadrant":
+                    list.Add(new Vector2(w - 1 - i, j));
+                    list.Add(new Vector2(i, w - 1 - j));
+                    list.Add(new Vector2(w - 1 - i, w - 1 - j));
+                    break;
+                case "rotational":
+                    list.Add(new Vector2(w - 1 - i, w - 1 - j));
+                    break;
+            }
+            return list;
+        }
+
+        private static float RampHash(int i, int j, int seed)
+        {
+            uint h = (uint)(i * 374761393 + j * 668265263 + seed * 1442695041);
+            h = (h ^ (h >> 13)) * 1274126177u;
+            return ((h ^ (h >> 16)) & 0xFFFF) / 65535f;
+        }
+
+        private static void StampRamp(float[,] h, float[,] hSmooth, int w, int ci, int cj, int radius)
+        {
+            for (int dj = -radius; dj <= radius; dj++)
+                for (int di = -radius; di <= radius; di++)
+                {
+                    int x = ci + di, y = cj + dj;
+                    if (x < 0 || x >= w || y < 0 || y >= w)
+                        continue;
+                    float dist = (float)Math.Sqrt(di * di + dj * dj);
+                    float t = 1f - Smoothstep01((dist - radius * 0.3f) / (radius * 0.7f));
+                    if (t <= 0f)
+                        continue;
+                    h[x, y] = Lerp(h[x, y], hSmooth[x, y], t);
+                }
         }
 
         private static readonly float[] _nb = new float[8];
@@ -503,9 +616,13 @@ namespace SupremeNuclear
                                              // проходом Symmetrize (усреднение с
                                              // отражением = гладкие оси без швов)
                 {
+                    // v0.155.2 «макрорельеф шумный»: 4 октавы value-noise =
+                    // бугор на бугре (каждая клетка решётки свой прыщик).
+                    // МАКРО-формы — две старшие октавы (длинные волны), мелочь
+                    // сверху приносят фото-тайлы и нормаль, не высоты.
                     float rolling = t.plainHeight +
-                                    (Fbm(i * k * t.plainFreq, j * k * t.plainFreq, seed, 4) - 0.5f) * 2f * t.gentleAmp +
-                                    (Fbm(i * k * t.hillsFreq + 21.7f, j * k * t.hillsFreq, seed + 999, 4) - 0.5f) * 2f * t.hillsAmp;
+                                    (Fbm(i * k * t.plainFreq, j * k * t.plainFreq, seed, 2) - 0.5f) * 2f * t.gentleAmp +
+                                    (Fbm(i * k * t.hillsFreq + 21.7f, j * k * t.hillsFreq, seed + 999, 2) - 0.5f) * 2f * t.hillsAmp;
                     // Редкие внутренние хребты (DESIGN §2.4 «горы по краям и редкие хребты»):
                     // гребневый шум, вскрытый низкочастотной маской-пятнами.
                     float mask = Smoothstep(t.ridgeMaskStart, t.ridgeMaskEnd,
@@ -548,7 +665,7 @@ namespace SupremeNuclear
                         {
                             // Полуморская: крупные внутренние моря fBm-пятнами,
                             // суша доминирует; краевые горы остаются (море их срезает).
-                            float n = Fbm(x / t.seaScaleM + 5.1f, z / t.seaScaleM, seed + 444, 4);
+                            float n = Fbm(x / t.seaScaleM + 5.1f, z / t.seaScaleM, seed + 444, 3);
                             float thr = ThrSym(0.68f - 0.30f * water);
                             float sea = Smoothstep(thr, thr + 0.10f, n);
                             h = Lerp(landH + mtn, t.oceanFloorM, sea);
@@ -558,7 +675,7 @@ namespace SupremeNuclear
                         {
                             // Морская: океан + архипелаг мелких островов fBm-порогом
                             // (острова баз поднимаются отдельно — IslandBump ниже).
-                            float n = Fbm(x / t.islandScaleM + 9.7f, z / t.islandScaleM, seed + 888, 4);
+                            float n = Fbm(x / t.islandScaleM + 9.7f, z / t.islandScaleM, seed + 888, 3);
                             float thr = ThrSym(0.71f - 0.22f * water);
                             float isle = Smoothstep(thr, thr + 0.12f, n);
                             h = Lerp(t.oceanFloorM, landH, isle);
@@ -624,11 +741,34 @@ namespace SupremeNuclear
             // разбивается», плейтест 2026-11-07), террасы затем квантуют уже
             // сглаженные холмы (уступы-клиффы остаются каноном SupCom, а шум
             // между плато исчезает). Порядок: Symmetrize → SmoothFine → Terrace.
-            int smoothPasses = t.stepM <= 10 ? 3 : t.stepM <= 20 ? 1 : 0;
+            int smoothPasses = t.stepM <= 10 ? 6 : t.stepM <= 20 ? 2 : 0;
             if (smoothPasses > 0)
                 Heightmap.SmoothFine(map.Height, w, smoothPasses);
 
+            // Для рамп Neroxis: неготорцованные гладкие холмы — к ним блендятся
+            // съезды (268 МБ transient на 8192², только при включённых рамках)
+            float[,] hSmoothPre = t.rampDensity > 0f
+                ? (float[,])map.Height.Clone()
+                : null;
+
             Heightmap.Terrace(map.Height, w, t.terraceStepM);
+
+            // РАМПЫ НЕРОКСИ (v0.155.3, плейтест «нет плавных переходов, только
+            // набор плато — нижние ярусы не играбельны»): по обрывам между
+            // уровнями террас вырезаются СЪЕЗДЫ — бленд к гладким холмам в
+            // кружке ≈6 ступеней даёт уклон съезда ~10° (играбельно).
+            // Generate — ЧИСТЫЙ класс: Log (BepInEx) в тестовом раннере
+            // недоступен; счётчик рамп возвращается вызывающему (RuntimeMap).
+            if (t.rampDensity > 0f)
+                Heightmap.StampTerraceRamps(map.Height, hSmoothPre, w,
+                    t.stepM, t.terraceStepM, map.SeaLevel, t.symmetry, seed,
+                    t.rampDensity);
+
+            // РАМПЫ ЛОМАЮТ СИММЕТРИЮ (штамп читает уже изменённое поле — краевые
+            // рампы в полосе затопления асимметричны, плейтест 2026-11-08: угол
+            // карты ±8 м): механическая гарантия — повторное усреднение с
+            // отражением, как в основном Symmetrize (islands — max-join).
+            Symmetrize(map.Height, w, t.symmetry, style != "islands");
             // Рампы террас сглаживаются: узкая рампа имеет уклон 1/(2·soft) ~45°+
             // независимо от высоты ступени — наземка ходит между плато на грани.
             // Два прохода усреднения по крутым клеткам разводят уклон (~30°),
@@ -636,16 +776,6 @@ namespace SupremeNuclear
             // клетки: при stepM 100 м порог «0.7·клетки» жевал бы ступени 70 м.
             Heightmap.SmoothRamps(map.Height, w, t.stepM, t.terraceStepM);
 
-            // ПЛАВНОСТЬ МЕЛКОЙ СЕТКИ (v0.155.2, плейтест 2026-11-07 «наземка не
-            // проезжает, авиация разбивается»): октавы шума — мировые по частоте,
-            // НО на 40-м клетки мелкие октавы алиасьились (период < клетки —
-            // усреднялся в гладкость), а на 10-м отрисовались по-настоящему:
-            // у 62-метровой октавы холмов ±60 м локальный уклон ~48° прямо на
-            // равнинах → Steep-маска режет проезд, микро-пики ловят низколёт.
-            // Лечение — кросс-сглаживание (self+4 соседа /6), число проходов по
-            // шагу: 10 м → 3, 20 м → 1, крупнее — 0. Крупные формы (периоды
-            // ≥1000 м) фильтр почти не трогает (≈1.0), возвращает симметрия
-            // (ядро симметрично по X-зеркалу), детерминизм — порядок фиксирован.
 
             // ПОЛОГИЙ БЕРЕГ (юзер-канон 2026-11-04 «инженеры скатились на дно»):
             // ПОСЛЕ террас — террасная лестница у кромки воды крута (ступени

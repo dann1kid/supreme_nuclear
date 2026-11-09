@@ -12,11 +12,11 @@
     "islandScaleM": 8000.0,
     "baseIslandRadiusM": 4500.0,
     "plainHeight": 40.0,
-    "gentleAmp": 70.0,
+    "gentleAmp": 18.0,
     "plainFreq": 0.03,
-    "hillsAmp": 120.0,
+    "hillsAmp": 30.0,
     "hillsFreq": 0.012,
-    "terraceStepM": 70.0,
+    "terraceStepM": 0.0,
     "coastWobble": 0.12,
     "mountainHeight": 900.0,
     "mountainStart": 0.62,
@@ -24,7 +24,7 @@
     "ridgeMaskStart": 0.55,
     "ridgeMaskEnd": 0.72,
     "seaLevelM": 0.0,
-    "steepDeg": 25.0,
+    "steepDeg": 30.0,
     "edgeM": 2000.0,
     "palette": [
       "#3f5b2e",
@@ -51,7 +51,8 @@
     "wetBandM": 130.0,
     "battleScars": 0.7,
     "decalAmount": 0.7,
-    "symmetry": "rotational"
+    "symmetry": "rotational",
+    "rampDensity": 0.6
   },
   "baseInset": 0.4,
   "depositCount": 14,
