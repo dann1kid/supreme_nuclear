@@ -627,7 +627,11 @@ namespace SupremeNuclear
                     // гребневый шум, вскрытый низкочастотной маской-пятнами.
                     float mask = Smoothstep(t.ridgeMaskStart, t.ridgeMaskEnd,
                         Fbm(i * k * 0.008f + 13.3f, j * k * 0.008f, seed + 555, 3));
-                    float ridge = Ridge(i * k * 0.06f + 7.7f, j * k * 0.06f, seed) * mask * t.ridgeHeight;
+                                        // v0.171 «естественный ленд»: гребни ДЛИННЕЕ (период ~900 м
+                    // вместо 530) и плавнее — на старой 40-м сетке мелкая рябь
+                    // гребней алиасьилась в гладкость, на 10 м стала стеной;
+                    // редкость обеспечивает маска (см. пресеты 0.66/0.80).
+                    float ridge = Ridge(i * k * 0.035f + 7.7f, j * k * 0.035f, seed) * mask * t.ridgeHeight;
                     float landH = rolling + ridge;
 
                     // Радиус (доля half) с изрезанной кромкой — у coast это кромка
