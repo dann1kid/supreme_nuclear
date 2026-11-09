@@ -18,7 +18,7 @@
     "hillsFreq": 0.012,
     "terraceStepM": 0.0,
     "coastWobble": 0.12,
-    "mountainHeight": 900.0,
+    "mountainHeight": 2400.0,
     "mountainStart": 0.62,
     "ridgeHeight": 120.0,
     "ridgeMaskStart": 0.66,
