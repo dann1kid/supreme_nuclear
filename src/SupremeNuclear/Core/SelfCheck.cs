@@ -535,7 +535,7 @@ namespace SupremeNuclear
                     throw new System.Exception("Faction.color недоступен (цвет-чип армии)");
                 if (HarmonyLib.AccessTools.Method(typeof(FactionHQ), "DeclareEndGame") == null)
                     throw new System.Exception("FactionHQ.DeclareEndGame не найден (командная победа/уничтожение)");
-                if (HarmonyLib.AccessTools.Property(typeof(FactionHQ), "factionUnits") == null)
+                if (InstanceMember(typeof(FactionHQ), "factionUnits") == null)
                     throw new System.Exception("FactionHQ.factionUnits недоступен (проверка уничтожения)");
                 if (HarmonyLib.AccessTools.Property(typeof(Unit), "NetworkHQ") == null)
                     throw new System.Exception("Unit.NetworkHQ недоступен (союзный гейт оружия)");

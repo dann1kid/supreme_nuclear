@@ -44,6 +44,10 @@ namespace SupremeNuclear
         // радиусе бустит доход БЛИЖАЙШЕЙ точки (пара 1:1, буст не стакается).
         public float storageBoost = 0.25f;   // +25% дохода точки
         public float storageRadiusM = 120f;  // радиус пары хранилище↔точка
+        // Цены клона-роли (донорская цена копеечная — fuelTank1=2, storageTank=30;
+        // плейтест 2026-11-11 «Конвертер… цена 2»).
+        public float fabBuildCost = 400f;
+        public float msBuildCost = 150f;
 
         // Энергия (DESIGN §2.2): сток с капом, доход и капу дают генераторы.
         // Старт/кап — интерим «командирского вливания» SupCom (ACU ~10/с и большой запас

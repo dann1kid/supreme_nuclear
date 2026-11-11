@@ -577,6 +577,12 @@ namespace SupremeNuclear
                 _hydroDefinition.value = Mathf.Max(1f, _profile.hydroBuildCost);
             if (_generatorDefinition != null)
                 _generatorDefinition.value = Mathf.Max(1f, _profile.generatorBuildCost);
+            // SC-глубина (v0.175.1): конвертер/хранилище — цены профиля (раньше
+            // унаследовали копеечные цены доноров — «Конвертер… цена 2», плейтест).
+            if (BuildingPool.Of("fab") is BuildingDefinition fab)
+                fab.value = Mathf.Max(1f, _profile.fabBuildCost);
+            if (BuildingPool.Of("ms") is BuildingDefinition ms)
+                ms.value = Mathf.Max(1f, _profile.msBuildCost);
             Log.Info("Economy: роли из пула — MES ← " + DonorOf(_extractorDefinition) +
                      ", HYD ← " + DonorOf(_hydroDefinition) +
                      ", GEN ← " + DonorOf(_generatorDefinition));
