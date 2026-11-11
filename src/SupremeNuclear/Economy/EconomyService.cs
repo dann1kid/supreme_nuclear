@@ -67,6 +67,15 @@ namespace SupremeNuclear
         private static readonly List<Extractor> Extractors = new List<Extractor>();
         private static readonly List<GeneratorRec> Generators = new List<GeneratorRec>();
         private static readonly List<DepositSite> Sites = new List<DepositSite>();
+        // SC-глубина экономики (DESIGN §2.17): конвертеры энергия→масса и
+        // хранилища-обстройка (буст дохода ближайшей точки).
+        private static readonly List<Unit> Converters = new List<Unit>();
+        private static readonly List<Unit> MassStores = new List<Unit>();
+        /// <summary>Назначение хранилище → экстрактор (1:1, ближайший в радиусе):
+        /// пересчитывается с троттлом, читается доходом и панелью.</summary>
+        private static readonly Dictionary<Unit, Unit> StoragePairs =
+            new Dictionary<Unit, Unit>();
+        private static float _nextStoreAssign;
         private static readonly Dictionary<FactionHQ, HqStats> Stats = new Dictionary<FactionHQ, HqStats>();
         private static EconomyProfile _profile;
         private static float _retryAt;
@@ -303,18 +312,107 @@ namespace SupremeNuclear
             ? Mathf.Max(0f, _profile.energyCostFactor)
             : 0f;
 
-        /// <summary>Суммарный поток массы своих живых экстракторов + базовый инкам
-        /// фракции (SC-канон «командирского» потока, DESIGN §2.17 — мёртвого старта
-        /// нет), в секунду.</summary>
+        /// <summary>Суммарный поток массы своих живых экстракторов (с бустом
+        /// хранилищ-обстройки) + базовый инкам фракции (SC-канон «командирского»
+        /// потока, DESIGN §2.17 — мёртвого старта нет), в секунду.</summary>
         public static float MassIncomePerSecond(FactionHQ hq)
         {
             float sum = 0f;
             foreach (Extractor e in Extractors)
                 if (e.unit != null && !e.unit.disabled && e.unit.NetworkHQ == hq)
-                    sum += _profile != null ? _profile.Rate(e.tier) : 0f;
+                    sum += _profile != null
+                        ? _profile.Rate(e.tier) * StorageBoostFactor(e.unit) : 0f;
             if (_profile != null)
                 sum += _profile.baseIncome;
             return sum;
+        }
+
+        /// <summary>Регистрация построенного КОНВЕРТЕРА массы (роль fab, v0.175).</summary>
+        public static void RegisterConverter(Unit unit)
+        {
+            if (unit != null && !Converters.Contains(unit))
+                Converters.Add(unit);
+        }
+
+        /// <summary>Регистрация построенного ХРАНИЛИЩА массы (роль ms, v0.175):
+        /// бустит доход ближайшего своего экстрактора в радиусе.</summary>
+        public static void RegisterMassStore(Unit unit)
+        {
+            if (unit != null && !MassStores.Contains(unit))
+            {
+                MassStores.Add(unit);
+                _nextStoreAssign = 0f; // переприёмка пар немедленно
+            }
+        }
+
+        /// <summary>Переприёмка пар «хранилище → экстрактор» (троттл 0.5 с):
+        /// каждому живому хранилищу — ближайший живой экстрактор ТОЙ ЖЕ фракции
+        /// в радиусе, ещё не занятый другим хранилищем (буст не стакается).</summary>
+        private static void AssignStores()
+        {
+            if (Time.unscaledTime < _nextStoreAssign)
+                return;
+            _nextStoreAssign = Time.unscaledTime + 0.5f;
+            StoragePairs.Clear();
+            if (MassStores.Count == 0 || _profile == null)
+                return;
+            float rSq = _profile.storageRadiusM * _profile.storageRadiusM;
+            foreach (Unit store in MassStores)
+            {
+                if (store == null || store.disabled || store.NetworkHQ == null)
+                    continue;
+                Unit best = null;
+                float bestSq = rSq;
+                foreach (Extractor e in Extractors)
+                {
+                    if (e.unit == null || e.unit.disabled || e.unit.NetworkHQ != store.NetworkHQ ||
+                        StoragePairs.ContainsValue(e.unit))
+                        continue;
+                    float sq = (e.unit.transform.position - store.transform.position).sqrMagnitude;
+                    if (sq <= bestSq)
+                    {
+                        bestSq = sq;
+                        best = e.unit;
+                    }
+                }
+                if (best != null)
+                    StoragePairs[store] = best;
+            }
+        }
+
+        /// <summary>Буст дохода экстрактора обстройкой (1 если пары нет).</summary>
+        private static float StorageBoostFactor(Unit extractor)
+        {
+            AssignStores();
+            if (_profile == null || StoragePairs.Count == 0)
+                return 1f;
+            foreach (KeyValuePair<Unit, Unit> kv in StoragePairs)
+                if (kv.Value == extractor)
+                    return 1f + _profile.storageBoost;
+            return 1f;
+        }
+
+        /// <summary>Конвертеры (host, PayIncome): жрут поток энергии из стока,
+        /// выдают массу курсом <1 (SC-канон massfab, DESIGN §2.17). Энергии нет —
+        /// стоят; энергосистема выключена — не работают вовсе.</summary>
+        private static void PayConverters(float dt)
+        {
+            if (!EnergyActive || Converters.Count == 0 || _profile == null)
+                return;
+            foreach (Unit unit in Converters)
+            {
+                if (unit == null || unit.disabled)
+                    continue;
+                FactionHQ hq = unit.NetworkHQ;
+                if (hq == null || !Stats.TryGetValue(hq, out HqStats s))
+                    continue;
+                Touch(hq);
+                float take = Mathf.Min(_profile.fabEnergyRate * dt, s.energy);
+                if (take <= 0f)
+                    continue;
+                s.energy -= take;
+                hq.AddFunds(take * (_profile.fabMassRate / _profile.fabEnergyRate));
+            }
         }
 
         // ---------- Энергия ----------
@@ -391,6 +489,9 @@ namespace SupremeNuclear
             EnergyActive = false;
             Extractors.Clear();
             Generators.Clear();
+            Converters.Clear();
+            MassStores.Clear();
+            StoragePairs.Clear();
             Sites.Clear();
             Stats.Clear();
             _profile = null;
@@ -720,6 +821,15 @@ namespace SupremeNuclear
             for (int i = Generators.Count - 1; i >= 0; i--)
                 if (Generators[i].unit == null)
                     Generators.RemoveAt(i);
+            for (int i = Converters.Count - 1; i >= 0; i--)
+                if (Converters[i] == null)
+                    Converters.RemoveAt(i);
+            for (int i = MassStores.Count - 1; i >= 0; i--)
+                if (MassStores[i] == null)
+                {
+                    StoragePairs.Remove(MassStores[i]);
+                    MassStores.RemoveAt(i);
+                }
             for (int i = Sites.Count - 1; i >= 0; i--)
             {
                 // Занятая точка живёт в реестре (занятость — факт), свободная —
@@ -737,9 +847,11 @@ namespace SupremeNuclear
                     Stats.Remove(hq);
         }
 
-        /// <summary>Потоки дохода: масса — каждому владельцу экстракторов, энергия — в сток.</summary>
+        /// <summary>Потоки дохода: масса — каждому владельцу экстракторов (с бустом
+        /// хранилищ-обстройки), конвертеры энергия→масса, энергия — в сток.</summary>
         private static void PayIncome(float dt)
         {
+            AssignStores(); // свежие пары хранилищ до выплаты/панели
             foreach (Extractor e in Extractors)
             {
                 if (e.unit == null || e.unit.disabled)
@@ -748,8 +860,9 @@ namespace SupremeNuclear
                 if (hq == null)
                     continue; // нейтральный — не добывается
                 Touch(hq);
-                hq.AddFunds(_profile.Rate(e.tier) * dt);
+                hq.AddFunds(_profile.Rate(e.tier) * StorageBoostFactor(e.unit) * dt);
             }
+            PayConverters(dt);
 
             if (EnergyActive)
             {

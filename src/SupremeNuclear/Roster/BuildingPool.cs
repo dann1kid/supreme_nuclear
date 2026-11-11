@@ -157,6 +157,12 @@ namespace SupremeNuclear
             new PoolSpec { role = "mes", donor = "gabionBunker1", name = "Экстрактор массы", code = "MES" },
             new PoolSpec { role = "hyd", donor = "ammoDump", name = "Гидрокарбонная станция", code = "HYD" },
             new PoolSpec { role = "gen", donor = "fuelTank1", name = "Генератор энергии", code = "GEN" },
+            // SC-глубина экономики (v0.175, DESIGN §2.17): конвертер энергия→масса
+            // (курс <1) и хранилище-обстройка (+% дохода ближайшей своей точки).
+            // Доноры — МЕЛКИЕ (канон 2026-11-04; fuelTank1 переиспользуется —
+            // прецедент gabionBunker1): резервуар = «переработка» визуально.
+            new PoolSpec { role = "fab", donor = "fuelTank1", name = "Конвертер массы", code = "FAB" },
+            new PoolSpec { role = "ms", donor = "storageTank", name = "Хранилище массы", code = "MS" },
             // Фабрики (T1: рост тира — апгрейд на месте, §2.3а); имена — SupCom
             // (Land/Air Factory): по имени виден ВЫПУСК (техника/авиация/вертолёты).
             new PoolSpec { role = "depot", donor = "VehicleDepot1", name = "Наземная фабрика", code = "LAND", factory = true },
@@ -186,6 +192,28 @@ namespace SupremeNuclear
                         File.ReadAllText(path));
                     if (file?.entries != null && file.entries.Count > 0)
                     {
+                        // Merge-back (как у UnitRoster): новые роли дефолта дописываются
+                        // в файл юзера — обновление мода не теряет канонные роли
+                        // (правки юзера неприкосновенны, дописывается только недостающее).
+                        var have = new HashSet<string>();
+                        foreach (PoolSpec e in file.entries)
+                            if (!string.IsNullOrEmpty(e.role))
+                                have.Add(e.role);
+                        var added = new List<PoolSpec>();
+                        foreach (PoolSpec d in Defaults())
+                            if (!string.IsNullOrEmpty(d.role) && !have.Contains(d.role))
+                                added.Add(d);
+                        if (added.Count > 0)
+                        {
+                            file.entries.AddRange(added);
+                            File.WriteAllText(path, JsonConvert.SerializeObject(file,
+                                Formatting.Indented,
+                                new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore }));
+                            string names = "";
+                            foreach (PoolSpec a in added)
+                                names += (names.Length > 0 ? "," : "") + a.role;
+                            Log.Info("BuildingPool: merge-back новых ролей — " + names);
+                        }
                         _specs.AddRange(file.entries);
                         return;
                     }

@@ -396,6 +396,13 @@ namespace SupremeNuclear
             if (t.Definition == EconomyService.HydroDefinition ||
                 t.Definition == EconomyService.GeneratorDefinition)
                 EconomyService.RegisterGenerator(unit, t.Definition == EconomyService.HydroDefinition);
+            // SC-глубина экономики (v0.175, DESIGN §2.17): конвертер и хранилище
+            // массы — в реестры потока/буста по роли пула.
+            var poolSpec = BuildingPool.SpecOf(t.Definition);
+            if (poolSpec != null && poolSpec.role == "fab")
+                EconomyService.RegisterConverter(unit);
+            else if (poolSpec != null && poolSpec.role == "ms")
+                EconomyService.RegisterMassStore(unit);
             // Экстрактор — в реестр дохода с тиrom ТОЧКИ; точка занимается
             // (маркер-«недра» скрывается у всех).
             if (t.Definition == EconomyService.ExtractorDefinition)
@@ -406,8 +413,7 @@ namespace SupremeNuclear
             }
             else if (t.CoalDeposit != null)
                 EconomyService.TakeSite(t.CoalDeposit);
-            FactoryTierService.SpawnedAs(unit,
-                BuildingPool.SpecOf(t.Definition)?.tier ?? 1);
+            FactoryTierService.SpawnedAs(unit, poolSpec?.tier ?? 1);
             CommanderHud.Notice(Loc.F("Построено: {0}", t.Definition.unitName));
             Log.Info($"Build: готово {t.Definition.unitName} на ({local.x:F0},{local.z:F0}) за {t.PaidMass:F0}");
             return unit;

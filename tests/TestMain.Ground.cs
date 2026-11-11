@@ -189,13 +189,14 @@ namespace SupremeNuclear.Tests
                 bool unique = true, tiersOk = true, economy = false, heliOnce = false;
                 foreach (PoolSpec s in specs)
                 {
-                    // Роли уникальны ВСЕ; доноры — вне обороны (мелкие доноры
-                    // кончились: мекс делит gabionBunker1 с обороной — визуально
-                    // два маленьких бокса с разными именами/иконками, 2026-11-04)
+                    // Роли уникальны ВСЕ; доноры — вне обороны и эконом-клонов
+                    // (мелкие доноры кончились: мекс делит gabionBunker1 с обороной —
+                    // 2026-11-04; конвертер делит fuelTank1 с генератором — резервуар
+                    // = «переработка», 2026-11-11; визуально различаются именами/иконками)
                     bool donorUnique = donors.Add(s.donor);
                     if (string.IsNullOrEmpty(s.role) || string.IsNullOrEmpty(s.donor) ||
                         !roles.Add(s.role) ||
-                        !donorUnique && !defenseRoles.Contains(s.role))
+                        !donorUnique && !defenseRoles.Contains(s.role) && s.role != "fab")
                         unique = false;
                     if (s.tier < 1 || s.tier > 3)
                         tiersOk = false;
