@@ -101,6 +101,21 @@ namespace SupremeNuclear
             float k = Screen.height / 1440f;
             Color c = new Color(0.4f, 0.9f, 1f, 0.95f);
 
+            // Превью ЛИНИИ постановки (Ctrl+drag, v0.171): кресты в точках копий.
+            if (BuildTasks.PendingLine && BuildTasks.LinePreview.Count > 0)
+            {
+                Color lc = new Color(0.5f, 1f, 0.6f, 0.9f);
+                foreach (Vector3 p in BuildTasks.LinePreview)
+                {
+                    Vector3 g = p;
+                    g.y = GameApi.GroundY(g.x, g.z);
+                    Vector3 sp = cam.WorldToScreenPoint(g + Vector3.up * 6f);
+                    if (sp.z <= 0f)
+                        continue;
+                    DrawCross(new Vector2(sp.x, Screen.height - sp.y), 7f * k, lc);
+                }
+            }
+
             // Маркеры очередей только СВОИХ площадок: AI строит через тот же
             // BuildTasks, чужие рамки/прогресс игроку не видны (v0.143.8).
             foreach (BuildTasks.Task t in BuildTasks.All)

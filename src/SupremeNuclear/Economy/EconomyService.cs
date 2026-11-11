@@ -303,13 +303,17 @@ namespace SupremeNuclear
             ? Mathf.Max(0f, _profile.energyCostFactor)
             : 0f;
 
-        /// <summary>Суммарный поток массы своих живых экстракторов (в секунду).</summary>
+        /// <summary>Суммарный поток массы своих живых экстракторов + базовый инкам
+        /// фракции (SC-канон «командирского» потока, DESIGN §2.17 — мёртвого старта
+        /// нет), в секунду.</summary>
         public static float MassIncomePerSecond(FactionHQ hq)
         {
             float sum = 0f;
             foreach (Extractor e in Extractors)
                 if (e.unit != null && !e.unit.disabled && e.unit.NetworkHQ == hq)
                     sum += _profile != null ? _profile.Rate(e.tier) : 0f;
+            if (_profile != null)
+                sum += _profile.baseIncome;
             return sum;
         }
 

@@ -194,45 +194,69 @@ namespace SupremeNuclear
                 {
                     BuildTasks.Pending = null;
                     BuildTasks.PlacingActive = false;
+                    BuildTasks.PendingLine = false;
                 }
                 else if (RtsInput.RightDown && !RtsInput.PointerOverUi)
                 {
                     BuildTasks.Pending = null;
                     BuildTasks.PlacingActive = false;
+                    BuildTasks.PendingLine = false;
                     BuildTasks.MarkRmbEaten();
                     CommanderHud.Notice(Loc.Tr("Установка отменена"));
                 }
                 else if (RtsInput.LeftDown && !RtsInput.PointerOverUi && !RouteEditor.Consumed)
                 {
-                    // Клик фиксирует площадку; пока ЛКМ удерживается — поворот выходом
+                    // Ctrl+ЛКМ — ЖЕСТ ЛИНИИ (v0.171, DESIGN §2.17): старт фиксируется,
+                    // тянем конец, отпускание ставит N копий вдоль линии (стенки/пачка
+                    // заводов одним приказом, распределение по инженерам).
+                    // Клик без Ctrl фиксирует площадку; удержание — поворот выходом
                     // к курсору, отпускание ставит. Дефолт ангару — выходом к аэродрому.
                     if (GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 site))
                     {
                         BuildTasks.PlacingActive = true;
-                        BuildTasks.PlacingSite = site.ToGlobalPosition();
-                        BuildTasks.PendingYawDeg = 0f;
-                        if (BuildTasks.IsHangarDefinition(BuildTasks.Pending))
+                        if (RtsInput.Ctrl)
                         {
-                            GameApi.TryGetLocalHQ(out FactionHQ abHq);
-                            Airbase ab = BuildTasks.NearestOwnAirbase(
-                                site, abHq, Settings.HangarAttachRadiusM);
-                            if (ab != null && ab.center != null)
-                                BuildTasks.PendingYawDeg = YawBetween(site, ab.center.position);
+                            BuildTasks.PendingLine = true;
+                            BuildTasks.LineStart = site.ToGlobalPosition();
+                            BuildTasks.LineEnd = BuildTasks.LineStart;
+                        }
+                        else
+                        {
+                            BuildTasks.PlacingSite = site.ToGlobalPosition();
+                            BuildTasks.PendingYawDeg = 0f;
+                            if (BuildTasks.IsHangarDefinition(BuildTasks.Pending))
+                            {
+                                GameApi.TryGetLocalHQ(out FactionHQ abHq);
+                                Airbase ab = BuildTasks.NearestOwnAirbase(
+                                    site, abHq, Settings.HangarAttachRadiusM);
+                                if (ab != null && ab.center != null)
+                                    BuildTasks.PendingYawDeg = YawBetween(site, ab.center.position);
+                            }
                         }
                     }
                     BuildTasks.MarkConsumed();
                 }
                 else if (BuildTasks.PlacingActive && RtsInput.LeftHeld)
                 {
-                    // Держим ЛКМ: крутим выход к курсору (порог 2 м — дрожь у якоря).
                     if (!RtsInput.PointerOverUi &&
                         GameApi.TryGetGroundPoint(GameApi.ScreenRay(RtsInput.MousePos), out Vector3 g))
                     {
-                        Vector3 anchor = BuildTasks.PlacingSite.ToLocalPosition();
-                        Vector2 delta = new Vector2(g.x - anchor.x, g.z - anchor.z);
-                        if (delta.sqrMagnitude > 4f)
-                            BuildTasks.PendingYawDeg =
-                                Mathf.Atan2(delta.x, delta.y) * Mathf.Rad2Deg;
+                        if (BuildTasks.PendingLine)
+                        {
+                            // Линия: конец тянется курсором, превью обновляется на Update.
+                            BuildTasks.LineEnd = g.ToGlobalPosition();
+                            BuildTasks.FillLinePreview(
+                                BuildTasks.Pending, BuildTasks.LineStart, BuildTasks.LineEnd);
+                        }
+                        else
+                        {
+                            // Держим ЛКМ: крутим выход к курсору (порог 2 м — дрожь у якоря).
+                            Vector3 anchor = BuildTasks.PlacingSite.ToLocalPosition();
+                            Vector2 delta = new Vector2(g.x - anchor.x, g.z - anchor.z);
+                            if (delta.sqrMagnitude > 4f)
+                                BuildTasks.PendingYawDeg =
+                                    Mathf.Atan2(delta.x, delta.y) * Mathf.Rad2Deg;
+                        }
                     }
                     // Весь жест — выделение-neutral: рамка не стартует на движении мыши.
                     BuildTasks.MarkConsumed();
@@ -240,20 +264,36 @@ namespace SupremeNuclear
                 else if (BuildTasks.PlacingActive && RtsInput.LeftUp)
                 {
                     BuildTasks.PlacingActive = false;
-                    Vector3 site = BuildTasks.PlacingSite.ToLocalPosition();
                     GameApi.TryGetLocalHQ(out FactionHQ hq);
-                    // Без Shift — НОВАЯ очередь: прежние очереди выделенных инженеров
-                    // ломаются (как обычный приказ). Площадку строят ВСЕ выделенные —
-                    // пачкой (SupCom: группа едет вместе, серию строит по очереди).
-                    // Shift — дописать в существующие очереди (серия).
-                    if (!RtsInput.Shift)
-                        foreach (Unit unit in Selection.Selected)
-                            if (GameApi.IsEngineer(unit))
-                                BuildTasks.ClearFor(unit);
-                    BuildTasks.TryPlace(site, Selection.Selected, hq, BuildTasks.PendingYawDeg);
-                    if (!RtsInput.Shift)
-                        BuildTasks.Pending = null;
-                    BuildTasks.MarkConsumed();
+                    if (BuildTasks.PendingLine)
+                    {
+                        // Отпускание линии: N копий вдоль отрезка, round-robin по
+                        // инженерам. Без Shift — режим гасится (серия линий — с Shift).
+                        BuildTasks.PendingLine = false;
+                        int placed = BuildTasks.PlaceLine(
+                            BuildTasks.LineStart, BuildTasks.LineEnd, Selection.Selected, hq);
+                        CommanderHud.Notice(Loc.F("Линия: {0} {1}", placed,
+                            Loc.Plural(placed, "штука", "штуки", "штук")));
+                        if (!RtsInput.Shift)
+                            BuildTasks.Pending = null;
+                        BuildTasks.MarkConsumed();
+                    }
+                    else
+                    {
+                        Vector3 site = BuildTasks.PlacingSite.ToLocalPosition();
+                        // Без Shift — НОВАЯ очередь: прежние очереди выделенных инженеров
+                        // ломаются (как обычный приказ). Площадку строят ВСЕ выделенные —
+                        // пачкой (SupCom: группа едет вместе, серию строит по очереди).
+                        // Shift — дописать в существующие очереди (серия).
+                        if (!RtsInput.Shift)
+                            foreach (Unit unit in Selection.Selected)
+                                if (GameApi.IsEngineer(unit))
+                                    BuildTasks.ClearFor(unit);
+                        BuildTasks.TryPlace(site, Selection.Selected, hq, BuildTasks.PendingYawDeg);
+                        if (!RtsInput.Shift)
+                            BuildTasks.Pending = null;
+                        BuildTasks.MarkConsumed();
+                    }
                 }
             }
 

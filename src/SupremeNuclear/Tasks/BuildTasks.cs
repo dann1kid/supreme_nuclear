@@ -116,6 +116,16 @@ namespace SupremeNuclear
         public static float PendingYawDeg;
         public static GlobalPosition PlacingRunwayEnd;
 
+        // ЛИНИЯ ПОСТРОЕК (v0.171, DESIGN §2.17): Ctrl+ЛКМ при Pending — жест линии:
+        // старт фиксируется нажатием, конец тянется курсором, отпускание ставит
+        // N копий вдоль линии (стенки/пачка заводов одним приказом). Сброс — Reset.
+        public static bool PendingLine;
+        public static GlobalPosition LineStart;
+        public static GlobalPosition LineEnd;
+        /// <summary>Точки превью линии (шаг = шаг копий): заполняет контроллер,
+        /// рисует HUD; без аллокаций на OnGUI.</summary>
+        public static readonly List<Vector3> LinePreview = new List<Vector3>();
+
         /// <summary>Выделенный НЕДОСТРОЙ (клик-без-движения по площадке): контекстные
         /// панели показывают его как объект (SupCom-семантика).</summary>
         public static Task SelectedTask;
@@ -151,6 +161,8 @@ namespace SupremeNuclear
             PendingDock = false;
             PlacingActive = false;
             PendingYawDeg = 0f;
+            PendingLine = false;
+            LinePreview.Clear();
             MainlineNodes.Clear();
             Docks.Clear();
             _dockDefResolved = false;

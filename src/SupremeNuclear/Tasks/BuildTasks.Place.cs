@@ -319,5 +319,72 @@ namespace SupremeNuclear
             }
             return true;
         }
+
+        // ---------- ЛИНИЯ ПОСТРОЕК (v0.171, DESIGN §2.17): Ctrl+drag при Pending ----------
+        // Стенки/пачка заводов одним жестом: N копий вдоль линии, yaw — вдоль линии,
+        // распределение round-robin по выделенным инженерам (у каждого своя очередь).
+
+        /// <summary>Шаг копий линии: диагональ футпринта здания ×1.15 (как в
+        /// FootprintHalfM — width/length определения), минимум 20 м.</summary>
+        public static float LineSpacing(BuildingDefinition def)
+        {
+            float d = 30f;
+            if (def != null && def.width > 0f && def.length > 0f)
+                d = Mathf.Sqrt(def.width * def.width + def.length * def.length) * 1.15f;
+            return Mathf.Max(d, 20f);
+        }
+
+        /// <summary>Заполнить превью линии точками шага копий (вызывает контроллер
+        /// из Update при Ctrl+drag; HUD рисует без аллокаций).</summary>
+        public static void FillLinePreview(BuildingDefinition def, GlobalPosition start, GlobalPosition end)
+        {
+            LinePreview.Clear();
+            Vector3 a = start.ToLocalPosition();
+            Vector3 b = end.ToLocalPosition();
+            float dist = new Vector2(b.x - a.x, b.z - a.z).magnitude;
+            float spacing = LineSpacing(def);
+            int n = Mathf.Clamp((int)(dist / spacing) + 1, 1, 12);
+            for (int k = 0; k < n; k++)
+            {
+                float t = n == 1 ? 0f : k / (float)(n - 1);
+                LinePreview.Add(Vector3.Lerp(a, b, t));
+            }
+        }
+
+        /// <summary>Линия копий вдоль отрезка: N = длина/шаг (кламп 1..12), yaw —
+        /// вдоль линии, площадка k назначается инженеру k mod M (round-robin —
+        /// «пачка заводов на несколько инженеров одним приказом»). Неудачные точки
+        /// (уклон/вода/чужая зона) пропускаются — TryPlace сам отзовёт false.
+        /// Возвращает число поставленных.</summary>
+        public static int PlaceLine(GlobalPosition start, GlobalPosition end,
+            List<Unit> selected, FactionHQ hq)
+        {
+            var engs = new List<Unit>();
+            foreach (Unit unit in selected)
+                if (GameApi.IsEngineer(unit))
+                    engs.Add(unit);
+            if (engs.Count == 0)
+                return 0;
+            Vector3 a = start.ToLocalPosition();
+            Vector3 b = end.ToLocalPosition();
+            Vector2 delta = new Vector2(b.x - a.x, b.z - a.z);
+            float spacing = LineSpacing(Pending);
+            int n = Mathf.Clamp((int)(delta.magnitude / spacing) + 1, 1, 12);
+            float yaw = delta.sqrMagnitude > 4f
+                ? Mathf.Atan2(delta.x, delta.y) * Mathf.Rad2Deg
+                : PendingYawDeg;
+            int placed = 0;
+            var one = new List<Unit>();
+            for (int k = 0; k < n; k++)
+            {
+                float t = n == 1 ? 0f : k / (float)(n - 1);
+                Vector3 p = Vector3.Lerp(a, b, t);
+                one.Clear();
+                one.Add(engs[k % engs.Count]);
+                if (TryPlace(p, one, hq, yaw))
+                    placed++;
+            }
+            return placed;
+        }
     }
 }
